@@ -23,10 +23,14 @@
 #include <mlayer/convolution1d.hpp>
 #include <mlayer/convolution3d.hpp>
 #include <mlayer/convolutiondepthwise.hpp>
+#include <mlayer/convolutiondepthwise1d.hpp>
+#include <mlayer/convolutiondepthwise3d.hpp>
 #include <mlayer/copyto.hpp>
 #include <mlayer/crop.hpp>
 #include <mlayer/cumulativesum.hpp>
 #include <mlayer/deconvolution.hpp>
+#include <mlayer/deconvolution1d.hpp>
+#include <mlayer/deconvolution3d.hpp>
 #include <mlayer/deepcopy.hpp>
 #include <mlayer/detectionoutput.hpp>
 #include <mlayer/diag.hpp>
@@ -177,6 +181,12 @@ void register_builtins() {
     add("Concat", &make_layer<mlayer::Concat<Layer, MatT, OptionT, ParamDictT>>);
     add("Split", &make_layer<mlayer::Split<Layer, MatT, OptionT>>);
     add("ConvolutionDepthWise", &make_layer<ConvDepthWiseT>);
+    add("ConvolutionDepthWise1D",
+        &make_layer<
+            mlayer::ConvolutionDepthWise1D<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, mnet::activation_ss>>);
+    add("ConvolutionDepthWise3D",
+        &make_layer<
+            mlayer::ConvolutionDepthWise3D<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, mnet::activation_ss>>);
     add("BatchNorm", &make_layer<mlayer::BatchNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("ShuffleChannel", &make_layer<mlayer::ShuffleChannel<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Slice", &make_layer<mlayer::Slice<Layer, MatT, OptionT, ParamDictT, false>>);
@@ -216,6 +226,14 @@ void register_builtins() {
     add("Normalize", &make_layer<mlayer::Normalize<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("Deconvolution", &make_layer<DeconvolutionT>);
     add("DeconvolutionDepthWise", &make_layer<DeconvolutionT>);
+    add("Deconvolution1D",
+        &make_layer<mlayer::Deconvolution1D<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, mnet::activation_ss>>);
+    add("DeconvolutionDepthWise1D",
+        &make_layer<mlayer::Deconvolution1D<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, mnet::activation_ss>>);
+    add("Deconvolution3D",
+        &make_layer<mlayer::Deconvolution3D<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, mnet::activation_ss>>);
+    add("DeconvolutionDepthWise3D",
+        &make_layer<mlayer::Deconvolution3D<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, mnet::activation_ss>>);
     add("Crop", &make_layer<mlayer::Crop<Layer, MatT, OptionT, ParamDictT, false>>);
     add("YoloDetectionOutput", &make_layer<mlayer::YoloDetectionOutput<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Yolov3DetectionOutput", &make_layer<mlayer::Yolov3DetectionOutput<Layer, MatT, OptionT, ParamDictT, false>>);
