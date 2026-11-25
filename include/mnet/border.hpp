@@ -20,30 +20,39 @@ inline void copy_make_border(const Mat& src, Mat& dst, std::int32_t top, std::in
         dst = src;
         return;
     }
-    if (src.elemsize != 4u) {
-        dst = src;
-        return;
-    }
-
     const std::int32_t w = src.w;
     const std::int32_t h = src.h;
     const std::int32_t c = src.c;
     const std::int32_t outw = w + left + right;
     const std::int32_t outh = h + top + bottom;
+    const std::size_t elemsize = src.elemsize;
 
     // dst may alias src through a shallow copy; release first so create()
     // cannot take its "same shape" fast path and reuse the shared buffer.
     dst.release();
-    dst.create(outw, outh, c, 4u, opt.workspace_allocator);
+    dst.create(outw, outh, c, elemsize, opt.workspace_allocator);
     if (dst.empty()) {
         return;
     }
-    dst.fill(v);
+
+    if (elemsize == 4u) {
+        dst.fill(v);
+    } else {
+        // int8 / fp16 blobs are always zero padded (ncnn semantics).
+        for (std::int32_t q = 0; q < c; ++q) {
+            std::memset(dst.channel(q), 0, dst.cstep * elemsize);
+        }
+    }
 
     for (std::int32_t q = 0; q < c; ++q) {
         for (std::int32_t y = 0; y < h; ++y) {
-            std::memcpy(dst.channel(q).row(y + top) + left, src.channel(q).row(y),
-                        static_cast<std::size_t>(w) * sizeof(float));
+            auto* drow =
+                static_cast<std::uint8_t*>(dst.channel(q)) +
+                (static_cast<std::size_t>(y + top) * static_cast<std::size_t>(outw) + static_cast<std::size_t>(left)) *
+                    elemsize;
+            const auto* srow = static_cast<const std::uint8_t*>(src.channel(q)) +
+                               static_cast<std::size_t>(y) * static_cast<std::size_t>(w) * elemsize;
+            std::memcpy(drow, srow, static_cast<std::size_t>(w) * elemsize);
         }
     }
 }
@@ -54,27 +63,29 @@ inline void copy_cut_border(const Mat& src, Mat& dst, std::int32_t top, std::int
         dst = src;
         return;
     }
-    if (src.elemsize != 4u) {
-        dst = src;
-        return;
-    }
-
     const std::int32_t w = src.w - left - right;
     const std::int32_t h = src.h - top - bottom;
     if (w <= 0 || h <= 0) {
         dst = Mat();
         return;
     }
+    const std::size_t elemsize = src.elemsize;
+    const std::int32_t srcw = src.w;
 
     dst.release();
-    dst.create(w, h, src.c, 4u, opt.blob_allocator);
+    dst.create(w, h, src.c, elemsize, opt.blob_allocator);
     if (dst.empty()) {
         return;
     }
     for (std::int32_t q = 0; q < src.c; ++q) {
         for (std::int32_t y = 0; y < h; ++y) {
-            std::memcpy(dst.channel(q).row(y), src.channel(q).row(y + top) + left,
-                        static_cast<std::size_t>(w) * sizeof(float));
+            auto* drow = static_cast<std::uint8_t*>(dst.channel(q)) +
+                         static_cast<std::size_t>(y) * static_cast<std::size_t>(w) * elemsize;
+            const auto* srow =
+                static_cast<const std::uint8_t*>(src.channel(q)) +
+                (static_cast<std::size_t>(y + top) * static_cast<std::size_t>(srcw) + static_cast<std::size_t>(left)) *
+                    elemsize;
+            std::memcpy(drow, srow, static_cast<std::size_t>(w) * elemsize);
         }
     }
 }

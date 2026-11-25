@@ -16,6 +16,8 @@ struct Option {
     mmemory::Allocator* blob_allocator = nullptr;
     mmemory::Allocator* workspace_allocator = nullptr;
 
+    // Release a blob once its last consumer has run (ncnn light mode).
+    bool use_light_mode = true;
     bool use_packing_layout = false;
     bool use_int8_inference = false;
     bool use_bf16_storage = false;

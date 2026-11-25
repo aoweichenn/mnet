@@ -35,6 +35,7 @@
 #include <mlayer/gateddeltarule.hpp>
 #include <mlayer/gelu.hpp>
 #include <mlayer/gemm.hpp>
+#include <mlayer/gridsample.hpp>
 #include <mlayer/groupnorm.hpp>
 #include <mlayer/hardsigmoid.hpp>
 #include <mlayer/hardswish.hpp>
@@ -49,6 +50,7 @@
 #include <mlayer/multiheadattention.hpp>
 #include <mlayer/noop.hpp>
 #include <mlayer/normalize.hpp>
+#include <mlayer/padding.hpp>
 #include <mlayer/permute.hpp>
 #include <mlayer/pixelshuffle.hpp>
 #include <mlayer/pooling.hpp>
@@ -62,6 +64,7 @@
 #include <mlayer/reorg.hpp>
 #include <mlayer/reshape.hpp>
 #include <mlayer/rmsnorm.hpp>
+#include <mlayer/roialign.hpp>
 #include <mlayer/roipooling.hpp>
 #include <mlayer/rotaryembed.hpp>
 #include <mlayer/scale.hpp>
@@ -78,6 +81,7 @@
 #include <mlayer/swish.hpp>
 #include <mlayer/tanh.hpp>
 #include <mlayer/threshold.hpp>
+#include <mlayer/tile.hpp>
 #include <mlayer/unaryop.hpp>
 #include <mlayer/yolodetectionoutput.hpp>
 #include <mlayer/yolov3detectionoutput.hpp>
@@ -94,13 +98,13 @@ using OptionT = mnet::Option;
 using ParamDictT = mformat::ParamDict;
 using ModelBinT = mformat::ModelBin;
 
-using ConvolutionT = mlayer::Convolution<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, false, mnet::activation_ss,
+using ConvolutionT = mlayer::Convolution<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, true, mnet::activation_ss,
                                          mnet::quantize_int8, mnet::copy_make_border>;
 using PoolingT = mlayer::Pooling<Layer, MatT, OptionT, ParamDictT, false, mnet::copy_make_border>;
-using InnerProductT = mlayer::InnerProduct<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, false,
+using InnerProductT = mlayer::InnerProduct<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, true,
                                            mnet::activation_ss, mnet::quantize_int8>;
 using ConvDepthWiseT =
-    mlayer::ConvolutionDepthWise<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, false, mnet::activation_ss,
+    mlayer::ConvolutionDepthWise<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, true, mnet::activation_ss,
                                  mnet::quantize_int8, mnet::copy_make_border, mnet::flatten>;
 using DeconvolutionT = mlayer::Deconvolution<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, mnet::activation_ss,
                                              mnet::copy_cut_border, mnet::flatten>;
@@ -175,10 +179,14 @@ void register_builtins() {
     add("YoloDetectionOutput", &make_layer<mlayer::YoloDetectionOutput<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Yolov3DetectionOutput", &make_layer<mlayer::Yolov3DetectionOutput<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Squeeze", &make_layer<mlayer::Squeeze<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Padding", &make_layer<mlayer::Padding<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("Tile", &make_layer<mlayer::Tile<Layer, MatT, OptionT, ParamDictT>>);
+    add("GridSample", &make_layer<mlayer::GridSample<Layer, MatT, OptionT, ParamDictT, false>>);
     add("ShortConv", &make_layer<mlayer::ShortConv<Layer, MatT, OptionT>>);
     add("GatedDeltaRule", &make_layer<mlayer::GatedDeltaRule<Layer, MatT, OptionT>>);
     add("Proposal", &make_layer<mlayer::Proposal<Layer, MatT, OptionT, ParamDictT, false>>);
     add("ROIPooling", &make_layer<mlayer::ROIPooling<Layer, MatT, OptionT, ParamDictT>>);
+    add("ROIAlign", &make_layer<mlayer::ROIAlign<Layer, MatT, OptionT, ParamDictT, false>>);
     add("PSROIPooling", &make_layer<mlayer::PSROIPooling<Layer, MatT, OptionT, ParamDictT, false>>);
     add("ELU", &make_layer<mlayer::ELU<Layer, MatT, OptionT, ParamDictT>>);
     add("Erf", &make_layer<mlayer::Erf<Layer, MatT, OptionT>>);

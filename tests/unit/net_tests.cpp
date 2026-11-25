@@ -176,3 +176,86 @@ TEST(Net, BinaryIndexTableCoversRegisteredLayers) {
     EXPECT_EQ(mnet::create_layer_by_index(1), nullptr);
     EXPECT_EQ(mnet::create_layer_by_index(9999), nullptr);
 }
+
+TEST(Net, LoadsFromMemoryLikeFiles) {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "mnet_net_tests";
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path param = write_param(dir);
+    const std::filesystem::path bin = write_empty_bin(dir);
+
+    std::ifstream param_file(param, std::ios::binary);
+    const std::string param_text((std::istreambuf_iterator<char>(param_file)), std::istreambuf_iterator<char>());
+    std::ifstream bin_file(bin, std::ios::binary);
+    const std::string bin_bytes((std::istreambuf_iterator<char>(bin_file)), std::istreambuf_iterator<char>());
+
+    mnet::Net file_net;
+    ASSERT_EQ(file_net.load(param.string().c_str(), bin.string().c_str()), 0);
+
+    mnet::Net mem_net;
+    ASSERT_EQ(mem_net.load_param_mem(param_text.c_str()), 0);
+    ASSERT_EQ(mem_net.load_model_mem(bin_bytes.data(), bin_bytes.size()), 0);
+    ASSERT_EQ(mem_net.input_names().size(), file_net.input_names().size());
+    ASSERT_EQ(mem_net.output_names(), file_net.output_names());
+
+    mnet::Mat data(4);
+    data[0] = -1.0F;
+    data[1] = 0.5F;
+    data[2] = -3.0F;
+    data[3] = 2.0F;
+
+    mnet::Net::Extractor ex_file = file_net.create_extractor();
+    ASSERT_EQ(ex_file.input("data", data), 0);
+    mnet::Mat out_file;
+    ASSERT_EQ(ex_file.extract("out", out_file), 0);
+
+    mnet::Net::Extractor ex_mem = mem_net.create_extractor();
+    ASSERT_EQ(ex_mem.input("data", data), 0);
+    mnet::Mat out_mem;
+    ASSERT_EQ(ex_mem.extract("out", out_mem), 0);
+
+    ASSERT_EQ(out_file.w, out_mem.w);
+    for (std::int32_t i = 0; i < out_file.w; ++i) {
+        EXPECT_FLOAT_EQ(out_file[static_cast<std::size_t>(i)], out_mem[static_cast<std::size_t>(i)]);
+    }
+}
+
+TEST(Net, ExtractorLightModeToggle) {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "mnet_net_tests";
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path param = dir / "relu2.param";
+    {
+        std::ofstream file(param);
+        file << "7767517\n";
+        file << "3 3\n";
+        file << "Input in0 0 1 data\n";
+        file << "ReLU relu 1 1 data mid\n";
+        file << "ReLU relu2 1 1 mid out\n";
+    }
+    const std::filesystem::path bin = write_empty_bin(dir);
+
+    mnet::Net net;
+    ASSERT_EQ(net.load(param.string().c_str(), bin.string().c_str()), 0);
+
+    mnet::Mat data(3);
+    data[0] = -1.0F;
+    data[1] = 2.0F;
+    data[2] = -3.0F;
+
+    float expected[3] = {0.0F, 2.0F, 0.0F};
+    for (std::int32_t pass = 0; pass < 2; ++pass) {
+        mnet::Net::Extractor ex = net.create_extractor();
+        ex.set_light_mode(pass == 0);
+        ex.set_num_threads(1);
+        ASSERT_EQ(ex.input("data", data), 0);
+        mnet::Mat mid;
+        ASSERT_EQ(ex.extract("mid", mid), 0);
+        for (std::int32_t i = 0; i < 3; ++i) {
+            EXPECT_FLOAT_EQ(mid[static_cast<std::size_t>(i)], expected[i]);
+        }
+        mnet::Mat out;
+        ASSERT_EQ(ex.extract("out", out), 0);
+        for (std::int32_t i = 0; i < 3; ++i) {
+            EXPECT_FLOAT_EQ(out[static_cast<std::size_t>(i)], expected[i]);
+        }
+    }
+}

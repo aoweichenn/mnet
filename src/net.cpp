@@ -69,7 +69,7 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
     std::int32_t invoke(const Layer* layer, std::vector<Mat>& blob_mats, const Option& opt) const override {
         const auto t0 = std::chrono::steady_clock::now();
         const std::int32_t result = this->invoke_impl(layer, blob_mats, opt);
-        if (result == 0) {
+        if (result == 0 && opt.use_light_mode) {
             const auto it = this->layer_index.find(layer);
             if (it != this->layer_index.end()) {
                 this->release_dead_bottoms(it->second, blob_mats);
@@ -317,24 +317,11 @@ Net::Net() : d(new NetPrivate()) {
 
 Net::~Net() = default;
 
-std::int32_t Net::load_param(const char* param_path) {
-    if (param_path == nullptr) {
+std::int32_t Net::load_param_bytes(const std::uint8_t* data, std::size_t size, bool binary) {
+    if (data == nullptr || size == 0) {
         return -1;
     }
-    std::ifstream file(param_path, std::ios::binary);
-    if (!file) {
-        return -1;
-    }
-    std::ostringstream stream;
-    stream << file.rdbuf();
-    const std::string text = stream.str();
-
-    std::vector<std::uint8_t> bytes(text.begin(), text.end());
-    const bool binary = bytes.size() >= sizeof(std::int32_t) && [&bytes]() {
-        std::int32_t magic = 0;
-        std::memcpy(&magic, bytes.data(), sizeof(magic));
-        return magic == 7767517;
-    }();
+    std::vector<std::uint8_t> bytes(data, data + size);
     if (!binary) {
         bytes.push_back(0);
     }
@@ -428,6 +415,46 @@ std::int32_t Net::load_param(const char* param_path) {
     return 0;
 }
 
+std::int32_t Net::load_param(const char* param_path) {
+    if (param_path == nullptr) {
+        return -1;
+    }
+    std::FILE* file = std::fopen(param_path, "rb");
+    if (file == nullptr) {
+        return -1;
+    }
+    std::vector<std::uint8_t> bytes;
+    std::uint8_t buffer[4096];
+    std::size_t nread = 0;
+    while ((nread = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        bytes.insert(bytes.end(), buffer, buffer + nread);
+    }
+    std::fclose(file);
+    if (bytes.empty()) {
+        return -1;
+    }
+    const bool binary = bytes.size() >= sizeof(std::int32_t) && [&bytes]() {
+        std::int32_t magic = 0;
+        std::memcpy(&magic, bytes.data(), sizeof(magic));
+        return magic == 7767517;
+    }();
+    return this->load_param_bytes(bytes.data(), bytes.size(), binary);
+}
+
+std::int32_t Net::load_param_mem(const char* mem) {
+    if (mem == nullptr) {
+        return -1;
+    }
+    return this->load_param_bytes(reinterpret_cast<const std::uint8_t*>(mem), std::strlen(mem), false);
+}
+
+std::int32_t Net::load_param_bin_mem(const void* data, std::size_t size) {
+    if (data == nullptr || size == 0) {
+        return -1;
+    }
+    return this->load_param_bytes(static_cast<const std::uint8_t*>(data), size, true);
+}
+
 std::vector<std::string> Net::input_names() const {
     std::vector<std::string> names;
     names.reserve(this->d->input_blobs.size());
@@ -448,6 +475,24 @@ std::vector<std::string> Net::output_names() const {
         }
     }
     return names;
+}
+
+std::int32_t Net::load_model_mem(const void* data, std::size_t size) {
+    if (data == nullptr || size == 0) {
+        return -1;
+    }
+    const auto* memory = static_cast<const std::uint8_t*>(data);
+    mformat::DataReaderFromMemory reader(memory, size);
+    mformat::ModelBinFromDataReader model_bin(reader);
+    for (std::size_t i = 0; i < this->d->layers.size(); ++i) {
+        const std::int32_t ret = this->d->layers[i]->load_model(model_bin);
+        if (ret != 0) {
+            const std::string& type = this->d->layer_types[i];
+            detail::write_diagnostic(std::string("mnet: layer load_model failed: ") + type + "\n");
+            return ret;
+        }
+    }
+    return 0;
 }
 
 std::int32_t Net::load_model(const char* bin_path) {
@@ -483,7 +528,7 @@ std::int32_t Net::load(const char* param_path, const char* bin_path) {
     return this->load_model(bin_path);
 }
 
-Net::Extractor::Extractor(const Net* net) : net_(net) {
+Net::Extractor::Extractor(const Net* net) : net_(net), opt_(net->opt_) {
     this->blob_mats_.resize(net_->d->blobs.size());
 }
 
@@ -508,9 +553,8 @@ std::int32_t Net::Extractor::extract(std::int32_t blob_index, Mat& out) {
         return -1;
     }
 
-    Option opt = this->net_->opt_;
     mgraph::Extractor<Layer, Mat, Option> extractor(this->net_->d->layers, this->net_->d->blobs, *this->net_->d,
-                                                    this->blob_mats_, opt);
+                                                    this->blob_mats_, this->opt_);
     const std::int32_t ret = extractor.ensure(blob_index);
     if (ret != 0) {
         return ret;
