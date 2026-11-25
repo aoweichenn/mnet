@@ -33,9 +33,11 @@ ex.extract("output", out);
 - `Extractor` 通过 `mgraph::Extractor` 懒执行 producer，再复制输出 blob。
 - 已注册层：`Input`、`ReLU`、`Sigmoid`、`TanH`、`Swish`、`Flatten`、`Dropout`、
   `Threshold`、`Power`、`GELU`、`Softmax`、`Bias`、`Scale`、`Convolution`、
-  `Pooling`、`InnerProduct`、`Concat`、`Split`。
-- `tests/unit/model_tests.cpp` 已端到端跑通 `squeezenet_v1.1`（227x227x3 →
-  1000 类 softmax，输出概率和校验通过）。
+  `Pooling`、`InnerProduct`、`Concat`、`Split`、`ConvolutionDepthWise`、
+  `BatchNorm`、`ShuffleChannel`、`Slice`、`RMSNorm`。
+- `tests/unit/model_tests.cpp` 已端到端跑通：
+  - `squeezenet_v1.1`（227x227x3 → 1000 类 softmax，概率和校验）
+  - `shufflenet_v2_x0.5`（224x224x3 → 1000 维输出，覆盖 ConvDW/BN/Slice/ShuffleChannel）
 
 尚未完成：
 

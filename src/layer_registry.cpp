@@ -9,9 +9,11 @@
 #include <vector>
 
 #include <mformat/model_bin.hpp>
+#include <mlayer/batchnorm.hpp>
 #include <mlayer/bias.hpp>
 #include <mlayer/concat.hpp>
 #include <mlayer/convolution.hpp>
+#include <mlayer/convolutiondepthwise.hpp>
 #include <mlayer/dropout.hpp>
 #include <mlayer/flatten.hpp>
 #include <mlayer/gelu.hpp>
@@ -19,8 +21,11 @@
 #include <mlayer/pooling.hpp>
 #include <mlayer/power.hpp>
 #include <mlayer/relu.hpp>
+#include <mlayer/rmsnorm.hpp>
 #include <mlayer/scale.hpp>
+#include <mlayer/shufflechannel.hpp>
 #include <mlayer/sigmoid.hpp>
+#include <mlayer/slice.hpp>
 #include <mlayer/softmax.hpp>
 #include <mlayer/split.hpp>
 #include <mlayer/swish.hpp>
@@ -43,6 +48,9 @@ using ConvolutionT = mlayer::Convolution<Layer, MatT, OptionT, ParamDictT, Model
 using PoolingT = mlayer::Pooling<Layer, MatT, OptionT, ParamDictT, false, mnet::copy_make_border>;
 using InnerProductT = mlayer::InnerProduct<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, false,
                                            mnet::activation_ss, mnet::quantize_int8>;
+using ConvDepthWiseT =
+    mlayer::ConvolutionDepthWise<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, false, mnet::activation_ss,
+                                 mnet::quantize_int8, mnet::copy_make_border, mnet::flatten>;
 
 class InputLayer final : public Layer {
 public:
@@ -91,6 +99,11 @@ void register_builtins() {
     add("InnerProduct", &make_layer<InnerProductT>);
     add("Concat", &make_layer<mlayer::Concat<Layer, MatT, OptionT, ParamDictT>>);
     add("Split", &make_layer<mlayer::Split<Layer, MatT, OptionT>>);
+    add("ConvolutionDepthWise", &make_layer<ConvDepthWiseT>);
+    add("BatchNorm", &make_layer<mlayer::BatchNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("ShuffleChannel", &make_layer<mlayer::ShuffleChannel<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Slice", &make_layer<mlayer::Slice<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("RMSNorm", &make_layer<mlayer::RMSNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
 }
 
 }  // namespace
