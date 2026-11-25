@@ -64,6 +64,7 @@ static std::int64_t read_vmhwm_kb() {
 int main(int argc, char** argv) {
     bool allow_empty = false;
     std::string dump_out;
+    std::string extract_name;
     // --input NAME FILE WxHxC, repeatable: feed real data instead of the sine fill.
     struct InputOverride {
         std::string name;
@@ -77,6 +78,8 @@ int main(int argc, char** argv) {
             allow_empty = true;
         } else if (std::strcmp(argv[i], "--dump-out") == 0 && i + 1 < argc) {
             dump_out = argv[++i];
+        } else if (std::strcmp(argv[i], "--extract") == 0 && i + 1 < argc) {
+            extract_name = argv[++i];
         } else if (std::strcmp(argv[i], "--input") == 0 && i + 3 < argc) {
             InputOverride ovr;
             ovr.name = argv[i + 1];
@@ -191,7 +194,11 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        for (const std::string& name : outputs) {
+        std::vector<std::string> outputs_wanted = outputs;
+        if (!extract_name.empty()) {
+            outputs_wanted = {extract_name};
+        }
+        for (const std::string& name : outputs_wanted) {
             mnet::Mat out;
             const std::int32_t ret = ex.extract(name.c_str(), out);
             if (ret == -100 && allow_empty) {
