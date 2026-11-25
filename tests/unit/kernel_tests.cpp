@@ -8,6 +8,12 @@
 #include <mformat/model_bin.hpp>
 #include <mformat/param_dict.hpp>
 #include <mlayer/convolution.hpp>
+#include <mlayer/crop.hpp>
+#include <mlayer/einsum.hpp>
+#include <mlayer/expanddims.hpp>
+#include <mlayer/reduction.hpp>
+#include <mlayer/squeeze.hpp>
+#include <mlayer/unaryop.hpp>
 #include <mnet/activation.hpp>
 #include <mnet/border.hpp>
 #include <mnet/layer.hpp>
@@ -618,7 +624,7 @@ TEST(Kernel, ConcatBenchmark) {
     mnet::Option opt;
     opt.num_threads = 4;
     const auto t0 = std::chrono::steady_clock::now();
-    for (int i = 0; i < 20; ++i) {
+    for (std::int32_t i = 0; i < 20; ++i) {
         ASSERT_EQ(concat.forward(bottoms, tops, opt), 0);
     }
     const auto t1 = std::chrono::steady_clock::now();
@@ -630,7 +636,7 @@ TEST(Kernel, ConcatBenchmark) {
     ASSERT_TRUE(pool.set_size_compare_ratio(0.0F));
     pool_opt.blob_allocator = &pool;
     const auto t2 = std::chrono::steady_clock::now();
-    for (int i = 0; i < 20; ++i) {
+    for (std::int32_t i = 0; i < 20; ++i) {
         std::vector<mnet::Mat> fresh(1);
         ASSERT_EQ(concat.forward(bottoms, fresh, pool_opt), 0);
     }
@@ -730,4 +736,151 @@ TEST(Kernel, ReshapeLargeChannel) {
     ASSERT_EQ(out.w, 1);
     ASSERT_EQ(out.h, 1);
     ASSERT_EQ(out.c, 102400);
+}
+
+TEST(Kernel, UnaryOpTanhAndSquare) {
+    using UO = mlayer::UnaryOp<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mnet::Option opt;
+    mnet::Mat data(3);
+    data[0] = -1.0F;
+    data[1] = 0.0F;
+    data[2] = 2.0F;
+
+    mformat::ParamDict square_pd;
+    square_pd.set(0, static_cast<std::int32_t>(UO::Operation_SQUARE));
+    UO square;
+    ASSERT_EQ(square.load_param(square_pd), 0);
+    mnet::Mat squared = data;
+    ASSERT_EQ(square.forward_inplace(squared, opt), 0);
+    EXPECT_FLOAT_EQ(squared[0], 1.0F);
+    EXPECT_FLOAT_EQ(squared[1], 0.0F);
+    EXPECT_FLOAT_EQ(squared[2], 4.0F);
+
+    mformat::ParamDict tanh_pd;
+    tanh_pd.set(0, static_cast<std::int32_t>(UO::Operation_TANH));
+    UO tanh;
+    ASSERT_EQ(tanh.load_param(tanh_pd), 0);
+    mnet::Mat th(3);
+    th[0] = -1.0F;
+    th[1] = 0.0F;
+    th[2] = 2.0F;
+    ASSERT_EQ(tanh.forward_inplace(th, opt), 0);
+    EXPECT_NEAR(th[0], std::tanh(-1.0F), 1e-6F);
+    EXPECT_NEAR(th[2], std::tanh(2.0F), 1e-6F);
+}
+
+TEST(Kernel, ReductionMaxAndMean) {
+    using RD = mlayer::Reduction<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mnet::Option opt;
+
+    mformat::ParamDict max_pd;
+    max_pd.set(0, static_cast<std::int32_t>(RD::ReductionOp_MAX));
+    max_pd.set(1, 1);
+    RD max_op;
+    ASSERT_EQ(max_op.load_param(max_pd), 0);
+    mnet::Mat input(3, 2);
+    const float values[6] = {1.0F, -4.0F, 3.0F, 2.0F, 0.0F, 5.0F};
+    std::memcpy(input.data, values, sizeof(values));
+    mnet::Mat out;
+    ASSERT_EQ(max_op.forward(input, out, opt), 0);
+    ASSERT_EQ(out.dims, 1);
+    ASSERT_EQ(out.w, 1);
+    EXPECT_FLOAT_EQ(out[0], 5.0F);
+
+    mformat::ParamDict mean_pd;
+    mean_pd.set(0, static_cast<std::int32_t>(RD::ReductionOp_MEAN));
+    mean_pd.set(1, 1);
+    RD mean_op;
+    ASSERT_EQ(mean_op.load_param(mean_pd), 0);
+    ASSERT_EQ(mean_op.forward(input, out, opt), 0);
+    EXPECT_NEAR(out[0], (1.0F - 4.0F + 3.0F + 2.0F + 0.0F + 5.0F) / 6.0F, 1e-6F);
+}
+
+TEST(Kernel, ExpandDimsThenSqueezeRoundTrips) {
+    using ED = mlayer::ExpandDims<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    using SQ = mlayer::Squeeze<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict ed_pd;
+    ed_pd.set(3, mnet::Mat(1));
+    static_cast<std::int32_t*>(static_cast<void*>(ed_pd.get(3, mnet::Mat()).data))[0] = 1;
+    // ParamDict copies the Mat, so set the axis through a local Mat first.
+    mnet::Mat axes(1);
+    static_cast<std::int32_t*>(static_cast<void*>(axes.data))[0] = 1;
+    ed_pd.set(3, axes);
+
+    ED expand;
+    ASSERT_EQ(expand.load_param(ed_pd), 0);
+    mnet::Mat input(4, 3);
+    input.fill(2.0F);
+    mnet::Option opt;
+    mnet::Mat expanded;
+    ASSERT_EQ(expand.forward(input, expanded, opt), 0);
+    ASSERT_EQ(expanded.dims, 3);
+
+    mformat::ParamDict sq_pd;
+    sq_pd.set(3, axes);
+    SQ squeeze;
+    ASSERT_EQ(squeeze.load_param(sq_pd), 0);
+    mnet::Mat squeezed;
+    ASSERT_EQ(squeeze.forward(expanded, squeezed, opt), 0);
+    ASSERT_EQ(squeezed.dims, 2);
+    ASSERT_EQ(squeezed.w, 4);
+    ASSERT_EQ(squeezed.h, 3);
+}
+
+TEST(Kernel, EinsumMatMulMatchesReference) {
+    using ES = mlayer::Einsum<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    // "ik,kj->ij"
+    const char* equation = "ik,kj->ij";
+    mnet::Mat eq(static_cast<std::int32_t>(std::strlen(equation)));
+    for (std::int32_t i = 0; i < eq.w; ++i) {
+        static_cast<std::int32_t*>(static_cast<void*>(eq.data))[i] = equation[i];
+    }
+    mformat::ParamDict pd;
+    pd.set(0, eq);
+    ES op;
+    ASSERT_EQ(op.load_param(pd), 0);
+
+    mnet::Mat a(2, 3);
+    mnet::Mat b(3, 2);
+    for (std::int32_t i = 0; i < 6; ++i) {
+        a[static_cast<std::size_t>(i)] = static_cast<float>(i + 1);
+        b[static_cast<std::size_t>(i)] = static_cast<float>(i + 1);
+    }
+    std::vector<mnet::Mat> bottoms = {a, b};
+    std::vector<mnet::Mat> tops(1);
+    mnet::Option opt;
+    ASSERT_EQ(op.forward(bottoms, tops, opt), 0);
+    ASSERT_EQ(tops[0].w, 3);
+    ASSERT_EQ(tops[0].h, 3);
+    // a = [[1,2],[3,4],[5,6]], b = [[1,2,3],[4,5,6]]
+    const float expect[9] = {9.0F, 12.0F, 15.0F, 19.0F, 26.0F, 33.0F, 29.0F, 40.0F, 51.0F};
+    for (std::int32_t i = 0; i < 9; ++i) {
+        EXPECT_FLOAT_EQ(tops[0][static_cast<std::size_t>(i)], expect[i]);
+    }
+}
+
+TEST(Kernel, CropByReferenceShape) {
+    using CR = mlayer::Crop<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict pd;
+    CR op;
+    ASSERT_EQ(op.load_param(pd), 0);
+    ASSERT_FALSE(op.one_blob_only);
+
+    mnet::Mat src(4, 3, 2);
+    for (std::int32_t q = 0; q < src.c; ++q) {
+        for (std::int32_t i = 0; i < src.w * src.h; ++i) {
+            src.channel(q)[static_cast<std::size_t>(i)] = static_cast<float>(q * 100 + i);
+        }
+    }
+    mnet::Mat ref(2, 2, 1);
+    std::vector<mnet::Mat> bottoms = {src, ref};
+    std::vector<mnet::Mat> tops(1);
+    mnet::Option opt;
+    ASSERT_EQ(op.forward(bottoms, tops, opt), 0);
+    ASSERT_EQ(tops[0].w, 2);
+    ASSERT_EQ(tops[0].h, 2);
+    EXPECT_FLOAT_EQ(tops[0].channel(0)[0], 0.0F);
+    EXPECT_FLOAT_EQ(tops[0].channel(0)[1], 1.0F);
+    EXPECT_FLOAT_EQ(tops[0].channel(0)[2], 4.0F);
+    EXPECT_FLOAT_EQ(tops[0].channel(0)[3], 5.0F);
 }

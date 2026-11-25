@@ -1,6 +1,7 @@
 #include <mnet/detail/bpe_tokenizer.h>
 
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 
 #include <algorithm>
@@ -8,14 +9,13 @@
 #include <fstream>
 #include <queue>
 #include <sstream>
-#include <stdexcept>
 #include <vector>
 
 // ---------------- I/O helpers ----------------
 std::vector<std::string> BpeTokenizer::LoadVocab(const std::string& vocab_path) {
     std::ifstream ifs(vocab_path, std::ios::binary);
     if (!ifs.is_open()) {
-        throw std::runtime_error("Failed to open vocab file: " + vocab_path);
+        return {};
     }
     std::vector<std::string> vocab;
     vocab.reserve(260000);
@@ -35,24 +35,25 @@ std::vector<std::string> BpeTokenizer::LoadVocab(const std::string& vocab_path) 
     return vocab;
 }
 
-std::unordered_map<std::string, int> BpeTokenizer::BuildTokenToId(const std::vector<std::string>& id_to_token) {
-    std::unordered_map<std::string, int> m;
+std::unordered_map<std::string, std::int32_t> BpeTokenizer::BuildTokenToId(
+    const std::vector<std::string>& id_to_token) {
+    std::unordered_map<std::string, std::int32_t> m;
     m.reserve(id_to_token.size() * 2);
-    for (size_t i = 0; i < id_to_token.size(); ++i) {
-        m.emplace(id_to_token[i], static_cast<int>(i));
+    for (std::size_t i = 0; i < id_to_token.size(); ++i) {
+        m.emplace(id_to_token[i], static_cast<std::int32_t>(i));
     }
     return m;
 }
 
-std::unordered_map<std::string, int> BpeTokenizer::LoadMergesRank(const std::string& merges_path) {
+std::unordered_map<std::string, std::int32_t> BpeTokenizer::LoadMergesRank(const std::string& merges_path) {
     std::ifstream ifs(merges_path);
     if (!ifs.is_open()) {
-        throw std::runtime_error("Failed to open merges file: " + merges_path);
+        return {};
     }
-    std::unordered_map<std::string, int> merges;
+    std::unordered_map<std::string, std::int32_t> merges;
     merges.reserve(50000);
     std::string line;
-    int rank = 0;
+    std::int32_t rank = 0;
     while (std::getline(ifs, line)) {
         if (line.empty() || line[0] == '#') {
             continue;
@@ -69,13 +70,13 @@ std::unordered_map<std::string, int> BpeTokenizer::LoadMergesRank(const std::str
 
 // ---------------- UTF-8 utilities ----------------
 
-bool BpeTokenizer::IsAsciiSpace(unsigned char c) {
+bool BpeTokenizer::IsAsciiSpace(std::uint8_t c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
 }
 
-bool BpeTokenizer::IsUnicodeSpace(uint32_t cp) {
+bool BpeTokenizer::IsUnicodeSpace(std::uint32_t cp) {
     if (cp <= 0x7F) {
-        return IsAsciiSpace(static_cast<unsigned char>(cp));
+        return IsAsciiSpace(static_cast<std::uint8_t>(cp));
     }
     switch (cp) {
         case 0x00A0:
@@ -102,11 +103,11 @@ bool BpeTokenizer::IsUnicodeSpace(uint32_t cp) {
     }
 }
 
-bool BpeTokenizer::NextUtf8(const std::string& s, size_t& i, uint32_t& cp, size_t& cp_len) {
+bool BpeTokenizer::NextUtf8(const std::string& s, std::size_t& i, std::uint32_t& cp, std::size_t& cp_len) {
     if (i >= s.size()) {
         return false;
     }
-    unsigned char c0 = static_cast<unsigned char>(s[i]);
+    std::uint8_t c0 = static_cast<std::uint8_t>(s[i]);
     if (c0 < 0x80) {
         cp = c0;
         cp_len = 1;
@@ -116,7 +117,7 @@ bool BpeTokenizer::NextUtf8(const std::string& s, size_t& i, uint32_t& cp, size_
         if (i + 1 >= s.size()) {
             return false;
         }
-        unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+        std::uint8_t c1 = static_cast<std::uint8_t>(s[i + 1]);
         if ((c1 & 0xC0) != 0x80) {
             return false;
         }
@@ -128,8 +129,8 @@ bool BpeTokenizer::NextUtf8(const std::string& s, size_t& i, uint32_t& cp, size_
         if (i + 2 >= s.size()) {
             return false;
         }
-        unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
-        unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+        std::uint8_t c1 = static_cast<std::uint8_t>(s[i + 1]);
+        std::uint8_t c2 = static_cast<std::uint8_t>(s[i + 2]);
         if (((c1 & 0xC0) != 0x80) || ((c2 & 0xC0) != 0x80)) {
             return false;
         }
@@ -141,9 +142,9 @@ bool BpeTokenizer::NextUtf8(const std::string& s, size_t& i, uint32_t& cp, size_
         if (i + 3 >= s.size()) {
             return false;
         }
-        unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
-        unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
-        unsigned char c3 = static_cast<unsigned char>(s[i + 3]);
+        std::uint8_t c1 = static_cast<std::uint8_t>(s[i + 1]);
+        std::uint8_t c2 = static_cast<std::uint8_t>(s[i + 2]);
+        std::uint8_t c3 = static_cast<std::uint8_t>(s[i + 3]);
         if (((c1 & 0xC0) != 0x80) || ((c2 & 0xC0) != 0x80) || ((c3 & 0xC0) != 0x80)) {
             return false;
         }
@@ -158,11 +159,11 @@ bool BpeTokenizer::NextUtf8(const std::string& s, size_t& i, uint32_t& cp, size_
 std::vector<std::string> BpeTokenizer::Utf8Chars(const std::string& s) {
     std::vector<std::string> chars;
     chars.reserve(s.size());
-    size_t i = 0;
+    std::size_t i = 0;
     while (i < s.size()) {
-        size_t start = i;
-        uint32_t cp;
-        size_t cp_len;
+        std::size_t start = i;
+        std::uint32_t cp;
+        std::size_t cp_len;
         if (!NextUtf8(s, i, cp, cp_len)) {
             break;
         }
@@ -178,22 +179,22 @@ void BpeTokenizer::InitByteMaps() {
     byte_decoder_.clear();
 
     // Logic based on GPT-2 byte encoder (map printable chars to themselves, others to 256+)
-    auto is_printable = [](int b) {
+    auto is_printable = [](std::int32_t b) {
         return (b >= '!' && b <= '~')      // '!' to '~'
                || (b >= 161 && b <= 172)   // '¡' to '¬'
                || (b >= 174 && b <= 255);  // '®' to 'ÿ'
     };
 
-    int n = 0;
-    for (int b = 0; b < 256; ++b) {
+    std::int32_t n = 0;
+    for (std::int32_t b = 0; b < 256; ++b) {
         if (is_printable(b)) {
-            byte_encoder_[b] = static_cast<uint32_t>(b);
+            byte_encoder_[b] = static_cast<std::uint32_t>(b);
         } else {
-            byte_encoder_[b] = static_cast<uint32_t>(256 + n);
+            byte_encoder_[b] = static_cast<std::uint32_t>(256 + n);
             n++;
         }
         // Build decoder map
-        byte_decoder_[byte_encoder_[b]] = static_cast<uint8_t>(b);
+        byte_decoder_[byte_encoder_[b]] = static_cast<std::uint8_t>(b);
     }
 }
 
@@ -201,8 +202,8 @@ std::string BpeTokenizer::ByteEncode(const std::string& text) const {
     std::string out;
     out.reserve(text.size() * 2);
 
-    for (unsigned char b : text) {
-        uint32_t cp = byte_encoder_[b];
+    for (std::uint8_t b : text) {
+        std::uint32_t cp = byte_encoder_[b];
         // Append cp as UTF-8
         if (cp < 0x80) {
             out += static_cast<char>(cp);
@@ -226,9 +227,9 @@ std::string BpeTokenizer::ByteEncode(const std::string& text) const {
 std::string BpeTokenizer::ByteDecode(const std::string& text) const {
     std::string out;
     out.reserve(text.size());
-    size_t i = 0;
-    uint32_t cp;
-    size_t len;
+    std::size_t i = 0;
+    std::uint32_t cp;
+    std::size_t len;
     while (i < text.size()) {
         if (!NextUtf8(text, i, cp, len)) {
             break;
@@ -253,10 +254,10 @@ std::vector<std::string> BpeTokenizer::PretokenizeSentencePiece(const std::strin
     std::string curr;
     curr.reserve(text.size());
 
-    size_t i = 0;
+    std::size_t i = 0;
     while (i < text.size()) {
-        uint32_t cp;
-        size_t len;
+        std::uint32_t cp;
+        std::size_t len;
         if (!NextUtf8(text, i, cp, len)) {
             break;
         }
@@ -304,7 +305,7 @@ const std::vector<std::string>& BpeTokenizer::BpeForPieceCached(const std::strin
 
 std::vector<std::string> BpeTokenizer::BpeForPiece(const std::string& piece) const {
     std::vector<std::string> symbols = Utf8Chars(piece);
-    const int n0 = static_cast<int>(symbols.size());
+    const std::int32_t n0 = static_cast<std::int32_t>(symbols.size());
     if (n0 <= 1) {
         return symbols;
     }
@@ -314,17 +315,17 @@ std::vector<std::string> BpeTokenizer::BpeForPiece(const std::string& piece) con
      * 这里改成标准做法：双向链表维护符号序列 + 小顶堆取最小 rank 的相邻对。
      * 复杂度 O(n log n)，且【保持原有的语义】：原实现用 `r < best_rank` 严格小于，
      * 因此同 rank 时取最左的那一对 —— 堆的比较器用 (rank, left) 排序即可复现该行为。 */
-    std::vector<int> prev(n0), next(n0);
+    std::vector<std::int32_t> prev(n0), next(n0);
     std::vector<char> alive(n0, 1);
-    for (int i = 0; i < n0; i++) {
+    for (std::int32_t i = 0; i < n0; i++) {
         prev[i] = i - 1;
         next[i] = i + 1;
     }
     next[n0 - 1] = -1;
 
     struct PairNode {
-        int rank;
-        int left;
+        std::int32_t rank;
+        std::int32_t left;
     };
     struct PairCmp {
         bool operator()(const PairNode& a, const PairNode& b) const {
@@ -336,11 +337,11 @@ std::vector<std::string> BpeTokenizer::BpeForPiece(const std::string& piece) con
     };
     std::priority_queue<PairNode, std::vector<PairNode>, PairCmp> pq;
 
-    auto push_pair = [&](int left) {
+    auto push_pair = [&](std::int32_t left) {
         if (left < 0 || !alive[left]) {
             return;
         }
-        const int right = next[left];
+        const std::int32_t right = next[left];
         if (right < 0 || !alive[right]) {
             return;
         }
@@ -350,18 +351,18 @@ std::vector<std::string> BpeTokenizer::BpeForPiece(const std::string& piece) con
         }
     };
 
-    for (int i = 0; i + 1 < n0; i++) {
+    for (std::int32_t i = 0; i + 1 < n0; i++) {
         push_pair(i);
     }
 
     while (!pq.empty()) {
         const PairNode node = pq.top();
         pq.pop();
-        const int l = node.left;
+        const std::int32_t l = node.left;
         if (!alive[l]) {
             continue;
         }
-        const int r = next[l];
+        const std::int32_t r = next[l];
         if (r < 0 || !alive[r]) {
             continue;
         }
@@ -385,13 +386,13 @@ std::vector<std::string> BpeTokenizer::BpeForPiece(const std::string& piece) con
 
     std::vector<std::string> out;
     out.reserve(n0);
-    for (int i = 0; i >= 0; i = next[i]) {
+    for (std::int32_t i = 0; i >= 0; i = next[i]) {
         out.push_back(std::move(symbols[i]));
     }
     return out;
 }
 
-void BpeTokenizer::TokensToIds(const std::vector<std::string>& tokens, std::vector<int>& out) const {
+void BpeTokenizer::TokensToIds(const std::vector<std::string>& tokens, std::vector<std::int32_t>& out) const {
     for (const auto& t : tokens) {
         auto it = token_to_id_.find(t);
         if (it != token_to_id_.end()) {
@@ -461,7 +462,7 @@ BpeTokenizer BpeTokenizer::LoadFromFiles(const std::string& vocab_path, const st
     BpeTokenizer tok;
     tok.id_to_token_ = LoadVocab(vocab_path);
     if (tok.id_to_token_.empty()) {
-        throw std::runtime_error("Vocab is empty: " + vocab_path);
+        return tok;
     }
     tok.token_to_id_ = BuildTokenToId(tok.id_to_token_);
     tok.merges_rank_ = LoadMergesRank(merges_path);
@@ -478,7 +479,7 @@ BpeTokenizer BpeTokenizer::LoadFromFiles(const std::string& vocab_path, const st
 }
 
 void BpeTokenizer::EnsureSpecialTokens(const SpecialTokensConfig& spec, bool add_if_missing) {
-    auto ensure = [&](const std::optional<std::string>& name, int& id_slot) {
+    auto ensure = [&](const std::optional<std::string>& name, std::int32_t& id_slot) {
         if (!name.has_value()) {
             id_slot = -1;
             return;
@@ -492,7 +493,7 @@ void BpeTokenizer::EnsureSpecialTokens(const SpecialTokensConfig& spec, bool add
             id_slot = -1;
             return;
         }
-        id_slot = static_cast<int>(id_to_token_.size());
+        id_slot = static_cast<std::int32_t>(id_to_token_.size());
         id_to_token_.push_back(*name);
         token_to_id_.emplace(*name, id_slot);
     };
@@ -517,12 +518,12 @@ void BpeTokenizer::AddAdditionalSpecialToken(const std::string& token, bool add_
         return;
     }
 
-    int id = -1;
+    std::int32_t id = -1;
     auto it = token_to_id_.find(token);
     if (it != token_to_id_.end()) {
         id = it->second;
     } else if (add_if_missing) {
-        id = static_cast<int>(id_to_token_.size());
+        id = static_cast<std::int32_t>(id_to_token_.size());
         id_to_token_.push_back(token);
         token_to_id_.emplace(token, id);
     } else {
@@ -547,18 +548,9 @@ void BpeTokenizer::SetAdditionalSpecialTokens(const std::vector<std::string>& to
     }
 }
 
-std::vector<int> BpeTokenizer::encode(const std::string& text, bool add_bos, bool add_eos, bool add_cls,
-                                      bool add_sep) const {
-    /* 剖析（NCNN_BPE_PROF=1 ✓）：定位 tokenizer 热点 ✓ */
-    static const bool bprof = (getenv("NCNN_BPE_PROF") != nullptr);
-    using bpe_clock = std::chrono::steady_clock;
-    bpe_clock::time_point _bt0;
-    if (bprof) {
-        _bt0 = bpe_clock::now();
-    }
-    double _t_scan = 0;
-
-    std::vector<int> ids;
+std::vector<std::int32_t> BpeTokenizer::encode(const std::string& text, bool add_bos, bool add_eos, bool add_cls,
+                                               bool add_sep) const {
+    std::vector<std::int32_t> ids;
     ids.reserve(text.size() / 2 + 8);
 
     if (add_cls && special_ids_.cls_id >= 0) {
@@ -597,38 +589,30 @@ std::vector<int> BpeTokenizer::encode(const std::string& text, bool add_bos, boo
         buffer.clear();
     };
 
-    size_t i = 0;
-    const size_t n = text.size();
+    std::size_t i = 0;
+    const std::size_t n = text.size();
     while (i < n) {
-        int matched_index = -1;
-        size_t matched_len = 0;
+        std::int32_t matched_index = -1;
+        std::size_t matched_len = 0;
 
         // longest match：若多个 special token 共享前缀，选择更长的那个
-        bpe_clock::time_point _sc0;
-        if (bprof) {
-            _sc0 = bpe_clock::now();
-        }
         if (!additional_special_tokens_.empty()) {
-            for (size_t k = 0; k < additional_special_tokens_.size(); ++k) {
+            for (std::size_t k = 0; k < additional_special_tokens_.size(); ++k) {
                 const std::string& sp = additional_special_tokens_[k];
                 if (sp.empty()) {
                     continue;
                 }
-                size_t len = sp.size();
+                std::size_t len = sp.size();
                 if (len <= matched_len) {
                     continue;
                 }
                 if (i + len <= n && text.compare(i, len, sp) == 0) {
-                    matched_index = static_cast<int>(k);
+                    matched_index = static_cast<std::int32_t>(k);
                     matched_len = len;
                 }
             }
         }
 
-        if (bprof) {
-            auto _sc1 = bpe_clock::now();
-            _t_scan += std::chrono::duration<double, std::milli>(_sc1 - _sc0).count();
-        }
         if (matched_index >= 0) {
             flush_buffer();
             ids.push_back(additional_special_token_ids_[matched_index]);
@@ -648,24 +632,14 @@ std::vector<int> BpeTokenizer::encode(const std::string& text, bool add_bos, boo
     if (add_eos && special_ids_.eos_id >= 0) {
         ids.push_back(special_ids_.eos_id);
     }
-    if (bprof) {
-        auto _bt1 = bpe_clock::now();
-        const double tot = std::chrono::duration<double, std::milli>(_bt1 - _bt0).count();
-        fprintf(stderr,
-                "[BPE-PROF] text=%zu 字符 special_tokens=%zu → ids=%zu | 总 %.2f ms | 扫描 %.2f ms (%.1f%%) | "
-                "其余(BPE等) %.2f ms (%.1f%%)\n",
-                text.size(), additional_special_tokens_.size(), ids.size(), tot, _t_scan,
-                tot > 0 ? 100.0 * _t_scan / tot : 0.0, tot - _t_scan, tot > 0 ? 100.0 * (tot - _t_scan) / tot : 0.0);
-        fflush(stderr);
-    }
     return ids;
 }
 
-std::string BpeTokenizer::decode(const std::vector<int>& ids, bool skip_special_tokens) const {
+std::string BpeTokenizer::decode(const std::vector<std::int32_t>& ids, bool skip_special_tokens) const {
     std::string s;
     s.reserve(ids.size() * 3);
-    for (int id : ids) {
-        if (id < 0 || id >= static_cast<int>(id_to_token_.size())) {
+    for (std::int32_t id : ids) {
+        if (id < 0 || id >= static_cast<std::int32_t>(id_to_token_.size())) {
             continue;
         }
         const std::string& tok = id_to_token_[id];
@@ -697,10 +671,10 @@ std::string BpeTokenizer::decode(const std::vector<int>& ids, bool skip_special_
         } else {
             std::string out;
             out.reserve(s.size());
-            size_t i = 0;
+            std::size_t i = 0;
             while (i < s.size()) {
-                uint32_t cp;
-                size_t len;
+                std::uint32_t cp;
+                std::size_t len;
                 if (!NextUtf8(s, i, cp, len)) {
                     break;
                 }
@@ -710,7 +684,7 @@ std::string BpeTokenizer::decode(const std::vector<int>& ids, bool skip_special_
                     out.append(s, i - len, len);
                 }
             }
-            size_t b = 0;
+            std::size_t b = 0;
             while (b < out.size() && out[b] == ' ') {
                 ++b;
             }

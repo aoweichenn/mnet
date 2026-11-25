@@ -127,3 +127,37 @@ TEST(Net, LoadsBinaryParamAndRuns) {
     EXPECT_FLOAT_EQ(out[3], 1.0F);
     EXPECT_FLOAT_EQ(out[4], 2.0F);
 }
+
+TEST(Net, RunsZeroBottomMemoryData) {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "mnet_net_tests";
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path param = dir / "memorydata.param";
+    const std::filesystem::path bin = dir / "memorydata.bin";
+
+    {
+        std::ofstream file(param);
+        file << "7767517\n";
+        file << "1 1\n";
+        file << "MemoryData md 0 1 data 0=2\n";
+    }
+    {
+        std::ofstream file(bin, std::ios::binary);
+        const float values[2] = {1.5F, -2.5F};
+        file.write(reinterpret_cast<const char*>(values), sizeof(values));
+    }
+
+    mnet::Net net;
+    net.opt().num_threads = 2;
+    ASSERT_EQ(net.load(param.string().c_str(), bin.string().c_str()), 0);
+
+    // MemoryData must not be treated as a user input layer.
+    EXPECT_TRUE(net.input_names().empty());
+
+    mnet::Net::Extractor ex = net.create_extractor();
+    mnet::Mat out;
+    ASSERT_EQ(ex.extract("data", out), 0);
+    ASSERT_EQ(out.dims, 1);
+    ASSERT_EQ(out.w, 2);
+    EXPECT_FLOAT_EQ(out[0], 1.5F);
+    EXPECT_FLOAT_EQ(out[1], -2.5F);
+}

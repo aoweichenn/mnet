@@ -3,6 +3,7 @@
 
 #include <mnet/tokenizer.hpp>
 
+#include <cstdint>
 #include <mnet/detail/bpe_tokenizer.h>
 
 #include <optional>
@@ -30,16 +31,16 @@ std::int32_t Tokenizer::load(const char* vocab_path, const char* merges_path) {
     config.pad_token = "<|endoftext|>";
     this->d->bpe =
         std::make_unique<BpeTokenizer>(BpeTokenizer::LoadFromFiles(vocab_path, merges_path, config, true, true, true));
-    return 0;
+    return this->d->bpe->vocab_size() == 0 ? -1 : 0;
 }
 
 std::vector<std::int32_t> Tokenizer::encode(const std::string& text) const {
-    const std::vector<int> ids = this->d->bpe->encode(text, false, false, false, false);
+    const std::vector<std::int32_t> ids = this->d->bpe->encode(text, false, false, false, false);
     return std::vector<std::int32_t>(ids.begin(), ids.end());
 }
 
 std::string Tokenizer::decode(const std::vector<std::int32_t>& ids) const {
-    std::vector<int> ids_int(ids.begin(), ids.end());
+    std::vector<std::int32_t> ids_int(ids.begin(), ids.end());
     return this->d->bpe->decode(ids_int, true);
 }
 

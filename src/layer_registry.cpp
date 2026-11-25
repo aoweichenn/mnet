@@ -18,10 +18,15 @@
 #include <mlayer/concat.hpp>
 #include <mlayer/convolution.hpp>
 #include <mlayer/convolutiondepthwise.hpp>
+#include <mlayer/crop.hpp>
 #include <mlayer/deconvolution.hpp>
+#include <mlayer/detectionoutput.hpp>
 #include <mlayer/dropout.hpp>
+#include <mlayer/einsum.hpp>
+#include <mlayer/eltwise.hpp>
 #include <mlayer/embed.hpp>
 #include <mlayer/exp.hpp>
+#include <mlayer/expanddims.hpp>
 #include <mlayer/flatten.hpp>
 #include <mlayer/gelu.hpp>
 #include <mlayer/gemm.hpp>
@@ -33,11 +38,15 @@
 #include <mlayer/layernorm.hpp>
 #include <mlayer/log.hpp>
 #include <mlayer/matmul.hpp>
+#include <mlayer/memorydata.hpp>
+#include <mlayer/noop.hpp>
 #include <mlayer/normalize.hpp>
 #include <mlayer/permute.hpp>
 #include <mlayer/pooling.hpp>
 #include <mlayer/power.hpp>
 #include <mlayer/prelu.hpp>
+#include <mlayer/priorbox.hpp>
+#include <mlayer/reduction.hpp>
 #include <mlayer/relu.hpp>
 #include <mlayer/reshape.hpp>
 #include <mlayer/rmsnorm.hpp>
@@ -49,9 +58,11 @@
 #include <mlayer/slice.hpp>
 #include <mlayer/softmax.hpp>
 #include <mlayer/split.hpp>
+#include <mlayer/squeeze.hpp>
 #include <mlayer/swish.hpp>
 #include <mlayer/tanh.hpp>
 #include <mlayer/threshold.hpp>
+#include <mlayer/unaryop.hpp>
 #include <mlayer/yolov5focus.hpp>
 #include <mnet/activation.hpp>
 #include <mnet/border.hpp>
@@ -140,7 +151,19 @@ void register_builtins() {
     add("PReLU", &make_layer<mlayer::PReLU<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("Normalize", &make_layer<mlayer::Normalize<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("Deconvolution", &make_layer<DeconvolutionT>);
+    add("DeconvolutionDepthWise", &make_layer<DeconvolutionT>);
+    add("Crop", &make_layer<mlayer::Crop<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Squeeze", &make_layer<mlayer::Squeeze<Layer, MatT, OptionT, ParamDictT, false>>);
     add("YoloV5Focus", &make_layer<mlayer::YoloV5Focus<Layer, MatT, OptionT>>);
+    add("MemoryData", &make_layer<mlayer::MemoryData<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("PriorBox", &make_layer<mlayer::PriorBox<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("DetectionOutput", &make_layer<mlayer::DetectionOutput<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Eltwise", &make_layer<mlayer::Eltwise<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Noop", &make_layer<mlayer::Noop<Layer, MatT, OptionT>>);
+    add("UnaryOp", &make_layer<mlayer::UnaryOp<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("ExpandDims", &make_layer<mlayer::ExpandDims<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Reduction", &make_layer<mlayer::Reduction<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Einsum", &make_layer<mlayer::Einsum<Layer, MatT, OptionT, ParamDictT, false>>);
     add("BinaryOp", &make_layer<mlayer::BinaryOp<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Permute", &make_layer<mlayer::Permute<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Reshape", &make_layer<mlayer::Reshape<Layer, MatT, OptionT, ParamDictT>>);
@@ -230,6 +253,30 @@ Layer* create_layer_by_index(std::int32_t type_index) {
             return create_layer("SDPA");
         case 109:
             return create_layer("RotaryEmbed");
+        case 19:
+            return create_layer("MemoryData");
+        case 25:
+            return create_layer("Reduction");
+        case 41:
+            return create_layer("UnaryOp");
+        case 45:
+            return create_layer("ExpandDims");
+        case 48:
+            return create_layer("PriorBox");
+        case 49:
+            return create_layer("DetectionOutput");
+        case 68:
+            return create_layer("Noop");
+        case 7:
+            return create_layer("Crop");
+        case 10:
+            return create_layer("Eltwise");
+        case 44:
+            return create_layer("Squeeze");
+        case 51:
+            return create_layer("DeconvolutionDepthWise");
+        case 92:
+            return create_layer("Einsum");
         default:
             return nullptr;
     }

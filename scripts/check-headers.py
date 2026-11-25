@@ -111,10 +111,18 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
     parser.add_argument("root", nargs="?", default=".")
+    parser.add_argument("--include", action="append", default=[])
     parser.add_argument("--build-dir", default=os.environ.get("MNET_SELFCHECK_DIR", tempfile.mkdtemp(prefix="mnet_selfcheck_")))
     args = parser.parse_args(argv)
 
     root = Path(args.root).resolve()
+    if not args.include:
+        # Standalone consumer layout: sibling modules plus generated config.hpp
+        # directories from an existing build tree.
+        args.include = [str(path) for path in sorted(root.parent.glob("*/include"))]
+        for candidate in (root / "build", Path("/tmp/mnet_build/test")):
+            if candidate.is_dir():
+                args.include.extend(str(path) for path in sorted(candidate.glob("**/include")))
     build_dir = Path(args.build_dir)
     build_dir.mkdir(parents=True, exist_ok=True)
 

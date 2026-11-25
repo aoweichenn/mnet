@@ -167,6 +167,10 @@ if(PROJECT_IS_TOP_LEVEL)
     add_executable(mnet_probe tools/mnet_probe.cpp)
     target_link_libraries(mnet_probe PRIVATE mnet::mnet)
     target_compile_options(mnet_probe PRIVATE ${MNET_WARNINGS})
+
+    add_executable(mnet_llm tools/mnet_llm.cpp)
+    target_link_libraries(mnet_llm PRIVATE mnet::mnet)
+    target_compile_options(mnet_llm PRIVATE ${MNET_WARNINGS})
 endif()
 
 if(mnet_build_tests AND BUILD_TESTING)

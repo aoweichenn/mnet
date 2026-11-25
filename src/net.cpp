@@ -21,6 +21,7 @@
 #include <mgraph/extractor.hpp>
 #include <mgraph/graph.hpp>
 #include <mmemory/allocator.hpp>
+#include <mnet/detail/txn_log.hpp>
 #include <mnet/layer_registry.hpp>
 
 namespace mnet {
@@ -44,7 +45,22 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
         this->layers.clear();
     }
 
-    [[nodiscard]] bool is_input_layer(const Layer& layer) const override { return layer.bottoms.empty(); }
+    [[nodiscard]] bool is_input_layer(const Layer& layer) const override {
+        if (!layer.bottoms.empty()) {
+            return false;
+        }
+        // Only Input produces a blob the user feeds. MemoryData and other
+        // zero-bottom layers still have to run to materialise their weights.
+        if (layer.typeindex == 16) {
+            return true;
+        }
+        const auto it = this->layer_index.find(&layer);
+        if (it == this->layer_index.end()) {
+            return true;
+        }
+        const auto index = static_cast<std::size_t>(it->second);
+        return index < this->layer_types.size() && this->layer_types[index] == "Input";
+    }
 
     [[nodiscard]] Option mask_option(const Option& opt, std::int32_t) const override { return opt; }
 
@@ -71,12 +87,14 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
             const Mat* top = top_index >= 0 && static_cast<std::size_t>(top_index) < blob_mats.size()
                                  ? &blob_mats[static_cast<std::size_t>(top_index)]
                                  : nullptr;
+            char line[160];
             if (top != nullptr) {
-                std::fprintf(stderr, "PROFILE %d %s %.3f %dx%dx%dx%d\n", index, type, ms, top->w, top->h, top->d,
-                             top->c);
+                std::snprintf(line, sizeof(line), "PROFILE %d %s %.3f %dx%dx%dx%d\n", index, type, ms, top->w, top->h,
+                              top->d, top->c);
             } else {
-                std::fprintf(stderr, "PROFILE %d %s %.3f -\n", index, type, ms);
+                std::snprintf(line, sizeof(line), "PROFILE %d %s %.3f -\n", index, type, ms);
             }
+            detail::write_diagnostic(line);
         }
         return result;
     }
@@ -218,6 +236,7 @@ std::int32_t Net::load_param(const char* param_path) {
     std::vector<Layer*> layers;
     std::vector<std::string> layer_types;
     layers.reserve(graph.layers.size());
+    std::vector<std::int32_t> input_blobs;
     const mgraph::ExecutionPlan plan = graph.build_execution_plan();
     for (const mgraph::LayerSpec& spec : graph.layers) {
         Layer* layer = spec.type.empty() ? create_layer_by_index(spec.type_index) : create_layer(spec.type.c_str());
@@ -238,6 +257,13 @@ std::int32_t Net::load_param(const char* param_path) {
         layer->tops = spec.tops;
         layer->typeindex = spec.type_index;
         this->d->layer_index[layer] = static_cast<std::int32_t>(layers.size());
+        // Only real Input layers are user-feedable. MemoryData and other
+        // weight-initialised layers produce their blobs from the model bin.
+        if (spec.type_index == 16 || spec.type == "Input") {
+            for (const std::int32_t top : spec.tops) {
+                input_blobs.push_back(top);
+            }
+        }
         layers.push_back(layer);
         layer_types.push_back(spec.type);
     }
@@ -245,10 +271,26 @@ std::int32_t Net::load_param(const char* param_path) {
     for (Layer* layer : this->d->layers) {
         delete layer;
     }
-    std::vector<std::int32_t> input_blobs = plan.input_blobs;
     if (input_blobs.empty()) {
-        for (Layer* layer : layers) {
-            if (layer->bottoms.empty()) {
+        for (const std::int32_t blob_index : plan.input_blobs) {
+            if (blob_index < 0 || static_cast<std::size_t>(blob_index) >= graph.blobs.size()) {
+                continue;
+            }
+            const std::int32_t producer = graph.blobs[static_cast<std::size_t>(blob_index)].producer;
+            if (producer < 0 || static_cast<std::size_t>(producer) >= graph.layers.size()) {
+                continue;
+            }
+            const mgraph::LayerSpec& producer_spec = graph.layers[static_cast<std::size_t>(producer)];
+            if (producer_spec.type_index == 16 || producer_spec.type == "Input") {
+                input_blobs.push_back(blob_index);
+            }
+        }
+    }
+    if (input_blobs.empty()) {
+        for (std::size_t i = 0; i < layers.size(); ++i) {
+            Layer* layer = layers[i];
+            const bool zero_bottom_data = layer->typeindex == 19 || layer_types[i] == "MemoryData";
+            if (layer->bottoms.empty() && !zero_bottom_data) {
                 for (const std::int32_t top : layer->tops) {
                     input_blobs.push_back(top);
                 }

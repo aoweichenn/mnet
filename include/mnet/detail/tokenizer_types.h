@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string>
 #include <optional>
 
@@ -13,11 +14,11 @@ struct SpecialTokensConfig {
 };
 
 struct SpecialTokenIds {
-    int bos_id = -1;
-    int eos_id = -1;
-    int unk_id = -1;
-    int sep_id = -1;
-    int pad_id = -1;
-    int cls_id = -1;
-    int mask_id = -1;
+    std::int32_t bos_id = -1;
+    std::int32_t eos_id = -1;
+    std::int32_t unk_id = -1;
+    std::int32_t sep_id = -1;
+    std::int32_t pad_id = -1;
+    std::int32_t cls_id = -1;
+    std::int32_t mask_id = -1;
 };
