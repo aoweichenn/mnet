@@ -75,7 +75,7 @@ Android 使用 `-DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26
   `YoloV5Focus`、`MemoryData`、`PriorBox`、`DetectionOutput`、`Eltwise`、`Noop`、
   `UnaryOp`、`ExpandDims`、`Reduction`、`Einsum`、`Crop`、`Squeeze`、
   `YoloDetectionOutput`、`Yolov3DetectionOutput`、`ShortConv`、`GatedDeltaRule`、
-  `MultiHeadAttention`（fp32 与量化：weight-block int4/int6/int8、legacy int8；
+  `Situ`（Inkling2/Kimi-K3 的 gated SiTU）、`RelPosBias`（相对位置 bias + attention sink）`MultiHeadAttention`（fp32 与量化：weight-block int4/int6/int8、legacy int8；
   自注意力/交叉注意力、可选 mask、KV cache）、`Proposal`、
   `ROIPooling` / `PSROIPooling` / `ROIAlign`（Faster-RCNN / R-CNN 的 ROI 池化）、
   `Proposal`、`Padding`、`Tile`、`GridSample`（2D 双线性/最近邻）、`ELU`、`SELU`、
