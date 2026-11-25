@@ -62,9 +62,9 @@ inline void flatten(const Mat& src, Mat& dst, const Option& opt) {
         return;
     }
 
-    auto* outptr = static_cast<unsigned char*>(dst);
+    auto* outptr = static_cast<std::uint8_t*>(dst);
     for (std::int32_t q = 0; q < src.c; ++q) {
-        std::memcpy(outptr, static_cast<const unsigned char*>(src.channel(q)),
+        std::memcpy(outptr, static_cast<const std::uint8_t*>(src.channel(q)),
                     static_cast<std::size_t>(size) * src.elemsize);
         outptr += static_cast<std::size_t>(size) * src.elemsize;
     }

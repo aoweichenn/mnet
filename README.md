@@ -40,6 +40,6 @@ ex.extract("output", out);
 尚未完成：
 
 - 二进制 param（`load_param_bin`）与完整 layer type 表；
-- 更多层（BinaryOp/Reshape/Reshape/Permute/Slice/RMSNorm/SDPA 等）；
+- 更多层（BinaryOp/Reshape/Permute/Slice/RMSNorm/SDPA 等）；
 - 安装包导出（当前 `add_subdirectory` 消费兄弟模块）；
 - 与 ncnn 参考输出的数值对比测试。
