@@ -28,6 +28,7 @@
 #include <mlayer/exp.hpp>
 #include <mlayer/expanddims.hpp>
 #include <mlayer/flatten.hpp>
+#include <mlayer/gateddeltarule.hpp>
 #include <mlayer/gelu.hpp>
 #include <mlayer/gemm.hpp>
 #include <mlayer/groupnorm.hpp>
@@ -53,6 +54,7 @@
 #include <mlayer/rotaryembed.hpp>
 #include <mlayer/scale.hpp>
 #include <mlayer/sdpa.hpp>
+#include <mlayer/shortconv.hpp>
 #include <mlayer/shufflechannel.hpp>
 #include <mlayer/sigmoid.hpp>
 #include <mlayer/slice.hpp>
@@ -63,6 +65,8 @@
 #include <mlayer/tanh.hpp>
 #include <mlayer/threshold.hpp>
 #include <mlayer/unaryop.hpp>
+#include <mlayer/yolodetectionoutput.hpp>
+#include <mlayer/yolov3detectionoutput.hpp>
 #include <mlayer/yolov5focus.hpp>
 #include <mnet/activation.hpp>
 #include <mnet/border.hpp>
@@ -153,7 +157,11 @@ void register_builtins() {
     add("Deconvolution", &make_layer<DeconvolutionT>);
     add("DeconvolutionDepthWise", &make_layer<DeconvolutionT>);
     add("Crop", &make_layer<mlayer::Crop<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("YoloDetectionOutput", &make_layer<mlayer::YoloDetectionOutput<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Yolov3DetectionOutput", &make_layer<mlayer::Yolov3DetectionOutput<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Squeeze", &make_layer<mlayer::Squeeze<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("ShortConv", &make_layer<mlayer::ShortConv<Layer, MatT, OptionT>>);
+    add("GatedDeltaRule", &make_layer<mlayer::GatedDeltaRule<Layer, MatT, OptionT>>);
     add("YoloV5Focus", &make_layer<mlayer::YoloV5Focus<Layer, MatT, OptionT>>);
     add("MemoryData", &make_layer<mlayer::MemoryData<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("PriorBox", &make_layer<mlayer::PriorBox<Layer, MatT, OptionT, ParamDictT, false>>);
@@ -275,6 +283,10 @@ Layer* create_layer_by_index(std::int32_t type_index) {
             return create_layer("Squeeze");
         case 51:
             return create_layer("DeconvolutionDepthWise");
+        case 56:
+            return create_layer("YoloDetectionOutput");
+        case 59:
+            return create_layer("Yolov3DetectionOutput");
         case 92:
             return create_layer("Einsum");
         default:

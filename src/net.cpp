@@ -230,6 +230,7 @@ std::int32_t Net::load_param(const char* param_path) {
     mgraph::Graph graph;
     const std::int32_t load_ret = binary ? graph.load_param_bin(reader) : graph.load_param(reader);
     if (load_ret != 0) {
+        detail::write_diagnostic("mnet: graph load_param failed\n");
         return -1;
     }
 
@@ -241,12 +242,16 @@ std::int32_t Net::load_param(const char* param_path) {
     for (const mgraph::LayerSpec& spec : graph.layers) {
         Layer* layer = spec.type.empty() ? create_layer_by_index(spec.type_index) : create_layer(spec.type.c_str());
         if (layer == nullptr) {
+            const std::string type = spec.type.empty() ? std::to_string(spec.type_index) : spec.type;
+            detail::write_diagnostic(std::string("mnet: create_layer failed: ") + type + "\n");
             for (Layer* created : layers) {
                 delete created;
             }
             return -1;
         }
         if (layer->load_param(spec.params) != 0) {
+            const std::string type = spec.type.empty() ? std::to_string(spec.type_index) : spec.type;
+            detail::write_diagnostic(std::string("mnet: layer load_param failed: ") + type + "\n");
             delete layer;
             for (Layer* created : layers) {
                 delete created;
@@ -340,9 +345,11 @@ std::int32_t Net::load_model(const char* bin_path) {
     {
         mformat::DataReaderFromStdio reader(file);
         mformat::ModelBinFromDataReader model_bin(reader);
-        for (Layer* layer : this->d->layers) {
-            ret = layer->load_model(model_bin);
+        for (std::size_t i = 0; i < this->d->layers.size(); ++i) {
+            ret = this->d->layers[i]->load_model(model_bin);
             if (ret != 0) {
+                const std::string& type = this->d->layer_types[i];
+                detail::write_diagnostic(std::string("mnet: layer load_model failed: ") + type + "\n");
                 break;
             }
         }

@@ -8,6 +8,7 @@
 #include <mnet/tokenizer.hpp>
 
 #include <chrono>
+#include <cinttypes>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -34,6 +35,19 @@ struct ModelConfig {
     std::int32_t rope_head_dim = 0;
     float rope_theta = 10000.0F;
 };
+
+std::int64_t read_vmhwm_kb() {
+    std::ifstream status("/proc/self/status");
+    std::string key;
+    std::int64_t value = 0;
+    while (status >> key) {
+        if (key == "VmHWM:") {
+            status >> value;
+            return value;
+        }
+    }
+    return 0;
+}
 
 std::string read_text(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
@@ -146,6 +160,7 @@ int main(int argc, char** argv) {
     std::string prompt = "Hello";
     std::int32_t threads = 4;
     std::int32_t max_new_tokens = 8;
+    bool load_only = false;
     for (std::int32_t i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             model_dir = argv[++i];
@@ -155,6 +170,8 @@ int main(int argc, char** argv) {
             threads = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--max-new-tokens") == 0 && i + 1 < argc) {
             max_new_tokens = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--load-only") == 0) {
+            load_only = true;
         } else {
             std::fprintf(stderr, "unknown argument %s\n", argv[i]);
             return 2;
@@ -204,7 +221,16 @@ int main(int argc, char** argv) {
     }
     const std::int32_t prompt_len = static_cast<std::int32_t>(prompt_ids.size());
 
-    std::vector<mnet::Mat> caches(static_cast<std::size_t>(cfg.attn_cnt) * 2);
+    // Every decoder input except the four activations/position tensors is a
+    // recurrent state (KV cache, conv state, gated-delta-rule state). The
+    // matching output is named "out_" + input name.
+    std::vector<std::string> cache_names;
+    for (const std::string& name : decoder_net.input_names()) {
+        if (name != "in0" && name != "in1" && name != "in2" && name != "in3") {
+            cache_names.push_back(name);
+        }
+    }
+    std::vector<mnet::Mat> caches(cache_names.size());
 
     auto run_decoder = [&](const mnet::Mat& embedding, const mnet::Mat& mask, const mnet::Mat& cos_cache,
                            const mnet::Mat& sin_cache) -> mnet::Mat {
@@ -213,30 +239,19 @@ int main(int argc, char** argv) {
         ex.input("in1", mask);
         ex.input("in2", cos_cache);
         ex.input("in3", sin_cache);
-        for (std::int32_t i = 0; i < cfg.attn_cnt; ++i) {
-            char kname[32];
-            char vname[32];
-            std::snprintf(kname, sizeof(kname), "cache_k%d", i);
-            std::snprintf(vname, sizeof(vname), "cache_v%d", i);
-            const mnet::Mat& k = caches[static_cast<std::size_t>(i * 2)];
-            const mnet::Mat& v = caches[static_cast<std::size_t>(i * 2 + 1)];
-            if (!k.empty()) {
-                ex.input(kname, k);
-                ex.input(vname, v);
+        for (std::size_t i = 0; i < cache_names.size(); ++i) {
+            if (!caches[i].empty()) {
+                ex.input(cache_names[i].c_str(), caches[i]);
             }
         }
         mnet::Mat hidden_out;
         if (ex.extract("out0", hidden_out) != 0) {
             std::fprintf(stderr, "decoder extract out0 failed\n");
         }
-        for (std::int32_t i = 0; i < cfg.attn_cnt; ++i) {
-            char kname[32];
-            char vname[32];
-            std::snprintf(kname, sizeof(kname), "out_cache_k%d", i);
-            std::snprintf(vname, sizeof(vname), "out_cache_v%d", i);
-            if (ex.extract(kname, caches[static_cast<std::size_t>(i * 2)]) != 0 ||
-                ex.extract(vname, caches[static_cast<std::size_t>(i * 2 + 1)]) != 0) {
-                std::fprintf(stderr, "decoder cache %d extract failed\n", i);
+        for (std::size_t i = 0; i < cache_names.size(); ++i) {
+            const std::string out_name = "out_" + cache_names[i];
+            if (ex.extract(out_name.c_str(), caches[i]) != 0) {
+                std::fprintf(stderr, "decoder cache %s extract failed\n", out_name.c_str());
             }
         }
         return hidden_out;
@@ -267,6 +282,11 @@ int main(int argc, char** argv) {
     mnet::Mat cos_cache;
     mnet::Mat sin_cache;
     make_rope(prompt_len, 0, rope_half, cfg.rope_theta, cos_cache, sin_cache);
+
+    std::fprintf(stderr, "rss_after_load_kb=%" PRId64 "\n", read_vmhwm_kb());
+    if (load_only) {
+        return 0;
+    }
 
     const auto t0 = std::chrono::steady_clock::now();
     mnet::Mat hidden = run_decoder(embedding, mask, cos_cache, sin_cache);

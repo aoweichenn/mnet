@@ -11,7 +11,9 @@
 #include <mlayer/crop.hpp>
 #include <mlayer/einsum.hpp>
 #include <mlayer/expanddims.hpp>
+#include <mlayer/gateddeltarule.hpp>
 #include <mlayer/reduction.hpp>
+#include <mlayer/shortconv.hpp>
 #include <mlayer/squeeze.hpp>
 #include <mlayer/unaryop.hpp>
 #include <mnet/activation.hpp>
@@ -883,4 +885,78 @@ TEST(Kernel, CropByReferenceShape) {
     EXPECT_FLOAT_EQ(tops[0].channel(0)[1], 1.0F);
     EXPECT_FLOAT_EQ(tops[0].channel(0)[2], 4.0F);
     EXPECT_FLOAT_EQ(tops[0].channel(0)[3], 5.0F);
+}
+
+TEST(Kernel, ShortConvCausalState) {
+    using SC = mlayer::ShortConv<mnet::Layer, mnet::Mat, mnet::Option>;
+    mnet::Option opt;
+
+    mnet::Mat weight(3, 1, 2);
+    const float w0[3] = {1.0F, 2.0F, 3.0F};
+    const float w1[3] = {0.5F, 0.5F, 0.5F};
+    std::memcpy(weight.channel(0), w0, sizeof(w0));
+    std::memcpy(weight.channel(1), w1, sizeof(w1));
+
+    mnet::Mat mixed(2, 2);
+    mixed.row(0)[0] = 1.0F;
+    mixed.row(0)[1] = 3.0F;
+    mixed.row(1)[0] = 2.0F;
+    mixed.row(1)[1] = 4.0F;
+
+    std::vector<mnet::Mat> bottoms = {weight, mixed};
+    std::vector<mnet::Mat> tops(2);
+    SC layer;
+    ASSERT_EQ(layer.forward(bottoms, tops, opt), 0);
+
+    const float silu3 = 3.0F / (1.0F + std::exp(-3.0F));
+    const float silu8 = 8.0F / (1.0F + std::exp(-8.0F));
+    const float silu15 = 1.5F / (1.0F + std::exp(-1.5F));
+    const float silu35 = 3.5F / (1.0F + std::exp(-3.5F));
+    EXPECT_NEAR(tops[0].row(0)[0], silu3, 1e-5F);
+    EXPECT_NEAR(tops[0].row(1)[0], silu8, 1e-5F);
+    EXPECT_NEAR(tops[0].row(0)[1], silu15, 1e-5F);
+    EXPECT_NEAR(tops[0].row(1)[1], silu35, 1e-5F);
+
+    ASSERT_EQ(tops[1].w, 3);
+    ASSERT_EQ(tops[1].h, 2);
+    EXPECT_FLOAT_EQ(tops[1].row(0)[0], 0.0F);
+    EXPECT_FLOAT_EQ(tops[1].row(0)[1], 1.0F);
+    EXPECT_FLOAT_EQ(tops[1].row(0)[2], 2.0F);
+}
+
+TEST(Kernel, GatedDeltaRuleSingleStep) {
+    using GDR = mlayer::GatedDeltaRule<mnet::Layer, mnet::Mat, mnet::Option>;
+    mnet::Option opt;
+
+    mnet::Mat A_log(1);
+    A_log[0] = 0.0F;
+    mnet::Mat dt_bias(1);
+    dt_bias[0] = 0.0F;
+    mnet::Mat b(1, 1);
+    b[0] = 0.0F;
+    mnet::Mat a(1, 1);
+    a[0] = 0.0F;
+
+    mnet::Mat query(2, 1, 1);
+    query[0] = 1.0F;
+    query[1] = 0.0F;
+    mnet::Mat key(2, 1, 1);
+    key[0] = 1.0F;
+    key[1] = 0.0F;
+    mnet::Mat value(2, 1, 1);
+    value[0] = 1.0F;
+    value[1] = 2.0F;
+
+    std::vector<mnet::Mat> bottoms = {A_log, dt_bias, b, a, query, key, value};
+    std::vector<mnet::Mat> tops(2);
+    GDR layer;
+    ASSERT_EQ(layer.forward(bottoms, tops, opt), 0);
+
+    const float scale = 1.0F / std::sqrt(2.0F);
+    EXPECT_NEAR(tops[0][0], 0.5F * scale, 1e-5F);
+    EXPECT_NEAR(tops[0][1], 1.0F * scale, 1e-5F);
+    EXPECT_NEAR(tops[1][0], 0.5F, 1e-5F);
+    EXPECT_NEAR(tops[1][1], 1.0F, 1e-5F);
+    EXPECT_NEAR(tops[1][2], 0.0F, 1e-5F);
+    EXPECT_NEAR(tops[1][3], 0.0F, 1e-5F);
 }
