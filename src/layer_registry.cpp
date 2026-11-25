@@ -63,6 +63,7 @@
 #include <mlayer/mvn.hpp>
 #include <mlayer/noop.hpp>
 #include <mlayer/normalize.hpp>
+#include <mlayer/packing.hpp>
 #include <mlayer/padding.hpp>
 #include <mlayer/permute.hpp>
 #include <mlayer/pixelshuffle.hpp>
@@ -72,6 +73,7 @@
 #include <mlayer/priorbox.hpp>
 #include <mlayer/proposal.hpp>
 #include <mlayer/psroipooling.hpp>
+#include <mlayer/quantize_layer.hpp>
 #include <mlayer/reduction.hpp>
 #include <mlayer/relu.hpp>
 #include <mlayer/reorg.hpp>
@@ -191,6 +193,11 @@ void register_builtins() {
     add("Diag", &make_layer<mlayer::Diag<Layer, MatT, OptionT, ParamDictT>>);
     add("SPP", &make_layer<mlayer::SPP<Layer, MatT, OptionT, ParamDictT, false>>);
     add("StatisticsPooling", &make_layer<mlayer::StatisticsPooling<Layer, MatT, OptionT, ParamDictT>>);
+    add("Packing", &make_layer<mlayer::Packing<Layer, MatT, OptionT, ParamDictT>>);
+    add("Quantize", &make_layer<mlayer::Quantize<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("Dequantize", &make_layer<mlayer::Dequantize<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("Requantize",
+        &make_layer<mlayer::Requantize<Layer, MatT, OptionT, ParamDictT, ModelBinT, mnet::activation_ss>>);
     add("Flip", &make_layer<mlayer::Flip<Layer, MatT, OptionT, ParamDictT>>);
     add("InstanceNorm", &make_layer<mlayer::InstanceNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("MVN", &make_layer<mlayer::MVN<Layer, MatT, OptionT, ParamDictT>>);
