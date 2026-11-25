@@ -1290,3 +1290,75 @@ TEST(Kernel, Convolution3x3SmallInputChannelsMatchesReference) {
     }
     EXPECT_LT(max_err, 1e-5F);
 }
+
+TEST(Kernel, Convolution3x3Winograd43MatchesReference) {
+    // 64x64 output with inch=32 selects F(4x4, 3x3).
+    const std::int32_t w = 64;
+    const std::int32_t h = 64;
+    const std::int32_t inch = 32;
+    const std::int32_t outch = 8;
+
+    mformat::ParamDict pd;
+    pd.set(0, outch);
+    pd.set(1, 3);
+    pd.set(11, 3);
+    pd.set(4, 1);
+    pd.set(15, 1);
+    pd.set(14, 1);
+    pd.set(16, 1);
+    pd.set(5, 1);
+    pd.set(6, outch * inch * 9);
+
+    mnet::Mat weights[2];
+    weights[0].create(outch * inch * 9);
+    for (std::int32_t i = 0; i < outch * inch * 9; ++i) {
+        weights[0][static_cast<std::size_t>(i)] = 0.01F * static_cast<float>((i * 7) % 31) - 0.15F;
+    }
+    weights[1].create(outch);
+    for (std::int32_t i = 0; i < outch; ++i) {
+        weights[1][static_cast<std::size_t>(i)] = 0.05F * static_cast<float>(i);
+    }
+
+    Conv conv;
+    ASSERT_EQ(conv.load_param(pd), 0);
+    ASSERT_EQ(conv.load_model(mformat::ModelBinFromMatArray(weights)), 0);
+
+    mnet::Mat input(w, h, inch);
+    for (std::int32_t q = 0; q < inch; ++q) {
+        for (std::int32_t i = 0; i < w * h; ++i) {
+            input.channel(q)[static_cast<std::size_t>(i)] = std::sin(0.05F * static_cast<float>(i + q * 31));
+        }
+    }
+
+    mnet::Option opt;
+    opt.num_threads = 4;
+    mnet::Mat out;
+    ASSERT_EQ(conv.forward(input, out, opt), 0);
+
+    float max_err = 0.0F;
+    for (std::int32_t p = 0; p < outch; ++p) {
+        for (std::int32_t oy = 0; oy < h; oy += 7) {
+            for (std::int32_t ox = 0; ox < w; ox += 7) {
+                float sum = weights[1][static_cast<std::size_t>(p)];
+                for (std::int32_t q = 0; q < inch; ++q) {
+                    for (std::int32_t ky = 0; ky < 3; ++ky) {
+                        const std::int32_t iy = oy + ky - 1;
+                        if (iy < 0 || iy >= h) {
+                            continue;
+                        }
+                        for (std::int32_t kx = 0; kx < 3; ++kx) {
+                            const std::int32_t ix = ox + kx - 1;
+                            if (ix < 0 || ix >= w) {
+                                continue;
+                            }
+                            sum += input.channel(q)[static_cast<std::size_t>(iy * w + ix)] *
+                                   weights[0][static_cast<std::size_t>((p * inch + q) * 9 + ky * 3 + kx)];
+                        }
+                    }
+                }
+                max_err = std::fmax(max_err, std::fabs(sum - out.channel(p)[static_cast<std::size_t>(oy * w + ox)]));
+            }
+        }
+    }
+    EXPECT_LT(max_err, 1e-4F);
+}
