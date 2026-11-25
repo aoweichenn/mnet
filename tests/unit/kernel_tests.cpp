@@ -68,9 +68,10 @@ TEST(Kernel, Convolution1x1MultiChannel) {
     for (std::int32_t p = 0; p < outch; ++p) {
         const float* outptr = out.channel(p);
         for (std::int32_t i = 0; i < w * h; ++i) {
-            float ref = weights[1][p];
+            float ref = weights[1][static_cast<std::size_t>(p)];
             for (std::int32_t q = 0; q < inch; ++q) {
-                ref += input.channel(q)[i] * weights[0][p * inch + q];
+                ref +=
+                    input.channel(q)[static_cast<std::size_t>(i)] * weights[0][static_cast<std::size_t>(p * inch + q)];
             }
             EXPECT_TRUE(std::isfinite(outptr[i])) << p << " " << i;
             EXPECT_NEAR(outptr[i], ref, 1e-5F) << p << " " << i;
@@ -108,10 +109,10 @@ TEST(Kernel, ModelBinReadsFp16WeightsAndBias) {
     ASSERT_EQ(squeeze_b.w, 16);
 
     for (std::int32_t i = 0; i < squeeze_w.w; ++i) {
-        ASSERT_TRUE(std::isfinite(squeeze_w[i])) << i;
+        ASSERT_TRUE(std::isfinite(squeeze_w[static_cast<std::size_t>(i)])) << i;
     }
     for (std::int32_t i = 0; i < squeeze_b.w; ++i) {
-        ASSERT_TRUE(std::isfinite(squeeze_b[i])) << i;
+        ASSERT_TRUE(std::isfinite(squeeze_b[static_cast<std::size_t>(i)])) << i;
     }
     EXPECT_NEAR(squeeze_w[64], -0.17248535F, 1e-5F);
 }

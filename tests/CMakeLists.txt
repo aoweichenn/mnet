@@ -7,6 +7,8 @@ target_compile_options(mnet_test_main PRIVATE ${MNET_WARNINGS_COMMON})
 function(mnet_add_test name source)
     add_executable(${name} ${source})
     target_link_libraries(${name} PRIVATE mnet::mnet mnet_test_main)
+    target_include_directories(${name} SYSTEM PRIVATE
+        $<TARGET_PROPERTY:mlayer::mlayer,INTERFACE_INCLUDE_DIRECTORIES>)
     target_compile_options(${name} PRIVATE ${MNET_WARNINGS_COMMON})
     add_test(NAME ${name} COMMAND ${name})
 endfunction()

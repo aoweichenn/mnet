@@ -41,8 +41,8 @@ TEST(Net, RunsSqueezenetEndToEnd) {
 
     float sum = 0.0F;
     for (std::int32_t i = 0; i < out.w; ++i) {
-        EXPECT_GE(out[i], 0.0F);
-        sum += out[i];
+        EXPECT_GE(out[static_cast<std::size_t>(i)], 0.0F);
+        sum += out[static_cast<std::size_t>(i)];
     }
     EXPECT_NEAR(sum, 1.0F, 1e-3F);
 }

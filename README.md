@@ -32,11 +32,14 @@ ex.extract("output", out);
 - `Net::load_model` 使用 `mformat::ModelBinFromDataReader` 顺序读取权重。
 - `Extractor` 通过 `mgraph::Extractor` 懒执行 producer，再复制输出 blob。
 - 已注册层：`Input`、`ReLU`、`Sigmoid`、`TanH`、`Swish`、`Flatten`、`Dropout`、
-  `Threshold`、`Power`、`GELU`、`Softmax`、`Bias`、`Scale`。
+  `Threshold`、`Power`、`GELU`、`Softmax`、`Bias`、`Scale`、`Convolution`、
+  `Pooling`、`InnerProduct`、`Concat`、`Split`。
+- `tests/unit/model_tests.cpp` 已端到端跑通 `squeezenet_v1.1`（227x227x3 →
+  1000 类 softmax，输出概率和校验通过）。
 
 尚未完成：
 
 - 二进制 param（`load_param_bin`）与完整 layer type 表；
-- `Convolution` / `Pooling` / `InnerProduct` 等需要注入 activation、padding 的层；
+- 更多层（BinaryOp/Reshape/Reshape/Permute/Slice/RMSNorm/SDPA 等）；
 - 安装包导出（当前 `add_subdirectory` 消费兄弟模块）；
 - 与 ncnn 参考输出的数值对比测试。
