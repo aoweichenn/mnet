@@ -635,7 +635,8 @@ TEST(Kernel, ConcatBenchmark) {
         ASSERT_EQ(concat.forward(bottoms, fresh, pool_opt), 0);
     }
     const auto t3 = std::chrono::steady_clock::now();
-    std::fprintf(stderr, "concat_fresh_pool=%.2fms\\n", std::chrono::duration<double, std::milli>(t3 - t2).count() / 20.0);
+    std::fprintf(stderr, "concat_fresh_pool=%.2fms\\n",
+                 std::chrono::duration<double, std::milli>(t3 - t2).count() / 20.0);
 }
 
 TEST(Kernel, Convolution3x3Im2colMatchesReference) {
