@@ -62,8 +62,8 @@ ex.extract("output", out);
     5s_6.0、yolov6n、yolov7-tiny、nanodet_m、yolact、yolov8s_worldv2、pelee、
     mnet.25、mobilenet_ssd_voc/ssdlite、PP_OCRv5_mobile_det、yolov4-tiny、
     mobilenet_yolo、mobilenetv2_yolov3、PP_OCRv5_mobile_rec、rfcn_end2end、
-    yolov4-opt 等。ncnn-assets 中所有带 `.bin` 的模型均已跑通
-    （`ZF_faster_rcnn_final` 上游只有 param）。
+    yolov4-opt 等。ncnn-assets 中所有带 `.bin` 的模型均已跑通。
+    `ZF_faster_rcnn_final` 上游只有 param、没有权重，明确不在支持范围内。
   - Qwen3 0.6B int8 单 token：embed → decoder → proj → argmax
   - Qwen3 0.6B int8 两 token decode：把 28 层 KV cache 回灌，验证 cache 复用
   - 文本生成：BPE tokenizer + 23-token chat prompt → 3 个新 token → `Hello! How can`

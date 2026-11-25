@@ -18,6 +18,14 @@ run "用例断言"   python3 "$lib/scripts/check-test-assertions.py" --check
 run "构建零告警" "$lib/scripts/build.sh"
 run "安装包"     "$lib/scripts/package-test.sh"
 
+# Optional numeric parity against an upstream ncnn build. Off by default so
+# the gate stays usable on machines without ncnn.
+if [ "${MNET_NCNN_PARITY:-0}" = "1" ] && [ -x "$lib/../../mcnn/tools/parity/run.sh" ]; then
+    run "ncnn parity" "$lib/../../mcnn/tools/parity/run.sh"
+elif [ "${MNET_NCNN_PARITY:-0}" = "1" ]; then
+    printf '\n== ncnn parity ==\nSKIP: mcnn/tools/parity/run.sh not found\n'
+fi
+
 printf '\n== 测试 ==\n'
 ctest --test-dir "${CPPLIB_BUILD_ROOT:-/tmp/mnet_build}/test" --output-on-failure || fail=1
 
