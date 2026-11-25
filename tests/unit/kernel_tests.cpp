@@ -3,6 +3,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+
+#include <vector>
 
 #include <gtest/gtest.h>
 #include <mformat/model_bin.hpp>
@@ -13,6 +16,7 @@
 #include <mlayer/einsum.hpp>
 #include <mlayer/expanddims.hpp>
 #include <mlayer/gateddeltarule.hpp>
+#include <mlayer/gemm.hpp>
 #include <mlayer/lrn.hpp>
 #include <mlayer/multiheadattention.hpp>
 #include <mlayer/proposal.hpp>
@@ -1761,6 +1765,90 @@ TEST(Kernel, ConvolutionDepthWiseMatchesReference) {
                         << "k=" << shape.kw << " s=" << shape.stride << " q=" << q << " y=" << y << " x=" << x;
                 }
             }
+        }
+    }
+}
+
+TEST(Kernel, GemmFastInt4MatchesInt8Reference) {
+    constexpr std::int32_t N = 4;
+    constexpr std::int32_t K = 128;
+    constexpr std::int32_t block = 64;
+    constexpr std::int32_t M = 3;
+
+    // 4-bit two's-complement weights in ncnn's little-endian packing.
+    std::vector<std::int8_t> q(static_cast<std::size_t>(N) * K);
+    for (std::int32_t j = 0; j < N; ++j) {
+        for (std::int32_t k = 0; k < K; ++k) {
+            q[static_cast<std::size_t>(j * K + k)] = static_cast<std::int8_t>(((j * 7 + k * 3) % 15) - 7);
+        }
+    }
+    std::vector<std::uint8_t> packed(static_cast<std::size_t>(N) * (K / 2), 0);
+    for (std::int32_t j = 0; j < N; ++j) {
+        for (std::int32_t k = 0; k < K; ++k) {
+            const auto value = static_cast<std::uint32_t>(q[static_cast<std::size_t>(j * K + k)]) & 0x0Fu;
+            const std::size_t byte = static_cast<std::size_t>(j) * (K / 2) + static_cast<std::size_t>(k / 2);
+            packed[byte] |= static_cast<std::uint8_t>(value << ((k % 2) * 4));
+        }
+    }
+
+    mnet::Mat w4;
+    w4.create(static_cast<std::int32_t>(packed.size()), static_cast<std::size_t>(1u));
+    std::memcpy(w4.data, packed.data(), packed.size());
+    mnet::Mat w8;
+    w8.create(N * K, static_cast<std::size_t>(1u));
+    std::memcpy(w8.data, q.data(), q.size());
+
+    mnet::Mat scales;
+    scales.create(K / block, N, static_cast<std::size_t>(4u), nullptr);
+    for (std::int32_t j = 0; j < N; ++j) {
+        for (std::int32_t b = 0; b < K / block; ++b) {
+            scales.row(j)[b] = 9.0F + static_cast<float>(j) + static_cast<float>(b);
+        }
+    }
+
+    using G = mlayer::Gemm<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, mformat::ModelBin>;
+    auto make_params = [](std::int32_t term) {
+        mformat::ParamDict pd;
+        pd.set(3, 1);
+        pd.set(5, 1);
+        pd.set(6, 1);
+        pd.set(8, N);
+        pd.set(9, K);
+        pd.set(10, -1);
+        pd.set(18, term);
+        return pd;
+    };
+
+    G gemm4;
+    ASSERT_EQ(gemm4.load_param(make_params(401)), 0);
+    mnet::Mat weights4[2] = {w4, scales};
+    ASSERT_EQ(gemm4.load_model(mformat::ModelBinFromMatArray(weights4)), 0);
+
+    G gemm8;
+    ASSERT_EQ(gemm8.load_param(make_params(801)), 0);
+    mnet::Mat weights8[2] = {w8, scales};
+    ASSERT_EQ(gemm8.load_model(mformat::ModelBinFromMatArray(weights8)), 0);
+
+    mnet::Mat in;
+    in.create(K, M);
+    auto* ptr = static_cast<float*>(in.data);
+    for (std::int32_t i = 0; i < K * M; ++i) {
+        ptr[i] = std::sin(0.017F * static_cast<float>(i) + 0.12F);
+    }
+
+    mnet::Option opt_fast;
+    opt_fast.use_fast_int4_gemm = true;
+    mnet::Option opt_ref;
+
+    mnet::Mat out4;
+    mnet::Mat out8;
+    ASSERT_EQ(gemm4.forward(in, out4, opt_fast), 0);
+    ASSERT_EQ(gemm8.forward(in, out8, opt_ref), 0);
+    ASSERT_EQ(out4.w, N);
+    ASSERT_EQ(out4.h, M);
+    for (std::int32_t i = 0; i < M; ++i) {
+        for (std::int32_t j = 0; j < N; ++j) {
+            EXPECT_FLOAT_EQ(out4.row(i)[j], out8.row(i)[j]) << "i=" << i << " j=" << j;
         }
     }
 }

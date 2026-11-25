@@ -145,6 +145,18 @@ std::int32_t argmax(const mnet::Net& proj_net, const mnet::Mat& hidden_row) {
     }
     const float* row = logits.dims == 1 ? static_cast<const float*>(logits) : logits.row(0);
     std::int32_t best = 0;
+    if (std::getenv("MNET_LLM_DEBUG") != nullptr) {
+        double sum = 0.0;
+        double abs_sum = 0.0;
+        float maxv = row[0];
+        for (std::int32_t i = 0; i < logits.w; ++i) {
+            sum += static_cast<double>(row[i]);
+            abs_sum += std::fabs(static_cast<double>(row[i]));
+            maxv = std::max(maxv, row[i]);
+        }
+        std::fprintf(stderr, "logits n=%d sum=%.6f abs_sum=%.6f max=%.6f first=%.6f\n", logits.w, sum, abs_sum,
+                     static_cast<double>(maxv), static_cast<double>(row[0]));
+    }
     for (std::int32_t i = 1; i < logits.w; ++i) {
         if (row[i] > row[best]) {
             best = i;
@@ -161,6 +173,7 @@ int main(int argc, char** argv) {
     std::int32_t threads = 4;
     std::int32_t max_new_tokens = 8;
     bool load_only = false;
+    bool fast_int4 = false;
     for (std::int32_t i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             model_dir = argv[++i];
@@ -172,6 +185,8 @@ int main(int argc, char** argv) {
             max_new_tokens = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--load-only") == 0) {
             load_only = true;
+        } else if (std::strcmp(argv[i], "--fast-int4") == 0) {
+            fast_int4 = true;
         } else {
             std::fprintf(stderr, "unknown argument %s\n", argv[i]);
             return 2;
@@ -179,7 +194,8 @@ int main(int argc, char** argv) {
     }
     if (model_dir.empty()) {
         std::fprintf(stderr,
-                     "usage: mnet_llm --model DIR [--prompt TEXT] [--threads N] [--max-new-tokens N]\n");
+                     "usage: mnet_llm --model DIR [--prompt TEXT] [--threads N] [--max-new-tokens N] "
+                     "[--fast-int4]\n");
         return 2;
     }
 
@@ -202,6 +218,7 @@ int main(int argc, char** argv) {
     }
     mnet::Net decoder_net;
     decoder_net.opt().num_threads = threads;
+    decoder_net.opt().use_fast_int4_gemm = fast_int4;
     if (decoder_net.load((model_dir + "/" + cfg.decoder_param).c_str(),
                          (model_dir + "/" + cfg.decoder_bin).c_str()) != 0) {
         std::fprintf(stderr, "decoder load failed\n");
@@ -209,6 +226,7 @@ int main(int argc, char** argv) {
     }
     mnet::Net proj_net;
     proj_net.opt().num_threads = threads;
+    proj_net.opt().use_fast_int4_gemm = fast_int4;
     if (proj_net.load((model_dir + "/" + cfg.proj_param).c_str(), (model_dir + "/" + cfg.proj_bin).c_str()) != 0) {
         std::fprintf(stderr, "proj load failed\n");
         return 1;

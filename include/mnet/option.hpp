@@ -20,6 +20,10 @@ struct Option {
     bool use_light_mode = true;
     bool use_packing_layout = false;
     bool use_int8_inference = false;
+    // Opt-in fast 4-bit weight-block Gemm: quantizes activations to int8 and
+    // unpacks 4-bit weights on the fly. Faster than ncnn's fp32-activation int4
+    // reference path, with slightly different numerics.
+    bool use_fast_int4_gemm = false;
     bool use_bf16_storage = false;
     bool use_fp16_storage = false;
     bool use_fp16_packed = false;
