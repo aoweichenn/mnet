@@ -1,0 +1,52 @@
+# mzip C++ style. Derived from nova/.clang-format (clang-format 22.1.8).
+---
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++20
+IndentWidth: 4
+ContinuationIndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+AccessModifierOffset: -4
+NamespaceIndentation: None
+FixNamespaceComments: true
+DerivePointerAlignment: false
+PointerAlignment: Left
+ReferenceAlignment: Left
+BreakBeforeBraces: Attach
+InsertBraces: true
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+MainIncludeChar: AngleBracket
+IncludeCategories:
+  # clang-format assigns the matching main header priority 0.
+  - Regex: '^<mzip/'
+    Priority: 4
+  - Regex: '^zip/'
+    Priority: 2
+  - Regex: '^<(boost|nlohmann|gtest|gmock|benchmark|openssl|curl|yaml-cpp|ftxui|CLI)/'
+    Priority: 3
+  - Regex: '^<(sqlite3|yaml|vips|vterm|zlib)(/|\.h>)'
+    Priority: 3
+  - Regex: '^<((c(assert|ctype|errno|fenv|float|inttypes|limits|locale|math|setjmp|signal|stdarg|stddef|stdint|stdio|stdlib|string|time|uchar|wchar|wctype))|([a-z_][a-z_0-9]*/)*[a-z_][a-z_0-9]*\.h)>$'
+    Priority: 1
+  - Regex: '^<[a-z_][a-z_0-9]*>$'
+    Priority: 2
+  - Regex: '.*'
+    Priority: 3
+ConstructorInitializerIndentWidth: 8
+AlignAfterOpenBracket: Align
+BinPackArguments: true
+BinPackParameters: true
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowShortLambdasOnASingleLine: All
+ReflowComments: true
+SpacesBeforeTrailingComments: 2
+SpaceAfterTemplateKeyword: false

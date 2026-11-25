@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.24)
+project(mnet_consumer LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+find_package(mnet 0.1 CONFIG REQUIRED)
+add_executable(mnet_consumer main.cpp)
+target_link_libraries(mnet_consumer PRIVATE mnet::mnet)
