@@ -107,6 +107,7 @@
 #include <mlayer/threshold.hpp>
 #include <mlayer/tile.hpp>
 #include <mlayer/unaryop.hpp>
+#include <mlayer/unfold.hpp>
 #include <mlayer/yolodetectionoutput.hpp>
 #include <mlayer/yolov3detectionoutput.hpp>
 #include <mlayer/yolov5focus.hpp>
@@ -240,6 +241,8 @@ void register_builtins() {
     add("Squeeze", &make_layer<mlayer::Squeeze<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Padding", &make_layer<mlayer::Padding<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("Tile", &make_layer<mlayer::Tile<Layer, MatT, OptionT, ParamDictT>>);
+    add("Unfold", &make_layer<mlayer::Unfold<Layer, MatT, OptionT, ParamDictT>>);
+    add("Fold", &make_layer<mlayer::Fold<Layer, MatT, OptionT, ParamDictT, mnet::copy_cut_border>>);
     add("GridSample", &make_layer<mlayer::GridSample<Layer, MatT, OptionT, ParamDictT, false>>);
     add("LSTM", &make_layer<mlayer::LSTM<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
     add("GRU", &make_layer<mlayer::GRU<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
