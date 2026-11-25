@@ -48,8 +48,9 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
                 return -1;
             }
             const Mat& bottom = blob_mats[bottom_index];
+            Mat& top = blob_mats[top_index];
             if (layer->support_inplace) {
-                Mat top = bottom.clone(opt.blob_allocator);
+                top = bottom.clone(opt.blob_allocator);
                 if (top.empty()) {
                     return -100;
                 }
@@ -57,10 +58,9 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
                 if (ret != 0) {
                     return ret;
                 }
-                blob_mats[top_index] = top;
                 return 0;
             }
-            return layer->forward(bottom, blob_mats[top_index], opt);
+            return layer->forward(bottom, top, opt);
         }
 
         std::vector<Mat> bottoms;

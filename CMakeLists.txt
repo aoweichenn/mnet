@@ -79,6 +79,8 @@ add_library(mnet_objs OBJECT
 target_include_directories(mnet_objs
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(mnet_objs SYSTEM PRIVATE
+    $<TARGET_PROPERTY:mlayer::mlayer,INTERFACE_INCLUDE_DIRECTORIES>)
 
 target_compile_options(mnet_objs PRIVATE ${MNET_WARNINGS})
 target_link_libraries(mnet_objs PRIVATE mformat::mformat mgraph::mgraph mlayer::mlayer OpenMP::OpenMP_CXX)

@@ -10,17 +10,25 @@
 
 #include <mformat/model_bin.hpp>
 #include <mlayer/bias.hpp>
+#include <mlayer/concat.hpp>
+#include <mlayer/convolution.hpp>
 #include <mlayer/dropout.hpp>
 #include <mlayer/flatten.hpp>
 #include <mlayer/gelu.hpp>
+#include <mlayer/innerproduct.hpp>
+#include <mlayer/pooling.hpp>
 #include <mlayer/power.hpp>
 #include <mlayer/relu.hpp>
 #include <mlayer/scale.hpp>
 #include <mlayer/sigmoid.hpp>
 #include <mlayer/softmax.hpp>
+#include <mlayer/split.hpp>
 #include <mlayer/swish.hpp>
 #include <mlayer/tanh.hpp>
 #include <mlayer/threshold.hpp>
+#include <mnet/activation.hpp>
+#include <mnet/border.hpp>
+#include <mnet/quantize.hpp>
 
 namespace mnet {
 namespace {
@@ -29,6 +37,12 @@ using MatT = mnet::Mat;
 using OptionT = mnet::Option;
 using ParamDictT = mformat::ParamDict;
 using ModelBinT = mformat::ModelBin;
+
+using ConvolutionT = mlayer::Convolution<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, false, mnet::activation_ss,
+                                         mnet::quantize_int8, mnet::copy_make_border>;
+using PoolingT = mlayer::Pooling<Layer, MatT, OptionT, ParamDictT, false, mnet::copy_make_border>;
+using InnerProductT = mlayer::InnerProduct<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, false,
+                                           mnet::activation_ss, mnet::quantize_int8>;
 
 class InputLayer final : public Layer {
 public:
@@ -72,6 +86,11 @@ void register_builtins() {
     add("Softmax", &make_layer<mlayer::Softmax<Layer, MatT, OptionT, ParamDictT>>);
     add("Bias", &make_layer<mlayer::Bias<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("Scale", &make_layer<mlayer::Scale<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("Convolution", &make_layer<ConvolutionT>);
+    add("Pooling", &make_layer<PoolingT>);
+    add("InnerProduct", &make_layer<InnerProductT>);
+    add("Concat", &make_layer<mlayer::Concat<Layer, MatT, OptionT, ParamDictT>>);
+    add("Split", &make_layer<mlayer::Split<Layer, MatT, OptionT>>);
 }
 
 }  // namespace
