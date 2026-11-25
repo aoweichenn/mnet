@@ -79,6 +79,41 @@ inline void copy_cut_border(const Mat& src, Mat& dst, std::int32_t top, std::int
     }
 }
 
+// Constant-pad a 4D blob (w, h, d, c) for 3D convolutions.
+[[maybe_unused]] inline void copy_make_border_3d(const Mat& src, Mat& dst, std::int32_t top, std::int32_t bottom,
+                                                 std::int32_t left, std::int32_t right, std::int32_t front,
+                                                 std::int32_t behind, std::int32_t /*type*/, float v,
+                                                 const Option& opt) {
+    if (top == 0 && bottom == 0 && left == 0 && right == 0 && front == 0 && behind == 0) {
+        dst = src;
+        return;
+    }
+    if (src.elemsize != 4u) {
+        dst = src;
+        return;
+    }
+
+    const std::int32_t w = src.w;
+    const std::int32_t h = src.h;
+    const std::int32_t d = src.d;
+    const std::int32_t c = src.c;
+    dst.release();
+    dst.create(w + left + right, h + top + bottom, d + front + behind, c, 4u, opt.workspace_allocator);
+    if (dst.empty()) {
+        return;
+    }
+    dst.fill(v);
+
+    for (std::int32_t q = 0; q < c; ++q) {
+        for (std::int32_t z = 0; z < d; ++z) {
+            for (std::int32_t y = 0; y < h; ++y) {
+                std::memcpy(dst.channel(q).depth(z + front).row(y + top) + left, src.channel(q).depth(z).row(y),
+                            static_cast<std::size_t>(w) * sizeof(float));
+            }
+        }
+    }
+}
+
 // Flatten all channels into a 1D Mat without copying more than once per channel.
 inline void flatten(const Mat& src, Mat& dst, const Option& opt) {
     if (src.dims == 1) {

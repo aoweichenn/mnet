@@ -17,6 +17,8 @@
 #include <mlayer/clip.hpp>
 #include <mlayer/concat.hpp>
 #include <mlayer/convolution.hpp>
+#include <mlayer/convolution1d.hpp>
+#include <mlayer/convolution3d.hpp>
 #include <mlayer/convolutiondepthwise.hpp>
 #include <mlayer/crop.hpp>
 #include <mlayer/deconvolution.hpp>
@@ -24,7 +26,9 @@
 #include <mlayer/dropout.hpp>
 #include <mlayer/einsum.hpp>
 #include <mlayer/eltwise.hpp>
+#include <mlayer/elu.hpp>
 #include <mlayer/embed.hpp>
+#include <mlayer/erf.hpp>
 #include <mlayer/exp.hpp>
 #include <mlayer/expanddims.hpp>
 #include <mlayer/flatten.hpp>
@@ -40,10 +44,12 @@
 #include <mlayer/log.hpp>
 #include <mlayer/matmul.hpp>
 #include <mlayer/memorydata.hpp>
+#include <mlayer/mish.hpp>
 #include <mlayer/multiheadattention.hpp>
 #include <mlayer/noop.hpp>
 #include <mlayer/normalize.hpp>
 #include <mlayer/permute.hpp>
+#include <mlayer/pixelshuffle.hpp>
 #include <mlayer/pooling.hpp>
 #include <mlayer/power.hpp>
 #include <mlayer/prelu.hpp>
@@ -52,16 +58,19 @@
 #include <mlayer/psroipooling.hpp>
 #include <mlayer/reduction.hpp>
 #include <mlayer/relu.hpp>
+#include <mlayer/reorg.hpp>
 #include <mlayer/reshape.hpp>
 #include <mlayer/rmsnorm.hpp>
 #include <mlayer/rotaryembed.hpp>
 #include <mlayer/scale.hpp>
 #include <mlayer/sdpa.hpp>
+#include <mlayer/selu.hpp>
 #include <mlayer/shortconv.hpp>
 #include <mlayer/shufflechannel.hpp>
 #include <mlayer/sigmoid.hpp>
 #include <mlayer/slice.hpp>
 #include <mlayer/softmax.hpp>
+#include <mlayer/softplus.hpp>
 #include <mlayer/split.hpp>
 #include <mlayer/squeeze.hpp>
 #include <mlayer/swish.hpp>
@@ -167,6 +176,18 @@ void register_builtins() {
     add("GatedDeltaRule", &make_layer<mlayer::GatedDeltaRule<Layer, MatT, OptionT>>);
     add("Proposal", &make_layer<mlayer::Proposal<Layer, MatT, OptionT, ParamDictT, false>>);
     add("PSROIPooling", &make_layer<mlayer::PSROIPooling<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("ELU", &make_layer<mlayer::ELU<Layer, MatT, OptionT, ParamDictT>>);
+    add("Erf", &make_layer<mlayer::Erf<Layer, MatT, OptionT>>);
+    add("Mish", &make_layer<mlayer::Mish<Layer, MatT, OptionT>>);
+    add("SELU", &make_layer<mlayer::SELU<Layer, MatT, OptionT, ParamDictT>>);
+    add("Softplus", &make_layer<mlayer::Softplus<Layer, MatT, OptionT>>);
+    add("PixelShuffle", &make_layer<mlayer::PixelShuffle<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Reorg", &make_layer<mlayer::Reorg<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Convolution1D",
+        &make_layer<mlayer::Convolution1D<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, mnet::activation_ss,
+                                          mnet::copy_make_border, mnet::flatten>>);
+    add("Convolution3D", &make_layer<mlayer::Convolution3D<Layer, MatT, OptionT, ParamDictT, ModelBinT, false,
+                                                           mnet::activation_ss, mnet::copy_make_border_3d>>);
     add("MultiHeadAttention",
         &make_layer<mlayer::MultiHeadAttention<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
     add("YoloV5Focus", &make_layer<mlayer::YoloV5Focus<Layer, MatT, OptionT>>);
@@ -206,30 +227,56 @@ Layer* create_layer(const char* type) {
 }
 
 Layer* create_layer_by_index(std::int32_t type_index) {
-    // Values match the ncnn binary param ABI (layer_type_enum.h).
+    // Complete mapping for every registered layer that has a stable ncnn
+    // binary type index (ncnn layer_type_enum.h). Layers newer than the enum
+    // (YoloV5Focus, ShortConv, GatedDeltaRule) are text-only for now.
     switch (type_index) {
+        case 0:
+            return create_layer("AbsVal");
         case 2:
             return create_layer("BatchNorm");
         case 3:
             return create_layer("Bias");
+        case 4:
+            return create_layer("BNLL");
         case 5:
             return create_layer("Concat");
         case 6:
             return create_layer("Convolution");
+        case 7:
+            return create_layer("Crop");
+        case 8:
+            return create_layer("Deconvolution");
         case 9:
             return create_layer("Dropout");
+        case 10:
+            return create_layer("Eltwise");
+        case 11:
+            return create_layer("ELU");
         case 12:
             return create_layer("Embed");
+        case 13:
+            return create_layer("Exp");
         case 14:
             return create_layer("Flatten");
         case 15:
             return create_layer("InnerProduct");
         case 16:
             return create_layer("Input");
+        case 17:
+            return create_layer("Log");
+        case 19:
+            return create_layer("MemoryData");
         case 21:
             return create_layer("Pooling");
         case 22:
             return create_layer("Power");
+        case 23:
+            return create_layer("PReLU");
+        case 24:
+            return create_layer("Proposal");
+        case 25:
+            return create_layer("Reduction");
         case 26:
             return create_layer("ReLU");
         case 27:
@@ -248,60 +295,82 @@ Layer* create_layer_by_index(std::int32_t type_index) {
             return create_layer("TanH");
         case 36:
             return create_layer("Threshold");
+        case 40:
+            return create_layer("BinaryOp");
+        case 41:
+            return create_layer("UnaryOp");
         case 42:
             return create_layer("ConvolutionDepthWise");
+        case 44:
+            return create_layer("Squeeze");
+        case 45:
+            return create_layer("ExpandDims");
+        case 46:
+            return create_layer("Normalize");
+        case 47:
+            return create_layer("Permute");
+        case 48:
+            return create_layer("PriorBox");
+        case 49:
+            return create_layer("DetectionOutput");
         case 50:
             return create_layer("Interp");
+        case 51:
+            return create_layer("DeconvolutionDepthWise");
         case 52:
             return create_layer("ShuffleChannel");
+        case 54:
+            return create_layer("Clip");
+        case 55:
+            return create_layer("Reorg");
+        case 56:
+            return create_layer("YoloDetectionOutput");
+        case 59:
+            return create_layer("Yolov3DetectionOutput");
+        case 60:
+            return create_layer("PSROIPooling");
+        case 65:
+            return create_layer("HardSigmoid");
+        case 66:
+            return create_layer("SELU");
+        case 67:
+            return create_layer("HardSwish");
+        case 68:
+            return create_layer("Noop");
+        case 69:
+            return create_layer("PixelShuffle");
+        case 71:
+            return create_layer("Mish");
         case 73:
             return create_layer("Swish");
         case 74:
             return create_layer("Gemm");
+        case 75:
+            return create_layer("GroupNorm");
+        case 76:
+            return create_layer("LayerNorm");
+        case 77:
+            return create_layer("Softplus");
         case 79:
             return create_layer("MultiHeadAttention");
-        case 24:
-            return create_layer("Proposal");
-        case 60:
-            return create_layer("PSROIPooling");
         case 80:
             return create_layer("GELU");
+        case 81:
+            return create_layer("Convolution1D");
+        case 84:
+            return create_layer("Convolution3D");
         case 87:
             return create_layer("MatMul");
+        case 92:
+            return create_layer("Einsum");
+        case 100:
+            return create_layer("Erf");
         case 104:
             return create_layer("RMSNorm");
         case 108:
             return create_layer("SDPA");
         case 109:
             return create_layer("RotaryEmbed");
-        case 19:
-            return create_layer("MemoryData");
-        case 25:
-            return create_layer("Reduction");
-        case 41:
-            return create_layer("UnaryOp");
-        case 45:
-            return create_layer("ExpandDims");
-        case 48:
-            return create_layer("PriorBox");
-        case 49:
-            return create_layer("DetectionOutput");
-        case 68:
-            return create_layer("Noop");
-        case 7:
-            return create_layer("Crop");
-        case 10:
-            return create_layer("Eltwise");
-        case 44:
-            return create_layer("Squeeze");
-        case 51:
-            return create_layer("DeconvolutionDepthWise");
-        case 56:
-            return create_layer("YoloDetectionOutput");
-        case 59:
-            return create_layer("Yolov3DetectionOutput");
-        case 92:
-            return create_layer("Einsum");
         default:
             return nullptr;
     }

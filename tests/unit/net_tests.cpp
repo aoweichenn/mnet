@@ -9,6 +9,7 @@
 #include <string>
 
 #include <gtest/gtest.h>
+#include <mnet/layer_registry.hpp>
 #include <mnet/net.hpp>
 
 namespace {
@@ -160,4 +161,18 @@ TEST(Net, RunsZeroBottomMemoryData) {
     ASSERT_EQ(out.w, 2);
     EXPECT_FLOAT_EQ(out[0], 1.5F);
     EXPECT_FLOAT_EQ(out[1], -2.5F);
+}
+
+TEST(Net, BinaryIndexTableCoversRegisteredLayers) {
+    // Newly populated indices that models may reference from binary params.
+    const std::int32_t indices[] = {0,  4,  8,  11, 13, 17, 23, 40, 46, 47, 54, 55,
+                                    65, 67, 66, 69, 71, 75, 76, 77, 81, 84, 100};
+    for (const std::int32_t index : indices) {
+        mnet::Layer* layer = mnet::create_layer_by_index(index);
+        ASSERT_NE(layer, nullptr) << "type index " << index;
+        delete layer;
+    }
+    // Unsupported types must fail cleanly instead of creating a wrong layer.
+    EXPECT_EQ(mnet::create_layer_by_index(1), nullptr);
+    EXPECT_EQ(mnet::create_layer_by_index(9999), nullptr);
 }

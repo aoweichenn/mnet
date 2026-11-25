@@ -34,7 +34,9 @@ ex.extract("output", out);
 ## 当前状态
 
 - `Net::load_param` 按 magic（`7767517`）自动识别文本/二进制 param，分别走
-  `mgraph::Graph::load_param` / `load_param_bin`；二进制按 ncnn type index 建层。
+  `mgraph::Graph::load_param` / `load_param_bin`；二进制按 ncnn type index 建层，
+  已覆盖全部有稳定 ncnn type index 的已注册层（70 个），仅有
+  `YoloV5Focus` / `ShortConv` / `GatedDeltaRule` 因上游枚举未包含而只支持文本名。
 - `Net::load_model` 使用 `mformat::ModelBinFromDataReader` 顺序读取权重。
 - `Extractor` 通过 `mgraph::Extractor` 懒执行 producer，再复制输出 blob。
 - 已注册层：`Input`、`ReLU`、`Sigmoid`、`TanH`、`Swish`、`Flatten`、`Dropout`、
@@ -48,7 +50,8 @@ ex.extract("output", out);
   `UnaryOp`、`ExpandDims`、`Reduction`、`Einsum`、`Crop`、`Squeeze`、
   `YoloDetectionOutput`、`Yolov3DetectionOutput`、`ShortConv`、`GatedDeltaRule`、
   `MultiHeadAttention`（fp32、自注意力/交叉注意力、可选 mask）、`Proposal`、
-  `PSROIPooling`（Faster-RCNN / RFCN 的 ROI 生成与池化）。
+  `PSROIPooling`（Faster-RCNN / RFCN 的 ROI 生成与池化）、`ELU`、`SELU`、`Erf`、
+  `Mish`、`Softplus`、`PixelShuffle`、`Reorg`、`Convolution1D`、`Convolution3D`。
 - `tests/unit/model_tests.cpp` 已端到端跑通：
   - `squeezenet_v1.1`（227x227x3 → 1000 类 softmax，概率和校验）
   - `shufflenet_v2_x0.5`（224x224x3 → 1000 维输出，覆盖 ConvDW/BN/Slice/ShuffleChannel）
@@ -78,10 +81,13 @@ ex.extract("output", out);
 所有已发布 `.bin` 的 param 现在都能找到对应 layer 实现；`rfcn_end2end` 与
 `yolov4-opt` 上游只发布 param、没有权重，无法端到端验证。
 
+数值一致性：`mcnn/tools/parity` 用同一份 param/bin 同时跑上游 ncnn 与 mnet，
+对比 3x3 Winograd 卷积（含 ReLU）与 1x1 卷积输出，最大绝对误差分别为
+`9.5e-7` 和 `6e-8`。
+
 尚未完成：
 
-- 二进制 type 表仍不完整；SSD 系列在随机输入下无检测框（`DetectionOutput`
-  返回空，行为与 ncnn 一致）；
+- SSD 系列在随机输入下无检测框（`DetectionOutput` 返回空，行为与 ncnn 一致）；
 - yolo11n 约 1.6 倍慢于 ncnn（52 ms vs 32 ms），热点仍是 3x3 Convolution
   （Winograd 后约 31 ms）与 1x1 Convolution（约 12 ms）；
   `MultiHeadAttention` 的 KV-cache 与量化路径尚未移植（遇到时返回 -1）；
