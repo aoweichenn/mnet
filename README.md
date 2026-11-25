@@ -81,23 +81,32 @@ ex.extract("output", out);
   同一台机器上 ncnn 基线（1B 4 线程 41.3 ms/tok / 3.21 GB，2B 4 线程
   103.6 ms/tok / 6.25 GB），mnet 的 decode 更快、峰值内存更低。
 
+  LM head 量化流程已脚本化：`mcnn/tools/quantize/quantize_lm_head.sh` 调用
+  ncnn 的 `ncnnllm2int` 把 `model.json` 里的 `proj_out` 权重压成 8-bit
+  （block 64），其余文件以相对软链复用，并改写 `model.json` 指向新权重；
+  对绑定词表的模型会保留共享的 embedding 权重文件。
+
 所有已发布 `.bin` 的 param 现在都能找到对应 layer 实现；`rfcn_end2end` 与
 `yolov4-opt` 的权重在上游以分卷 `.partNN` 发布，拼接后可端到端运行。
 `mnet_probe --allow-empty` 用于随机输入下检测头输出为空的模型。
 
 数值一致性：`mcnn/tools/parity` 用同一份 param/bin 同时跑上游 ncnn 与 mnet，
-已覆盖 23 类算子：3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、Gemm
-（常量转置权重）、Interp、SDPA、Pooling、Softmax、Concat、BatchNorm、Permute、
-Slice、MatMul、Reshape、DetectionOutput、Yolov3DetectionOutput、Eltwise、
-PReLU、Clip、ExpandDims、Reduction、Einsum、UnaryOp，最大绝对误差均 ≤ 1e-6。
-`MNET_NCNN_PARITY=1` 运行 23 类层对齐，`MNET_NCNN_MODELS=1` 运行 34 个模型
-的端到端对齐。
+已覆盖 39 类算子：3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、Gemm
+（常量转置权重）、InnerProduct、Interp、SDPA、Pooling、Softmax、Concat、
+BatchNorm、GroupNorm、LayerNorm、Permute、Slice、Split、MatMul、Reshape、
+DetectionOutput、Yolov3DetectionOutput、Eltwise、BinaryOp（张量与标量）、
+PReLU、Clip、ExpandDims、Reduction、Einsum、UnaryOp、Swish、ReLU、
+Sigmoid、HardSigmoid、HardSwish、Dropout、Noop、Flatten、ShuffleChannel、
+MemoryData、MultiHeadAttention（prefill 与单 token KV-cache 解码），
+最大绝对误差均 ≤ 1e-6。
+`MNET_NCNN_PARITY=1` 运行 39 类层对齐，`MNET_NCNN_MODELS=1` 运行 34 个模型
+的端到端对齐（模型清单见 `mcnn/tools/parity/models.txt`，可用参数替换）。
 另提供 `tools/parity/model_compare`：同一模型文件与输入同时跑 ncnn 与 mnet，
-可比较任意 blob 或多个输出。26 个模型端到端对齐（max_abs_diff / 相对误差）：
-yolo11n 1.2e-4、yolov8n 1.2e-4、PP-OCRv5 rec 1.3e-4（含 MHA）、yolact 1.3e-5、
-nanodet_m 3.3e-6、worldv2 8.5e-3（相对 4e-5）、squeezenet 4.7e-7。
+可比较任意 blob 或多个输出。34 个带权重模型端到端对齐，最差绝对误差 ≤ 8.5e-3
+（worldv2，相对 4e-4），其余 ≤ 3.5e-4：yolo11n 1.2e-4、yolov8n 1.2e-4、
+PP-OCRv5 rec 1.3e-4（含 MHA）、yolact 1.3e-5、nanodet_m 3.3e-6、squeezenet 4.7e-7。
 该工具先后定位并修复了 Interp 双线性边界越界外插和 Reduction 4D→3D 形状映射
-两个 bug。
+两个 bug，并确认 `yolov4-tiny-opt` 只能在导出尺寸 416 下运行（固定 Crop）。
 
 尚未完成：
 
