@@ -15,6 +15,7 @@
 #include <mlayer/bias.hpp>
 #include <mlayer/binaryop.hpp>
 #include <mlayer/bnll.hpp>
+#include <mlayer/cast.hpp>
 #include <mlayer/celu.hpp>
 #include <mlayer/clip.hpp>
 #include <mlayer/concat.hpp>
@@ -22,10 +23,13 @@
 #include <mlayer/convolution1d.hpp>
 #include <mlayer/convolution3d.hpp>
 #include <mlayer/convolutiondepthwise.hpp>
+#include <mlayer/copyto.hpp>
 #include <mlayer/crop.hpp>
+#include <mlayer/cumulativesum.hpp>
 #include <mlayer/deconvolution.hpp>
 #include <mlayer/deepcopy.hpp>
 #include <mlayer/detectionoutput.hpp>
+#include <mlayer/diag.hpp>
 #include <mlayer/dropout.hpp>
 #include <mlayer/einsum.hpp>
 #include <mlayer/eltwise.hpp>
@@ -35,6 +39,7 @@
 #include <mlayer/exp.hpp>
 #include <mlayer/expanddims.hpp>
 #include <mlayer/flatten.hpp>
+#include <mlayer/flip.hpp>
 #include <mlayer/gateddeltarule.hpp>
 #include <mlayer/gelu.hpp>
 #include <mlayer/gemm.hpp>
@@ -45,6 +50,7 @@
 #include <mlayer/hardsigmoid.hpp>
 #include <mlayer/hardswish.hpp>
 #include <mlayer/innerproduct.hpp>
+#include <mlayer/instancenorm.hpp>
 #include <mlayer/interp.hpp>
 #include <mlayer/layernorm.hpp>
 #include <mlayer/log.hpp>
@@ -54,6 +60,7 @@
 #include <mlayer/memorydata.hpp>
 #include <mlayer/mish.hpp>
 #include <mlayer/multiheadattention.hpp>
+#include <mlayer/mvn.hpp>
 #include <mlayer/noop.hpp>
 #include <mlayer/normalize.hpp>
 #include <mlayer/padding.hpp>
@@ -84,7 +91,9 @@
 #include <mlayer/softmax.hpp>
 #include <mlayer/softplus.hpp>
 #include <mlayer/split.hpp>
+#include <mlayer/spp.hpp>
 #include <mlayer/squeeze.hpp>
+#include <mlayer/statisticspooling.hpp>
 #include <mlayer/swish.hpp>
 #include <mlayer/tanh.hpp>
 #include <mlayer/threshold.hpp>
@@ -176,6 +185,15 @@ void register_builtins() {
     add("DeepCopy", &make_layer<mlayer::DeepCopy<Layer, MatT, OptionT>>);
     add("ArgMax", &make_layer<mlayer::ArgMax<Layer, MatT, OptionT, ParamDictT>>);
     add("GLU", &make_layer<mlayer::GLU<Layer, MatT, OptionT, ParamDictT>>);
+    add("Cast", &make_layer<mlayer::Cast<Layer, MatT, OptionT, ParamDictT>>);
+    add("CumulativeSum", &make_layer<mlayer::CumulativeSum<Layer, MatT, OptionT, ParamDictT>>);
+    add("CopyTo", &make_layer<mlayer::CopyTo<Layer, MatT, OptionT, ParamDictT>>);
+    add("Diag", &make_layer<mlayer::Diag<Layer, MatT, OptionT, ParamDictT>>);
+    add("SPP", &make_layer<mlayer::SPP<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("StatisticsPooling", &make_layer<mlayer::StatisticsPooling<Layer, MatT, OptionT, ParamDictT>>);
+    add("Flip", &make_layer<mlayer::Flip<Layer, MatT, OptionT, ParamDictT>>);
+    add("InstanceNorm", &make_layer<mlayer::InstanceNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("MVN", &make_layer<mlayer::MVN<Layer, MatT, OptionT, ParamDictT>>);
     add("Exp", &make_layer<mlayer::Exp<Layer, MatT, OptionT, ParamDictT>>);
     add("Log", &make_layer<mlayer::Log<Layer, MatT, OptionT, ParamDictT>>);
     add("LRN", &make_layer<mlayer::LRN<Layer, MatT, OptionT, ParamDictT>>);
