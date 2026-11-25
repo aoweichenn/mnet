@@ -40,7 +40,8 @@ ex.extract("output", out);
   - `squeezenet_v1.1`（227x227x3 → 1000 类 softmax，概率和校验）
   - `shufflenet_v2_x0.5`（224x224x3 → 1000 维输出，覆盖 ConvDW/BN/Slice/ShuffleChannel）
   - `yolo11n`（640x640x3 → `out0`，覆盖 Reshape/Permute/Slice/BinaryOp/MatMul/Interp）
-  - Qwen3 0.6B 单 token：embed → decoder → proj → argmax（覆盖 Gemm/RotaryEmbed/SDPA/KV cache）
+  - Qwen3 0.6B int8 单 token：embed → decoder → proj → argmax
+  - Qwen3 0.6B int8 两 token decode：把 28 层 KV cache 回灌，验证 cache 复用
 
 尚未完成：
 

@@ -259,3 +259,112 @@ TEST(Net, RunsQwen3TokenStep) {
     EXPECT_LT(best, vocab);
     EXPECT_TRUE(std::isfinite(row[best]));
 }
+
+TEST(Net, RunsQwen3TwoTokenDecode) {
+    const char* dir_env = std::getenv("MNET_QWEN3_DIR");
+    if (dir_env == nullptr) {
+        GTEST_SKIP() << "set MNET_QWEN3_DIR to run the decode test";
+    }
+    const std::filesystem::path dir(dir_env);
+    const std::string embed_param = (dir / "qwen3_embed_token.ncnn.param").string();
+    const std::string embed_bin = (dir / "qwen3_embed_token.ncnn.bin").string();
+    const std::string decoder_param = (dir / "qwen3_decoder.ncnn.param").string();
+    const std::string decoder_bin = (dir / "qwen3_decoder.ncnn.bin").string();
+    const std::string proj_param = (dir / "qwen3_proj_out.ncnn.param").string();
+
+    mnet::Net embed_net;
+    embed_net.opt().num_threads = 4;
+    ASSERT_EQ(embed_net.load(embed_param.c_str(), embed_bin.c_str()), 0);
+    mnet::Net decoder_net;
+    decoder_net.opt().num_threads = 4;
+    ASSERT_EQ(decoder_net.load(decoder_param.c_str(), decoder_bin.c_str()), 0);
+    mnet::Net proj_net;
+    proj_net.opt().num_threads = 4;
+    ASSERT_EQ(proj_net.load(proj_param.c_str(), embed_bin.c_str()), 0);
+
+    std::vector<mnet::Mat> caches(56);
+    std::int32_t token_id = 9707;
+
+    auto embed_token = [&](std::int32_t id) {
+        mnet::Mat token(1, 1);
+        *reinterpret_cast<std::int32_t*>(static_cast<void*>(token.data)) = id;
+        mnet::Net::Extractor ex = embed_net.create_extractor();
+        EXPECT_EQ(ex.input("in0", token), 0);
+        mnet::Mat out;
+        EXPECT_EQ(ex.extract("out0", out), 0);
+        return out;
+    };
+
+    auto rope = [](std::int32_t pos, mnet::Mat& cos_cache, mnet::Mat& sin_cache) {
+        cos_cache.create(64, 1);
+        sin_cache.create(64, 1);
+        for (std::int32_t i = 0; i < 64; ++i) {
+            const float inv = 1.0F / std::pow(1000000.0F, static_cast<float>(i * 2) / 128.0F);
+            cos_cache.row(0)[i] = std::cos(inv * static_cast<float>(pos));
+            sin_cache.row(0)[i] = std::sin(inv * static_cast<float>(pos));
+        }
+    };
+
+    auto run_step = [&](std::int32_t pos, std::int32_t seqlen) {
+        mnet::Mat embedding = embed_token(token_id);
+        EXPECT_FALSE(embedding.empty());
+
+        mnet::Mat mask(seqlen + 1, 1);
+        mask.fill(0.0F);
+        mnet::Mat cos_cache;
+        mnet::Mat sin_cache;
+        rope(pos, cos_cache, sin_cache);
+
+        mnet::Net::Extractor ex = decoder_net.create_extractor();
+        EXPECT_EQ(ex.input("in0", embedding), 0);
+        EXPECT_EQ(ex.input("in1", mask), 0);
+        EXPECT_EQ(ex.input("in2", cos_cache), 0);
+        EXPECT_EQ(ex.input("in3", sin_cache), 0);
+        for (std::int32_t i = 0; i < 28; ++i) {
+            char kname[32];
+            char vname[32];
+            std::snprintf(kname, sizeof(kname), "cache_k%d", i);
+            std::snprintf(vname, sizeof(vname), "cache_v%d", i);
+            if (!caches[static_cast<std::size_t>(i * 2)].empty()) {
+                EXPECT_EQ(ex.input(kname, caches[static_cast<std::size_t>(i * 2)]), 0);
+                EXPECT_EQ(ex.input(vname, caches[static_cast<std::size_t>(i * 2 + 1)]), 0);
+            }
+        }
+
+        mnet::Mat hidden;
+        EXPECT_EQ(ex.extract("out0", hidden), 0);
+        EXPECT_FALSE(hidden.empty());
+
+        for (std::int32_t i = 0; i < 28; ++i) {
+            char kname[32];
+            char vname[32];
+            std::snprintf(kname, sizeof(kname), "out_cache_k%d", i);
+            std::snprintf(vname, sizeof(vname), "out_cache_v%d", i);
+            EXPECT_EQ(ex.extract(kname, caches[static_cast<std::size_t>(i * 2)]), 0);
+            EXPECT_EQ(ex.extract(vname, caches[static_cast<std::size_t>(i * 2 + 1)]), 0);
+        }
+
+        mnet::Net::Extractor pex = proj_net.create_extractor();
+        EXPECT_EQ(pex.input("in0", hidden), 0);
+        mnet::Mat logits;
+        EXPECT_EQ(pex.extract("out0", logits), 0);
+        EXPECT_FALSE(logits.empty());
+
+        const float* row = logits.dims == 1 ? static_cast<const float*>(logits) : logits.row(0);
+        const std::int32_t vocab = logits.w;
+        std::int32_t best = 0;
+        for (std::int32_t i = 1; i < vocab; ++i) {
+            if (row[i] > row[best]) {
+                best = i;
+            }
+        }
+        EXPECT_TRUE(std::isfinite(row[best]));
+        return best;
+    };
+
+    const std::int32_t next1 = run_step(0, 0);
+    token_id = next1;
+    const std::int32_t next2 = run_step(1, 1);
+    EXPECT_GE(next1, 0);
+    EXPECT_GE(next2, 0);
+}
