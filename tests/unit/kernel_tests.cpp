@@ -909,6 +909,40 @@ TEST(Kernel, ScatterNdOverlapAdd) {
     EXPECT_FLOAT_EQ(data[1], 1.0F);
 }
 
+// ScatterND with (row, col) index pairs, the shape Kokoro's iSTFT tail uses.
+TEST(Kernel, ScatterNdRankedIndices) {
+    using S = mlayer::ScatterND<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    S scatter;
+    ASSERT_EQ(scatter.load_param(mformat::ParamDict()), 0);
+
+    mnet::Mat data(4, 2);  // 2 rows of 4
+    for (std::int32_t y = 0; y < 2; ++y) {
+        for (std::int32_t x = 0; x < 4; ++x) {
+            data.row(y)[x] = static_cast<float>(y * 10 + x);
+        }
+    }
+    mnet::Mat indices(2, 3);  // three (row, col) pairs
+    indices.row(0)[0] = 0.0F;
+    indices.row(0)[1] = 2.0F;
+    indices.row(1)[0] = 1.0F;
+    indices.row(1)[1] = 0.0F;
+    indices.row(2)[0] = 1.0F;
+    indices.row(2)[1] = 3.0F;
+    mnet::Mat updates(3);
+    updates[0] = -1.0F;
+    updates[1] = -2.0F;
+    updates[2] = -3.0F;
+
+    mnet::Option opt;
+    std::vector<mnet::Mat> bottom = {data, indices, updates};
+    std::vector<mnet::Mat> top(1);
+    ASSERT_EQ(scatter.forward(bottom, top, opt), 0);
+    EXPECT_FLOAT_EQ(top[0].row(0)[2], -1.0F);
+    EXPECT_FLOAT_EQ(top[0].row(1)[0], -2.0F);
+    EXPECT_FLOAT_EQ(top[0].row(1)[3], -3.0F);
+    EXPECT_FLOAT_EQ(top[0].row(0)[0], 0.0F);
+}
+
 #include <cstdio>
 
 #include <chrono>
