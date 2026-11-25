@@ -465,6 +465,8 @@ TEST(Kernel, MatMul2DAndInterpNearest) {
 #include <mlayer/gemm.hpp>
 #include <mlayer/rotaryembed.hpp>
 #include <mlayer/sdpa.hpp>
+#include <mlayer/shortconv.hpp>
+#include <mlayer/situ.hpp>
 
 TEST(Kernel, GemmConstantBAndC) {
     using G = mlayer::Gemm<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, mformat::ModelBin>;
@@ -643,6 +645,92 @@ TEST(Kernel, SdpaInt8KvCacheMatchesFp32) {
 
     EXPECT_EQ(int8_key.elemsize, 1u);
     EXPECT_GT(fp32_key.total() * 4, int8_key.total() * 3);
+}
+
+// SiTU gated activation (Inkling-2-Mini MoE): beta*tanh(g/beta)*sigmoid(g) * lb*tanh(u/lb).
+TEST(Kernel, SituMatchesReference) {
+    using L = mlayer::Situ<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict pd;
+    pd.set(0, 4.0F);
+    pd.set(1, 25.0F);
+    L situ;
+    ASSERT_EQ(situ.load_param(pd), 0);
+
+    const float gates[4] = {0.0F, 1.0F, -1.0F, 2.5F};
+    const float ups[4] = {0.0F, 1.0F, -2.0F, 3.5F};
+    mnet::Mat gate(4);
+    mnet::Mat up(4);
+    for (std::int32_t i = 0; i < 4; ++i) {
+        gate[static_cast<std::size_t>(i)] = gates[i];
+        up[static_cast<std::size_t>(i)] = ups[i];
+    }
+
+    mnet::Option opt;
+    std::vector<mnet::Mat> bottom = {gate, up};
+    std::vector<mnet::Mat> top(1);
+    ASSERT_EQ(situ.forward(bottom, top, opt), 0);
+
+    for (std::int32_t i = 0; i < 4; ++i) {
+        const float beta = 4.0F;
+        const float lb = 25.0F;
+        const float act = beta * std::tanh(gates[i] / beta) / (1.0F + std::exp(-gates[i]));
+        const float expected = act * (lb * std::tanh(ups[i] / lb));
+        EXPECT_NEAR(top[0][static_cast<std::size_t>(i)], expected, 1e-6F);
+    }
+}
+
+// Causal depthwise short convolution: y[t] = sum_k xs[t + k] * w[k] with the
+// K-1 history tokens as prefix; activation 0 disables the Qwen3.5 SiLU.
+TEST(Kernel, ShortConvCausalKernel) {
+    using C = mlayer::ShortConv<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict pd;
+    pd.set(0, 0);  // no activation
+    C conv;
+    ASSERT_EQ(conv.load_param(pd), 0);
+
+    const std::int32_t kernel = 3;
+    const std::int32_t groups = 2;
+    const std::int32_t tokens = 2;
+
+    mnet::Mat weight(kernel, 1, groups);
+    for (std::int32_t g = 0; g < groups; ++g) {
+        float* w = weight.channel(g);
+        for (std::int32_t k = 0; k < kernel; ++k) {
+            w[k] = 0.5F * static_cast<float>(k + 1) + static_cast<float>(g);
+        }
+    }
+
+    mnet::Mat x(groups, tokens);
+    for (std::int32_t t = 0; t < tokens; ++t) {
+        float* row = x.row(t);
+        for (std::int32_t g = 0; g < groups; ++g) {
+            row[g] = static_cast<float>(g * 10 + t + 1);
+        }
+    }
+
+    mnet::Option opt;
+    std::vector<mnet::Mat> bottom = {weight, x};
+    std::vector<mnet::Mat> top(2);
+    ASSERT_EQ(conv.forward(bottom, top, opt), 0);
+
+    for (std::int32_t g = 0; g < groups; ++g) {
+        const float* w = weight.channel(g);
+        const float x0 = x.row(0)[g];
+        const float x1 = x.row(1)[g];
+        const float y0 = x0 * w[2];                 // xs = [0, 0, x0, x1]
+        const float y1 = x0 * w[1] + x1 * w[2];
+        EXPECT_NEAR(top[0].row(0)[g], y0, 1e-6F);
+        EXPECT_NEAR(top[0].row(1)[g], y1, 1e-6F);
+    }
+
+    // The rolling state keeps the last K inputs: [0, x0, x1].
+    ASSERT_EQ(top[1].w, kernel);
+    ASSERT_EQ(top[1].h, groups);
+    for (std::int32_t g = 0; g < groups; ++g) {
+        EXPECT_NEAR(top[1].row(g)[0], 0.0F, 1e-6F);
+        EXPECT_NEAR(top[1].row(g)[1], x.row(0)[g], 1e-6F);
+        EXPECT_NEAR(top[1].row(g)[2], x.row(1)[g], 1e-6F);
+    }
 }
 
 #include <cstdio>
@@ -981,7 +1069,7 @@ TEST(Kernel, CropByReferenceShape) {
 }
 
 TEST(Kernel, ShortConvCausalState) {
-    using SC = mlayer::ShortConv<mnet::Layer, mnet::Mat, mnet::Option>;
+    using SC = mlayer::ShortConv<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
     mnet::Option opt;
 
     mnet::Mat weight(3, 1, 2);

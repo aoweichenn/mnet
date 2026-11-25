@@ -94,6 +94,7 @@
 #include <mlayer/sdpa.hpp>
 #include <mlayer/selu.hpp>
 #include <mlayer/shortconv.hpp>
+#include <mlayer/situ.hpp>
 #include <mlayer/shrink.hpp>
 #include <mlayer/shufflechannel.hpp>
 #include <mlayer/sigmoid.hpp>
@@ -254,13 +255,14 @@ void register_builtins() {
     add("Spectrogram", &make_layer<mlayer::Spectrogram<Layer, MatT, OptionT, ParamDictT, false>>);
     add("InverseSpectrogram", &make_layer<mlayer::InverseSpectrogram<Layer, MatT, OptionT, ParamDictT, false>>);
     add("GRU", &make_layer<mlayer::GRU<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
-    add("ShortConv", &make_layer<mlayer::ShortConv<Layer, MatT, OptionT>>);
+    add("ShortConv", &make_layer<mlayer::ShortConv<Layer, MatT, OptionT, ParamDictT>>);
     add("GatedDeltaRule", &make_layer<mlayer::GatedDeltaRule<Layer, MatT, OptionT>>);
     add("Proposal", &make_layer<mlayer::Proposal<Layer, MatT, OptionT, ParamDictT, false>>);
     add("ROIPooling", &make_layer<mlayer::ROIPooling<Layer, MatT, OptionT, ParamDictT>>);
     add("ROIAlign", &make_layer<mlayer::ROIAlign<Layer, MatT, OptionT, ParamDictT, false>>);
     add("PSROIPooling", &make_layer<mlayer::PSROIPooling<Layer, MatT, OptionT, ParamDictT, false>>);
     add("ELU", &make_layer<mlayer::ELU<Layer, MatT, OptionT, ParamDictT>>);
+    add("Situ", &make_layer<mlayer::Situ<Layer, MatT, OptionT, ParamDictT>>);
     add("Erf", &make_layer<mlayer::Erf<Layer, MatT, OptionT>>);
     add("Mish", &make_layer<mlayer::Mish<Layer, MatT, OptionT>>);
     add("SELU", &make_layer<mlayer::SELU<Layer, MatT, OptionT, ParamDictT>>);
