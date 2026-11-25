@@ -4,10 +4,11 @@
 #include <mnet/net.hpp>
 
 #include <cstdint>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
+#include <chrono>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -19,9 +20,8 @@
 #include <mgraph/executor.hpp>
 #include <mgraph/extractor.hpp>
 #include <mgraph/graph.hpp>
-#include <mnet/layer_registry.hpp>
-
 #include <mmemory/allocator.hpp>
+#include <mnet/layer_registry.hpp>
 
 namespace mnet {
 
@@ -175,8 +175,8 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
 
 Net::Net() : d(new NetPrivate()) {
     this->opt_.num_threads = 1;
-    this->d->blob_allocator.set_size_compare_ratio(0.0F);
-    this->d->workspace_allocator.set_size_compare_ratio(0.0F);
+    static_cast<void>(this->d->blob_allocator.set_size_compare_ratio(0.0F));
+    static_cast<void>(this->d->workspace_allocator.set_size_compare_ratio(0.0F));
     this->opt_.blob_allocator = &this->d->blob_allocator;
     this->opt_.workspace_allocator = &this->d->workspace_allocator;
 }
@@ -195,10 +195,21 @@ std::int32_t Net::load_param(const char* param_path) {
     stream << file.rdbuf();
     const std::string text = stream.str();
 
-    const auto* memory = reinterpret_cast<const std::uint8_t*>(text.c_str());
-    mformat::DataReaderFromMemory reader(memory, text.size());
+    std::vector<std::uint8_t> bytes(text.begin(), text.end());
+    const bool binary = bytes.size() >= sizeof(std::int32_t) && [&bytes]() {
+        std::int32_t magic = 0;
+        std::memcpy(&magic, bytes.data(), sizeof(magic));
+        return magic == 7767517;
+    }();
+    if (!binary) {
+        bytes.push_back(0);
+    }
+
+    const auto* memory = bytes.data();
+    mformat::DataReaderFromMemory reader(memory, bytes.size());
     mgraph::Graph graph;
-    if (graph.load_param(reader) != 0) {
+    const std::int32_t load_ret = binary ? graph.load_param_bin(reader) : graph.load_param(reader);
+    if (load_ret != 0) {
         return -1;
     }
 
@@ -207,7 +218,7 @@ std::int32_t Net::load_param(const char* param_path) {
     layers.reserve(graph.layers.size());
     const mgraph::ExecutionPlan plan = graph.build_execution_plan();
     for (const mgraph::LayerSpec& spec : graph.layers) {
-        Layer* layer = create_layer(spec.type.c_str());
+        Layer* layer = spec.type.empty() ? create_layer_by_index(spec.type_index) : create_layer(spec.type.c_str());
         if (layer == nullptr) {
             for (Layer* created : layers) {
                 delete created;
@@ -275,28 +286,34 @@ Net::Extractor::Extractor(const Net* net) : net_(net) {
 }
 
 std::int32_t Net::Extractor::input(const char* blob_name, const Mat& in) {
-    const std::int32_t index = this->net_->d->find_blob(blob_name);
-    if (index < 0) {
+    return this->input(this->net_->d->find_blob(blob_name), in);
+}
+
+std::int32_t Net::Extractor::input(std::int32_t blob_index, const Mat& in) {
+    if (blob_index < 0 || static_cast<std::size_t>(blob_index) >= this->blob_mats_.size()) {
         return -1;
     }
-    this->blob_mats_[static_cast<std::size_t>(index)] = in;
+    this->blob_mats_[static_cast<std::size_t>(blob_index)] = in;
     return 0;
 }
 
 std::int32_t Net::Extractor::extract(const char* blob_name, Mat& out) {
-    const std::int32_t index = this->net_->d->find_blob(blob_name);
-    if (index < 0) {
+    return this->extract(this->net_->d->find_blob(blob_name), out);
+}
+
+std::int32_t Net::Extractor::extract(std::int32_t blob_index, Mat& out) {
+    if (blob_index < 0 || static_cast<std::size_t>(blob_index) >= this->blob_mats_.size()) {
         return -1;
     }
 
     Option opt = this->net_->opt_;
     mgraph::Extractor<Layer, Mat, Option> extractor(this->net_->d->layers, this->net_->d->blobs, *this->net_->d,
                                                     this->blob_mats_, opt);
-    const std::int32_t ret = extractor.ensure(index);
+    const std::int32_t ret = extractor.ensure(blob_index);
     if (ret != 0) {
         return ret;
     }
-    out = this->blob_mats_[static_cast<std::size_t>(index)];
+    out = this->blob_mats_[static_cast<std::size_t>(blob_index)];
     return out.empty() ? -100 : 0;
 }
 

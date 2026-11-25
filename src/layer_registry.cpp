@@ -139,6 +139,74 @@ Layer* create_layer(const char* type) {
     return nullptr;
 }
 
+Layer* create_layer_by_index(std::int32_t type_index) {
+    // Values match the ncnn binary param ABI (layer_type_enum.h).
+    switch (type_index) {
+        case 2:
+            return create_layer("BatchNorm");
+        case 3:
+            return create_layer("Bias");
+        case 5:
+            return create_layer("Concat");
+        case 6:
+            return create_layer("Convolution");
+        case 9:
+            return create_layer("Dropout");
+        case 12:
+            return create_layer("Embed");
+        case 14:
+            return create_layer("Flatten");
+        case 15:
+            return create_layer("InnerProduct");
+        case 16:
+            return create_layer("Input");
+        case 21:
+            return create_layer("Pooling");
+        case 22:
+            return create_layer("Power");
+        case 26:
+            return create_layer("ReLU");
+        case 27:
+            return create_layer("Reshape");
+        case 29:
+            return create_layer("Scale");
+        case 30:
+            return create_layer("Sigmoid");
+        case 31:
+            return create_layer("Slice");
+        case 32:
+            return create_layer("Softmax");
+        case 33:
+            return create_layer("Split");
+        case 35:
+            return create_layer("TanH");
+        case 36:
+            return create_layer("Threshold");
+        case 42:
+            return create_layer("ConvolutionDepthWise");
+        case 50:
+            return create_layer("Interp");
+        case 52:
+            return create_layer("ShuffleChannel");
+        case 73:
+            return create_layer("Swish");
+        case 74:
+            return create_layer("Gemm");
+        case 80:
+            return create_layer("GELU");
+        case 87:
+            return create_layer("MatMul");
+        case 104:
+            return create_layer("RMSNorm");
+        case 108:
+            return create_layer("SDPA");
+        case 109:
+            return create_layer("RotaryEmbed");
+        default:
+            return nullptr;
+    }
+}
+
 std::int32_t register_layer(const char* type, LayerCreator creator) {
     register_builtins();
     if (type == nullptr || creator == nullptr) {

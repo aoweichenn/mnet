@@ -74,3 +74,56 @@ TEST(Net, RejectsUnknownLayerType) {
     mnet::Net net;
     EXPECT_NE(net.load_param(param.string().c_str()), 0);
 }
+
+TEST(Net, LoadsBinaryParamAndRuns) {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "mnet_net_tests";
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path param = dir / "relu.binparam";
+    const std::filesystem::path bin = write_empty_bin(dir);
+
+    {
+        std::ofstream file(param, std::ios::binary);
+        auto write_i32 = [&file](std::int32_t v) { file.write(reinterpret_cast<const char*>(&v), sizeof(v)); };
+        write_i32(7767517);  // magic
+        write_i32(2);        // layer count
+        write_i32(2);        // blob count
+
+        // Input, 0 bottoms, 1 top (blob 0)
+        write_i32(16);
+        write_i32(0);
+        write_i32(1);
+        write_i32(0);
+        write_i32(-233);
+
+        // ReLU, blob 0 -> blob 1
+        write_i32(26);
+        write_i32(1);
+        write_i32(1);
+        write_i32(0);
+        write_i32(1);
+        write_i32(-233);
+    }
+
+    mnet::Net net;
+    net.opt().num_threads = 2;
+    ASSERT_EQ(net.load(param.string().c_str(), bin.string().c_str()), 0);
+
+    mnet::Mat data(5);
+    data[0] = -2.0F;
+    data[1] = -1.0F;
+    data[2] = 0.0F;
+    data[3] = 1.0F;
+    data[4] = 2.0F;
+
+    mnet::Net::Extractor ex = net.create_extractor();
+    ASSERT_EQ(ex.input(0, data), 0);
+
+    mnet::Mat out;
+    ASSERT_EQ(ex.extract(1, out), 0);
+    EXPECT_EQ(out.w, 5);
+    EXPECT_FLOAT_EQ(out[0], 0.0F);
+    EXPECT_FLOAT_EQ(out[1], 0.0F);
+    EXPECT_FLOAT_EQ(out[2], 0.0F);
+    EXPECT_FLOAT_EQ(out[3], 1.0F);
+    EXPECT_FLOAT_EQ(out[4], 2.0F);
+}

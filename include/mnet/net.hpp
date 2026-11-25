@@ -38,7 +38,9 @@ public:
     class Extractor {
     public:
         std::int32_t input(const char* blob_name, const Mat& in);
+        std::int32_t input(std::int32_t blob_index, const Mat& in);
         std::int32_t extract(const char* blob_name, Mat& out);
+        std::int32_t extract(std::int32_t blob_index, Mat& out);
 
     private:
         friend class Net;

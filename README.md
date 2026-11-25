@@ -44,14 +44,15 @@ ex.extract("output", out);
 - `tests/unit/model_tests.cpp` 已端到端跑通：
   - `squeezenet_v1.1`（227x227x3 → 1000 类 softmax，概率和校验）
   - `shufflenet_v2_x0.5`（224x224x3 → 1000 维输出，覆盖 ConvDW/BN/Slice/ShuffleChannel）
-  - `yolo11n`（640x640x3 → `out0`，覆盖 Reshape/Permute/Slice/BinaryOp/MatMul/Interp）
+  - `yolo11n`（640x640x3 → `out0`，覆盖 Reshape/Permute/Slice/BinaryOp/MatMul/Interp；
+    Release+AVX2 约 84 ms，峰值 RSS 96 MB）
   - Qwen3 0.6B int8 单 token：embed → decoder → proj → argmax
   - Qwen3 0.6B int8 两 token decode：把 28 层 KV cache 回灌，验证 cache 复用
   - 文本生成：BPE tokenizer + 23-token chat prompt → 3 个新 token → `Hello! How can`
 
 尚未完成：
 
-- 二进制 param（`load_param_bin`）与完整 layer type 表；
+- 二进制 param 已支持（按 ncnn type index 注册）；仍缺完整 layer type 表；
 - 更广的层覆盖与二进制 param；
 - 安装包导出（当前 `add_subdirectory` 消费兄弟模块）；
 - 与 ncnn 参考输出的数值对比测试。
