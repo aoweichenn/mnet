@@ -11,6 +11,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <mformat/data_reader.hpp>
@@ -28,6 +29,8 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
     std::vector<Layer*> layers;
     std::vector<mgraph::Blob> blobs;
     std::vector<std::string> layer_types;
+    std::vector<std::int32_t> blob_last_use;
+    std::unordered_map<const Layer*, std::int32_t> layer_index;
     mutable std::int32_t profile_index = 0;
     mmemory::UnlockedPoolAllocator blob_allocator;
     mmemory::UnlockedPoolAllocator workspace_allocator;
@@ -48,16 +51,57 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
     std::int32_t invoke(const Layer* layer, std::vector<Mat>& blob_mats, const Option& opt) const override {
         const auto t0 = std::chrono::steady_clock::now();
         const std::int32_t result = this->invoke_impl(layer, blob_mats, opt);
+        if (result == 0) {
+            const auto it = this->layer_index.find(layer);
+            if (it != this->layer_index.end()) {
+                this->release_dead_bottoms(it->second, blob_mats);
+            }
+        }
         if (std::getenv("MNET_PROFILE") != nullptr) {
             const auto t1 = std::chrono::steady_clock::now();
             const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            const std::int32_t index = this->profile_index++;
-            const char* type = index < static_cast<std::int32_t>(this->layer_types.size())
+            const auto index_it = this->layer_index.find(layer);
+            const std::int32_t index = index_it != this->layer_index.end() ? index_it->second : -1;
+            const char* type = index >= 0 && static_cast<std::size_t>(index) < this->layer_types.size()
                                    ? this->layer_types[static_cast<std::size_t>(index)].c_str()
                                    : "?";
-            std::fprintf(stderr, "PROFILE %d %s %.3f\n", index, type, ms);
+            const std::int32_t top_index = layer->tops.empty() ? -1 : layer->tops[0];
+            const Mat* top = top_index >= 0 && static_cast<std::size_t>(top_index) < blob_mats.size()
+                                 ? &blob_mats[static_cast<std::size_t>(top_index)]
+                                 : nullptr;
+            if (top != nullptr) {
+                std::fprintf(stderr, "PROFILE %d %s %.3f %dx%dx%dx%d\n", index, type, ms, top->w, top->h, top->d,
+                             top->c);
+            } else {
+                std::fprintf(stderr, "PROFILE %d %s %.3f -\n", index, type, ms);
+            }
         }
         return result;
+    }
+
+    void release_dead_bottoms(std::int32_t index, std::vector<Mat>& blob_mats) const {
+        if (index < 0 || static_cast<std::size_t>(index) >= this->layers.size()) {
+            return;
+        }
+        const Layer* layer = this->layers[static_cast<std::size_t>(index)];
+        for (const std::int32_t bottom : layer->bottoms) {
+            if (bottom < 0 || static_cast<std::size_t>(bottom) >= blob_mats.size()) {
+                continue;
+            }
+            bool is_top = false;
+            for (const std::int32_t top : layer->tops) {
+                if (top == bottom) {
+                    is_top = true;
+                }
+            }
+            if (is_top) {
+                continue;
+            }
+            if (static_cast<std::size_t>(bottom) < this->blob_last_use.size() &&
+                this->blob_last_use[static_cast<std::size_t>(bottom)] == index) {
+                blob_mats[static_cast<std::size_t>(bottom)].release();
+            }
+        }
     }
 
     std::int32_t invoke_impl(const Layer* layer, std::vector<Mat>& blob_mats, const Option& opt) const {
@@ -161,6 +205,7 @@ std::int32_t Net::load_param(const char* param_path) {
     std::vector<Layer*> layers;
     std::vector<std::string> layer_types;
     layers.reserve(graph.layers.size());
+    const mgraph::ExecutionPlan plan = graph.build_execution_plan();
     for (const mgraph::LayerSpec& spec : graph.layers) {
         Layer* layer = create_layer(spec.type.c_str());
         if (layer == nullptr) {
@@ -179,6 +224,7 @@ std::int32_t Net::load_param(const char* param_path) {
         layer->bottoms = spec.bottoms;
         layer->tops = spec.tops;
         layer->typeindex = spec.type_index;
+        this->d->layer_index[layer] = static_cast<std::int32_t>(layers.size());
         layers.push_back(layer);
         layer_types.push_back(spec.type);
     }
@@ -189,6 +235,7 @@ std::int32_t Net::load_param(const char* param_path) {
     this->d->layers = std::move(layers);
     this->d->blobs = graph.blobs;
     this->d->layer_types = std::move(layer_types);
+    this->d->blob_last_use = plan.blob_last_use;
     return 0;
 }
 
