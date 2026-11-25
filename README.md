@@ -53,7 +53,8 @@ ex.extract("output", out);
   自注意力/交叉注意力、可选 mask、KV cache）、`Proposal`、
   `ROIPooling` / `PSROIPooling` / `ROIAlign`（Faster-RCNN / R-CNN 的 ROI 池化）、
   `Proposal`、`Padding`、`Tile`、`GridSample`（2D 双线性/最近邻）、`ELU`、`SELU`、
-  `Erf`、`Mish`、`Softplus`、`PixelShuffle`、`Reorg`、`Convolution1D`、`Convolution3D`。
+  `Erf`、`Mish`、`Softplus`、`PixelShuffle`、`Reorg`、`Convolution1D`、`Convolution3D`、
+  `LSTM` / `GRU`（单向与双向，LSTM 含 hidden→output 投影）。
   `Convolution` / `ConvolutionDepthWise` / `InnerProduct` 支持 ncnn 的 int8 推理
   （`8=int8_scale_term` 1/2/101/102，含 requantize 链）。
 - `tests/unit/model_tests.cpp` 已端到端跑通：
@@ -105,7 +106,7 @@ Einsum、UnaryOp、Swish、ReLU、Sigmoid、HardSigmoid、HardSwish、Dropout、
 Noop、Flatten、ShuffleChannel、MemoryData、MultiHeadAttention（fp32 prefill/
 KV-cache 解码 + int8/int4 权重量化 + legacy int8）、ROIPooling、
 PSROIPooling、Proposal、ROIAlign、Padding、Tile、GridSample，以及 int8 卷积/
-depthwise/InnerProduct/requantize，共 81 组对比，最大绝对误差 ≤ 2e-5。
+depthwise/InnerProduct/requantize、LSTM/GRU，共 86 组对比，最大绝对误差 ≤ 2e-5。
 `MNET_NCNN_PARITY=1` 运行 46 类层对齐，`MNET_NCNN_MODELS=1` 运行 34 个模型
 的端到端对齐（模型清单见 `mcnn/tools/parity/models.txt`，可用参数替换）。
 另提供 `tools/parity/model_compare`：同一模型文件与输入同时跑 ncnn 与 mnet，
@@ -123,7 +124,7 @@ nanodet_m 3.6e-6、squeezenet 4.5e-7）；worldv2 3.9e-2，但其通道幅值约
 - SSD 系列在随机输入下无检测框（`DetectionOutput` 返回空，行为与 ncnn 一致）；
 - graph 级 elempack 传播（把数据在整个图里保持 pack8）尚未实现：当前只在卷积
   微内核内部打包，层与层之间仍是 1 通道布局；
-- `LSTM` / `GRU` 尚未移植（zoo 内无模型使用）；
 - `GridSample` 目前只有 2D（双线性/最近邻），3D 与 bicubic 未实现；
+- `LSTM` / `GRU` 的 int8 路径未移植（int8 模型会在 load_param 返回 -1）；
 - 与 ncnn 参考输出的逐层数值对比测试；
 - 安装包导出已支持（`cmake --install` + `find_package(mnet)` 消费测试通过）。

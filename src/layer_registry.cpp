@@ -37,6 +37,7 @@
 #include <mlayer/gemm.hpp>
 #include <mlayer/gridsample.hpp>
 #include <mlayer/groupnorm.hpp>
+#include <mlayer/gru.hpp>
 #include <mlayer/hardsigmoid.hpp>
 #include <mlayer/hardswish.hpp>
 #include <mlayer/innerproduct.hpp>
@@ -44,6 +45,7 @@
 #include <mlayer/layernorm.hpp>
 #include <mlayer/log.hpp>
 #include <mlayer/lrn.hpp>
+#include <mlayer/lstm.hpp>
 #include <mlayer/matmul.hpp>
 #include <mlayer/memorydata.hpp>
 #include <mlayer/mish.hpp>
@@ -182,6 +184,8 @@ void register_builtins() {
     add("Padding", &make_layer<mlayer::Padding<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("Tile", &make_layer<mlayer::Tile<Layer, MatT, OptionT, ParamDictT>>);
     add("GridSample", &make_layer<mlayer::GridSample<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("LSTM", &make_layer<mlayer::LSTM<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
+    add("GRU", &make_layer<mlayer::GRU<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
     add("ShortConv", &make_layer<mlayer::ShortConv<Layer, MatT, OptionT>>);
     add("GatedDeltaRule", &make_layer<mlayer::GatedDeltaRule<Layer, MatT, OptionT>>);
     add("Proposal", &make_layer<mlayer::Proposal<Layer, MatT, OptionT, ParamDictT, false>>);
