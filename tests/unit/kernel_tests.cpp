@@ -235,3 +235,118 @@ TEST(Kernel, PoolingMaxNoPadKeepsFinite) {
         }
     }
 }
+
+#include <mlayer/binaryop.hpp>
+
+TEST(Kernel, BinaryOpAddAndScalarMul) {
+    using BinOp = mlayer::BinaryOp<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+
+    mformat::ParamDict pd;
+    pd.set(0, 0);
+    BinOp add;
+    ASSERT_EQ(add.load_param(pd), 0);
+
+    mnet::Mat a(4);
+    mnet::Mat b(4);
+    for (std::int32_t i = 0; i < 4; ++i) {
+        a[static_cast<std::size_t>(i)] = static_cast<float>(i);
+        b[static_cast<std::size_t>(i)] = static_cast<float>(10 + i);
+    }
+    std::vector<mnet::Mat> bottoms = {a, b};
+    std::vector<mnet::Mat> tops(1);
+    mnet::Option opt;
+    opt.num_threads = 2;
+    ASSERT_EQ(add.forward(bottoms, tops, opt), 0);
+    for (std::int32_t i = 0; i < 4; ++i) {
+        EXPECT_FLOAT_EQ(tops[0][static_cast<std::size_t>(i)], static_cast<float>(10 + 2 * i));
+    }
+
+    mformat::ParamDict pd2;
+    pd2.set(0, 2);
+    pd2.set(1, 1);
+    pd2.set(2, 3.0F);
+    BinOp mul;
+    ASSERT_EQ(mul.load_param(pd2), 0);
+    mnet::Mat c = a.clone();
+    ASSERT_EQ(mul.forward_inplace(c, opt), 0);
+    for (std::int32_t i = 0; i < 4; ++i) {
+        EXPECT_FLOAT_EQ(c[static_cast<std::size_t>(i)], static_cast<float>(i) * 3.0F);
+    }
+}
+
+#include <mlayer/permute.hpp>
+#include <mlayer/rmsnorm.hpp>
+
+TEST(Kernel, PermuteSwapsWidthAndHeight) {
+    using Perm = mlayer::Permute<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+
+    mformat::ParamDict pd;
+    pd.set(0, 1);
+    Perm perm;
+    ASSERT_EQ(perm.load_param(pd), 0);
+
+    mnet::Mat input(4, 3, 2);
+    for (std::int32_t q = 0; q < input.c; ++q) {
+        float* p = input.channel(q);
+        for (std::int32_t i = 0; i < input.w * input.h; ++i) {
+            p[i] = static_cast<float>(q * 100 + i);
+        }
+    }
+
+    mnet::Option opt;
+    opt.num_threads = 2;
+    mnet::Mat out;
+    ASSERT_EQ(perm.forward(input, out, opt), 0);
+    ASSERT_EQ(out.w, 3);
+    ASSERT_EQ(out.h, 4);
+    ASSERT_EQ(out.c, 2);
+
+    for (std::int32_t q = 0; q < out.c; ++q) {
+        const float* s = input.channel(q);
+        const float* d = out.channel(q);
+        for (std::int32_t y = 0; y < out.h; ++y) {
+            for (std::int32_t x = 0; x < out.w; ++x) {
+                EXPECT_FLOAT_EQ(d[static_cast<std::size_t>(y * out.w + x)],
+                                s[static_cast<std::size_t>(x * input.w + y)]);
+            }
+        }
+    }
+}
+
+TEST(Kernel, RMSNormAffine) {
+    using Norm = mlayer::RMSNorm<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, mformat::ModelBin>;
+
+    mformat::ParamDict pd;
+    pd.set(0, 4);
+    pd.set(1, 1e-5F);
+    pd.set(2, 1);
+    mnet::Mat weights[1];
+    weights[0].create(4);
+    for (std::int32_t i = 0; i < 4; ++i) {
+        weights[0][static_cast<std::size_t>(i)] = 0.5F + 0.1F * static_cast<float>(i);
+    }
+
+    Norm norm;
+    ASSERT_EQ(norm.load_param(pd), 0);
+    ASSERT_EQ(norm.load_model(mformat::ModelBinFromMatArray(weights)), 0);
+
+    mnet::Mat input(4);
+    for (std::int32_t i = 0; i < 4; ++i) {
+        input[static_cast<std::size_t>(i)] = static_cast<float>(i + 1);
+    }
+    mnet::Mat out = input.clone();
+
+    mnet::Option opt;
+    opt.num_threads = 1;
+    ASSERT_EQ(norm.forward_inplace(out, opt), 0);
+
+    float sqsum = 0.0F;
+    for (std::int32_t i = 0; i < 4; ++i) {
+        sqsum += input[static_cast<std::size_t>(i)] * input[static_cast<std::size_t>(i)];
+    }
+    const float scale = 1.0F / std::sqrt(sqsum / 4.0F + 1e-5F);
+    for (std::int32_t i = 0; i < 4; ++i) {
+        const float ref = input[static_cast<std::size_t>(i)] * scale * weights[0][static_cast<std::size_t>(i)];
+        EXPECT_NEAR(out[static_cast<std::size_t>(i)], ref, 1e-5F);
+    }
+}

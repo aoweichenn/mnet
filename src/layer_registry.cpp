@@ -11,6 +11,7 @@
 #include <mformat/model_bin.hpp>
 #include <mlayer/batchnorm.hpp>
 #include <mlayer/bias.hpp>
+#include <mlayer/binaryop.hpp>
 #include <mlayer/concat.hpp>
 #include <mlayer/convolution.hpp>
 #include <mlayer/convolutiondepthwise.hpp>
@@ -18,6 +19,7 @@
 #include <mlayer/flatten.hpp>
 #include <mlayer/gelu.hpp>
 #include <mlayer/innerproduct.hpp>
+#include <mlayer/permute.hpp>
 #include <mlayer/pooling.hpp>
 #include <mlayer/power.hpp>
 #include <mlayer/relu.hpp>
@@ -104,6 +106,8 @@ void register_builtins() {
     add("ShuffleChannel", &make_layer<mlayer::ShuffleChannel<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Slice", &make_layer<mlayer::Slice<Layer, MatT, OptionT, ParamDictT, false>>);
     add("RMSNorm", &make_layer<mlayer::RMSNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("BinaryOp", &make_layer<mlayer::BinaryOp<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Permute", &make_layer<mlayer::Permute<Layer, MatT, OptionT, ParamDictT, false>>);
 }
 
 }  // namespace
