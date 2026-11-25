@@ -26,6 +26,11 @@ mnet::Mat out;
 ex.extract("output", out);
 ```
 
+构建选项：
+
+- `-DCMAKE_BUILD_TYPE=Release`：Benchmark 必须用 Release；Debug 会慢 3–6 倍。
+- `-Dmnet_enable_avx2=ON`：为 mnet 对象和测试打开 AVX2/FMA 快路径。
+
 ## 当前状态
 
 - `Net::load_param` 使用 `mgraph::Graph` 解析文本 param。

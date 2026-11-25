@@ -19,6 +19,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(mnet_build_tests "Build mnet tests" ${PROJECT_IS_TOP_LEVEL})
+option(mnet_enable_avx2 "Enable AVX2/FMA fast paths (x86_64)" OFF)
 
 find_package(OpenMP REQUIRED)
 
@@ -88,9 +89,15 @@ target_include_directories(mnet_objs SYSTEM PRIVATE
     $<TARGET_PROPERTY:mlayer::mlayer,INTERFACE_INCLUDE_DIRECTORIES>)
 
 target_compile_options(mnet_objs PRIVATE ${MNET_WARNINGS})
+if(mnet_enable_avx2 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    target_compile_options(mnet_objs PRIVATE -mavx2 -mfma)
+endif()
 target_link_libraries(mnet_objs PRIVATE mformat::mformat mgraph::mgraph mlayer::mlayer OpenMP::OpenMP_CXX)
 
 add_library(mnet STATIC)
+if(mnet_enable_avx2 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    target_compile_options(mnet INTERFACE -mavx2 -mfma)
+endif()
 target_link_libraries(mnet
     PUBLIC $<BUILD_INTERFACE:mnet_objs>
     INTERFACE mformat::mformat mgraph::mgraph mlayer::mlayer OpenMP::OpenMP_CXX)
