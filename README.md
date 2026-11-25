@@ -142,6 +142,20 @@ Qwen3 0.6B（28 层 / 8 KV heads / head_dim 128，int8 KV = 59 KB/token）：
 注意 `Mat::create` 走 mmap，容量只是保留地址空间，页在真正写入该 token 时才
 驻留；所以长上下文的 RSS 会随 token 数增长，而不是一次性跳到 14.5 GiB。
 
+15001 token prompt（WSL x86_64，12 线程，`--prefill-chunk 512`）：
+
+| KV | prefill | decode | 峰值 RSS | 峰值 VM |
+| --- | --- | --- | --- | --- |
+| int8 | **168.2 s** | **56.3 ms/tok** | **5.21 GB** | **5.39 GB** |
+| fp32 | 520.1 s | 167.1 ms/tok | 7.62 GB | 8.05 GB |
+
+decode 随上下文近似线性（1 token 时 17 ms，15k 时 56 ms/tok，约 2.6 µs/1k
+token），外推 256k ≈ 0.68 s/tok；prefill 是 O(n²)，256k 在 CPU 上需十几小时，
+所以 CPU 上 256k 的可用形态是长解码，而不是一次性 prefill 256k。
+
+Android（5 线程，int8 KV）：1001 token prompt → prefill 14.5 s，
+decode 46.5 ms/tok。
+
 ### ARM 并行调度：大核亲和 + 精确唤醒
 
 移动端 OCR 图原先出现“线程越多越慢”（1T 120 ms、2T 527 ms、4T 216 ms）。
