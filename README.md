@@ -46,17 +46,18 @@ ex.extract("output", out);
   `LayerNorm`、`PReLU`、`Normalize`、`Deconvolution`、`DeconvolutionDepthWise`、
   `YoloV5Focus`、`MemoryData`、`PriorBox`、`DetectionOutput`、`Eltwise`、`Noop`、
   `UnaryOp`、`ExpandDims`、`Reduction`、`Einsum`、`Crop`、`Squeeze`、
-  `YoloDetectionOutput`、`Yolov3DetectionOutput`、`ShortConv`、`GatedDeltaRule`。
+  `YoloDetectionOutput`、`Yolov3DetectionOutput`、`ShortConv`、`GatedDeltaRule`、
+  `MultiHeadAttention`（fp32、自注意力/交叉注意力、可选 mask）。
 - `tests/unit/model_tests.cpp` 已端到端跑通：
   - `squeezenet_v1.1`（227x227x3 → 1000 类 softmax，概率和校验）
   - `shufflenet_v2_x0.5`（224x224x3 → 1000 维输出，覆盖 ConvDW/BN/Slice/ShuffleChannel）
   - `yolo11n`（640x640x3 → `out0`，覆盖 Reshape/Permute/Slice/BinaryOp/MatMul/Interp；
-    Release+AVX2 约 84 ms，峰值 RSS 96 MB）
-  - 另外通过 `mnet_probe` 验证 28 个真实模型（AVX2 Release，含峰值 RSS），覆盖
+    Release+AVX2 约 60 ms，峰值 RSS 94 MB）
+  - 另外通过 `mnet_probe` 验证 29 个真实模型（AVX2 Release，含峰值 RSS），覆盖
     pose、scrfd、yolo11n_seg/pose/obb、yolov8n/seg/pose/obb/cls、yolov5s/5s.ncnn/
     5s_6.0、yolov6n、yolov7-tiny、nanodet_m、yolact、yolov8s_worldv2、pelee、
     mnet.25、mobilenet_ssd_voc/ssdlite、PP_OCRv5_mobile_det、yolov4-tiny、
-    mobilenet_yolo、mobilenetv2_yolov3 等。
+    mobilenet_yolo、mobilenetv2_yolov3、PP_OCRv5_mobile_rec 等。
   - Qwen3 0.6B int8 单 token：embed → decoder → proj → argmax
   - Qwen3 0.6B int8 两 token decode：把 28 层 KV cache 回灌，验证 cache 复用
   - 文本生成：BPE tokenizer + 23-token chat prompt → 3 个新 token → `Hello! How can`
@@ -78,6 +79,7 @@ ex.extract("output", out);
 - 二进制 type 表仍不完整；`MultiHeadAttention`、`Proposal`/`PSROIPooling`
   等层还没移植，SSD 系列在随机输入下无检测框（`DetectionOutput` 返回空，行为与
   ncnn 一致）；`yolov4-opt` 上游只发布 param，没有权重无法验证；
-- yolo11n 仍约 2.5–2.6 倍慢于 ncnn（92 ms vs 32 ms），热点仍是 Convolution；
+- yolo11n 约 1.9 倍慢于 ncnn（60 ms vs 32 ms），热点仍是 3x3 Convolution；
+  `MultiHeadAttention` 的 KV-cache 与量化路径尚未移植（遇到时返回 -1）；
 - 与 ncnn 参考输出的逐层数值对比测试；
 - 安装包导出已支持（`cmake --install` + `find_package(mnet)` 消费测试通过）。

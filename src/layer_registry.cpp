@@ -40,6 +40,7 @@
 #include <mlayer/log.hpp>
 #include <mlayer/matmul.hpp>
 #include <mlayer/memorydata.hpp>
+#include <mlayer/multiheadattention.hpp>
 #include <mlayer/noop.hpp>
 #include <mlayer/normalize.hpp>
 #include <mlayer/permute.hpp>
@@ -162,6 +163,8 @@ void register_builtins() {
     add("Squeeze", &make_layer<mlayer::Squeeze<Layer, MatT, OptionT, ParamDictT, false>>);
     add("ShortConv", &make_layer<mlayer::ShortConv<Layer, MatT, OptionT>>);
     add("GatedDeltaRule", &make_layer<mlayer::GatedDeltaRule<Layer, MatT, OptionT>>);
+    add("MultiHeadAttention",
+        &make_layer<mlayer::MultiHeadAttention<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
     add("YoloV5Focus", &make_layer<mlayer::YoloV5Focus<Layer, MatT, OptionT>>);
     add("MemoryData", &make_layer<mlayer::MemoryData<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("PriorBox", &make_layer<mlayer::PriorBox<Layer, MatT, OptionT, ParamDictT, false>>);
@@ -251,6 +254,8 @@ Layer* create_layer_by_index(std::int32_t type_index) {
             return create_layer("Swish");
         case 74:
             return create_layer("Gemm");
+        case 79:
+            return create_layer("MultiHeadAttention");
         case 80:
             return create_layer("GELU");
         case 87:

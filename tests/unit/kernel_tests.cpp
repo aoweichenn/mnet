@@ -12,6 +12,7 @@
 #include <mlayer/einsum.hpp>
 #include <mlayer/expanddims.hpp>
 #include <mlayer/gateddeltarule.hpp>
+#include <mlayer/multiheadattention.hpp>
 #include <mlayer/reduction.hpp>
 #include <mlayer/shortconv.hpp>
 #include <mlayer/squeeze.hpp>
@@ -959,4 +960,47 @@ TEST(Kernel, GatedDeltaRuleSingleStep) {
     EXPECT_NEAR(tops[1][1], 1.0F, 1e-5F);
     EXPECT_NEAR(tops[1][2], 0.0F, 1e-5F);
     EXPECT_NEAR(tops[1][3], 0.0F, 1e-5F);
+}
+
+TEST(Kernel, MultiHeadAttentionSelfAttention) {
+    using MHA = mlayer::MultiHeadAttention<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, mformat::ModelBin>;
+    mformat::ParamDict pd;
+    pd.set(0, 2);  // embed_dim
+    pd.set(1, 1);  // num_heads
+    pd.set(2, 4);  // weight_data_size = qdim * embed_dim
+    pd.set(3, 2);  // kdim
+    pd.set(4, 2);  // vdim
+    MHA layer;
+    ASSERT_EQ(layer.load_param(pd), 0);
+
+    mnet::Mat identity(4);
+    identity[0] = 1.0F;
+    identity[1] = 0.0F;
+    identity[2] = 0.0F;
+    identity[3] = 1.0F;
+    layer.q_weight_data = identity;
+    layer.k_weight_data = identity;
+    layer.v_weight_data = identity;
+    layer.out_weight_data = identity;
+    layer.q_bias_data = mnet::Mat(2);
+    layer.k_bias_data = mnet::Mat(2);
+    layer.v_bias_data = mnet::Mat(2);
+    layer.out_bias_data = mnet::Mat(2);
+    layer.q_bias_data.fill(0.0F);
+    layer.k_bias_data.fill(0.0F);
+    layer.v_bias_data.fill(0.0F);
+    layer.out_bias_data.fill(0.0F);
+
+    mnet::Mat input(2, 1);
+    input[0] = 1.0F;
+    input[1] = 0.0F;
+
+    std::vector<mnet::Mat> bottoms = {input};
+    std::vector<mnet::Mat> tops(1);
+    mnet::Option opt;
+    ASSERT_EQ(layer.forward(bottoms, tops, opt), 0);
+    ASSERT_EQ(tops[0].w, 2);
+    ASSERT_EQ(tops[0].h, 1);
+    EXPECT_NEAR(tops[0].row(0)[0], 1.0F, 1e-5F);
+    EXPECT_NEAR(tops[0].row(0)[1], 0.0F, 1e-5F);
 }
