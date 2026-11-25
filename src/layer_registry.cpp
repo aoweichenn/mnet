@@ -10,10 +10,12 @@
 
 #include <mformat/model_bin.hpp>
 #include <mlayer/absval.hpp>
+#include <mlayer/argmax.hpp>
 #include <mlayer/batchnorm.hpp>
 #include <mlayer/bias.hpp>
 #include <mlayer/binaryop.hpp>
 #include <mlayer/bnll.hpp>
+#include <mlayer/celu.hpp>
 #include <mlayer/clip.hpp>
 #include <mlayer/concat.hpp>
 #include <mlayer/convolution.hpp>
@@ -22,6 +24,7 @@
 #include <mlayer/convolutiondepthwise.hpp>
 #include <mlayer/crop.hpp>
 #include <mlayer/deconvolution.hpp>
+#include <mlayer/deepcopy.hpp>
 #include <mlayer/detectionoutput.hpp>
 #include <mlayer/dropout.hpp>
 #include <mlayer/einsum.hpp>
@@ -35,6 +38,7 @@
 #include <mlayer/gateddeltarule.hpp>
 #include <mlayer/gelu.hpp>
 #include <mlayer/gemm.hpp>
+#include <mlayer/glu.hpp>
 #include <mlayer/gridsample.hpp>
 #include <mlayer/groupnorm.hpp>
 #include <mlayer/gru.hpp>
@@ -73,6 +77,7 @@
 #include <mlayer/sdpa.hpp>
 #include <mlayer/selu.hpp>
 #include <mlayer/shortconv.hpp>
+#include <mlayer/shrink.hpp>
 #include <mlayer/shufflechannel.hpp>
 #include <mlayer/sigmoid.hpp>
 #include <mlayer/slice.hpp>
@@ -166,6 +171,11 @@ void register_builtins() {
     add("AbsVal", &make_layer<mlayer::AbsVal<Layer, MatT, OptionT>>);
     add("BNLL", &make_layer<mlayer::BNLL<Layer, MatT, OptionT>>);
     add("Clip", &make_layer<mlayer::Clip<Layer, MatT, OptionT, ParamDictT>>);
+    add("CELU", &make_layer<mlayer::CELU<Layer, MatT, OptionT, ParamDictT>>);
+    add("Shrink", &make_layer<mlayer::Shrink<Layer, MatT, OptionT, ParamDictT>>);
+    add("DeepCopy", &make_layer<mlayer::DeepCopy<Layer, MatT, OptionT>>);
+    add("ArgMax", &make_layer<mlayer::ArgMax<Layer, MatT, OptionT, ParamDictT>>);
+    add("GLU", &make_layer<mlayer::GLU<Layer, MatT, OptionT, ParamDictT>>);
     add("Exp", &make_layer<mlayer::Exp<Layer, MatT, OptionT, ParamDictT>>);
     add("Log", &make_layer<mlayer::Log<Layer, MatT, OptionT, ParamDictT>>);
     add("LRN", &make_layer<mlayer::LRN<Layer, MatT, OptionT, ParamDictT>>);
