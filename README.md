@@ -40,12 +40,16 @@ ex.extract("output", out);
   `Threshold`、`Power`、`GELU`、`Softmax`、`Bias`、`Scale`、`Convolution`、
   `Pooling`、`InnerProduct`、`Concat`、`Split`、`ConvolutionDepthWise`、
   `BatchNorm`、`ShuffleChannel`、`Slice`、`RMSNorm`、`BinaryOp`、`Permute`、
-  `Reshape`、`MatMul`、`Interp`、`Embed`、`Gemm`、`RotaryEmbed`、`SDPA`（KV cache）。
+  `Reshape`、`MatMul`、`Interp`、`Embed`、`Gemm`、`RotaryEmbed`、`SDPA`（KV cache）、
+  `AbsVal`、`BNLL`、`Clip`、`Exp`、`Log`、`HardSigmoid`、`HardSwish`、`GroupNorm`、
+  `LayerNorm`、`PReLU`、`Normalize`、`Deconvolution`、`YoloV5Focus`。
 - `tests/unit/model_tests.cpp` 已端到端跑通：
   - `squeezenet_v1.1`（227x227x3 → 1000 类 softmax，概率和校验）
   - `shufflenet_v2_x0.5`（224x224x3 → 1000 维输出，覆盖 ConvDW/BN/Slice/ShuffleChannel）
   - `yolo11n`（640x640x3 → `out0`，覆盖 Reshape/Permute/Slice/BinaryOp/MatMul/Interp；
     Release+AVX2 约 84 ms，峰值 RSS 96 MB）
+  - 另外通过 `mnet_probe` 验证 16 个模型：pose、scrfd、yolo11n_seg/pose/obb、
+    yolov8n/seg/pose/obb/cls、yolov5s/5s.ncnn/5s_6.0、yolov6n、yolov7-tiny、nanodet_m
   - Qwen3 0.6B int8 单 token：embed → decoder → proj → argmax
   - Qwen3 0.6B int8 两 token decode：把 28 层 KV cache 回灌，验证 cache 复用
   - 文本生成：BPE tokenizer + 23-token chat prompt → 3 个新 token → `Hello! How can`
@@ -54,5 +58,5 @@ ex.extract("output", out);
 
 - 二进制 param 已支持（按 ncnn type index 注册）；仍缺完整 layer type 表；
 - 更广的层覆盖与二进制 param；
-- 安装包导出（当前 `add_subdirectory` 消费兄弟模块）；
+- 安装包导出已支持（`cmake --install` + `find_package(mnet)` 消费测试通过）；
 - 与 ncnn 参考输出的数值对比测试。

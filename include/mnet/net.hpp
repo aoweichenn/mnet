@@ -52,6 +52,9 @@ public:
 
     [[nodiscard]] Extractor create_extractor() const { return Extractor(this); }
 
+    [[nodiscard]] std::vector<std::string> input_names() const;
+    [[nodiscard]] std::vector<std::string> output_names() const;
+
 private:
     Option opt_;
     std::unique_ptr<NetPrivate> d;

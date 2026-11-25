@@ -48,6 +48,37 @@ inline void copy_make_border(const Mat& src, Mat& dst, std::int32_t top, std::in
     }
 }
 
+inline void copy_cut_border(const Mat& src, Mat& dst, std::int32_t top, std::int32_t bottom, std::int32_t left,
+                            std::int32_t right, const Option& opt) {
+    if (top == 0 && bottom == 0 && left == 0 && right == 0) {
+        dst = src;
+        return;
+    }
+    if (src.elemsize != 4u) {
+        dst = src;
+        return;
+    }
+
+    const std::int32_t w = src.w - left - right;
+    const std::int32_t h = src.h - top - bottom;
+    if (w <= 0 || h <= 0) {
+        dst = Mat();
+        return;
+    }
+
+    dst.release();
+    dst.create(w, h, src.c, 4u, opt.blob_allocator);
+    if (dst.empty()) {
+        return;
+    }
+    for (std::int32_t q = 0; q < src.c; ++q) {
+        for (std::int32_t y = 0; y < h; ++y) {
+            std::memcpy(dst.channel(q).row(y), src.channel(q).row(y + top) + left,
+                        static_cast<std::size_t>(w) * sizeof(float));
+        }
+    }
+}
+
 // Flatten all channels into a 1D Mat without copying more than once per channel.
 inline void flatten(const Mat& src, Mat& dst, const Option& opt) {
     if (src.dims == 1) {

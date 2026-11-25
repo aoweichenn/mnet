@@ -711,3 +711,23 @@ TEST(Kernel, Convolution3x3Im2colMatchesReference) {
     }
     EXPECT_LT(max_err, 1e-5F);
 }
+
+TEST(Kernel, ReshapeLargeChannel) {
+    using RS = mlayer::Reshape<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict pd;
+    pd.set(0, 1);
+    pd.set(1, 1);
+    pd.set(2, -1);
+    RS op;
+    ASSERT_EQ(op.load_param(pd), 0);
+    mnet::Mat input(20, 20, 256);
+    input.fill(1.0F);
+    mnet::Option opt;
+    mnet::Mat out;
+    ASSERT_EQ(op.forward(input, out, opt), 0);
+    ASSERT_FALSE(out.empty());
+    ASSERT_EQ(out.dims, 3);
+    ASSERT_EQ(out.w, 1);
+    ASSERT_EQ(out.h, 1);
+    ASSERT_EQ(out.c, 102400);
+}

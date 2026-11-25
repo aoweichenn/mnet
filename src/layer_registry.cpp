@@ -9,23 +9,35 @@
 #include <vector>
 
 #include <mformat/model_bin.hpp>
+#include <mlayer/absval.hpp>
 #include <mlayer/batchnorm.hpp>
 #include <mlayer/bias.hpp>
 #include <mlayer/binaryop.hpp>
+#include <mlayer/bnll.hpp>
+#include <mlayer/clip.hpp>
 #include <mlayer/concat.hpp>
 #include <mlayer/convolution.hpp>
 #include <mlayer/convolutiondepthwise.hpp>
+#include <mlayer/deconvolution.hpp>
 #include <mlayer/dropout.hpp>
 #include <mlayer/embed.hpp>
+#include <mlayer/exp.hpp>
 #include <mlayer/flatten.hpp>
 #include <mlayer/gelu.hpp>
 #include <mlayer/gemm.hpp>
+#include <mlayer/groupnorm.hpp>
+#include <mlayer/hardsigmoid.hpp>
+#include <mlayer/hardswish.hpp>
 #include <mlayer/innerproduct.hpp>
 #include <mlayer/interp.hpp>
+#include <mlayer/layernorm.hpp>
+#include <mlayer/log.hpp>
 #include <mlayer/matmul.hpp>
+#include <mlayer/normalize.hpp>
 #include <mlayer/permute.hpp>
 #include <mlayer/pooling.hpp>
 #include <mlayer/power.hpp>
+#include <mlayer/prelu.hpp>
 #include <mlayer/relu.hpp>
 #include <mlayer/reshape.hpp>
 #include <mlayer/rmsnorm.hpp>
@@ -40,6 +52,7 @@
 #include <mlayer/swish.hpp>
 #include <mlayer/tanh.hpp>
 #include <mlayer/threshold.hpp>
+#include <mlayer/yolov5focus.hpp>
 #include <mnet/activation.hpp>
 #include <mnet/border.hpp>
 #include <mnet/quantize.hpp>
@@ -60,6 +73,8 @@ using InnerProductT = mlayer::InnerProduct<Layer, MatT, OptionT, ParamDictT, Mod
 using ConvDepthWiseT =
     mlayer::ConvolutionDepthWise<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, false, mnet::activation_ss,
                                  mnet::quantize_int8, mnet::copy_make_border, mnet::flatten>;
+using DeconvolutionT = mlayer::Deconvolution<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, mnet::activation_ss,
+                                             mnet::copy_cut_border, mnet::flatten>;
 
 class InputLayer final : public Layer {
 public:
@@ -113,6 +128,19 @@ void register_builtins() {
     add("ShuffleChannel", &make_layer<mlayer::ShuffleChannel<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Slice", &make_layer<mlayer::Slice<Layer, MatT, OptionT, ParamDictT, false>>);
     add("RMSNorm", &make_layer<mlayer::RMSNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("AbsVal", &make_layer<mlayer::AbsVal<Layer, MatT, OptionT>>);
+    add("BNLL", &make_layer<mlayer::BNLL<Layer, MatT, OptionT>>);
+    add("Clip", &make_layer<mlayer::Clip<Layer, MatT, OptionT, ParamDictT>>);
+    add("Exp", &make_layer<mlayer::Exp<Layer, MatT, OptionT, ParamDictT>>);
+    add("Log", &make_layer<mlayer::Log<Layer, MatT, OptionT, ParamDictT>>);
+    add("HardSigmoid", &make_layer<mlayer::HardSigmoid<Layer, MatT, OptionT, ParamDictT>>);
+    add("HardSwish", &make_layer<mlayer::HardSwish<Layer, MatT, OptionT, ParamDictT>>);
+    add("GroupNorm", &make_layer<mlayer::GroupNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
+    add("LayerNorm", &make_layer<mlayer::LayerNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("PReLU", &make_layer<mlayer::PReLU<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("Normalize", &make_layer<mlayer::Normalize<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("Deconvolution", &make_layer<DeconvolutionT>);
+    add("YoloV5Focus", &make_layer<mlayer::YoloV5Focus<Layer, MatT, OptionT>>);
     add("BinaryOp", &make_layer<mlayer::BinaryOp<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Permute", &make_layer<mlayer::Permute<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Reshape", &make_layer<mlayer::Reshape<Layer, MatT, OptionT, ParamDictT>>);

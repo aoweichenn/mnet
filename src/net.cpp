@@ -30,6 +30,8 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
     std::vector<mgraph::Blob> blobs;
     std::vector<std::string> layer_types;
     std::vector<std::int32_t> blob_last_use;
+    std::vector<std::int32_t> input_blobs;
+    std::vector<std::int32_t> output_blobs;
     std::unordered_map<const Layer*, std::int32_t> layer_index;
     mutable std::int32_t profile_index = 0;
     mmemory::UnlockedPoolAllocator blob_allocator;
@@ -243,11 +245,45 @@ std::int32_t Net::load_param(const char* param_path) {
     for (Layer* layer : this->d->layers) {
         delete layer;
     }
+    std::vector<std::int32_t> input_blobs = plan.input_blobs;
+    if (input_blobs.empty()) {
+        for (Layer* layer : layers) {
+            if (layer->bottoms.empty()) {
+                for (const std::int32_t top : layer->tops) {
+                    input_blobs.push_back(top);
+                }
+            }
+        }
+    }
     this->d->layers = std::move(layers);
     this->d->blobs = graph.blobs;
     this->d->layer_types = std::move(layer_types);
     this->d->blob_last_use = plan.blob_last_use;
+    this->d->input_blobs = std::move(input_blobs);
+    this->d->output_blobs = plan.output_blobs;
     return 0;
+}
+
+std::vector<std::string> Net::input_names() const {
+    std::vector<std::string> names;
+    names.reserve(this->d->input_blobs.size());
+    for (const std::int32_t index : this->d->input_blobs) {
+        if (index >= 0 && static_cast<std::size_t>(index) < this->d->blobs.size()) {
+            names.push_back(this->d->blobs[static_cast<std::size_t>(index)].name);
+        }
+    }
+    return names;
+}
+
+std::vector<std::string> Net::output_names() const {
+    std::vector<std::string> names;
+    names.reserve(this->d->output_blobs.size());
+    for (const std::int32_t index : this->d->output_blobs) {
+        if (index >= 0 && static_cast<std::size_t>(index) < this->d->blobs.size()) {
+            names.push_back(this->d->blobs[static_cast<std::size_t>(index)].name);
+        }
+    }
+    return names;
 }
 
 std::int32_t Net::load_model(const char* bin_path) {

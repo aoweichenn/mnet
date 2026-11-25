@@ -94,21 +94,80 @@ if(mnet_enable_avx2 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
 endif()
 target_link_libraries(mnet_objs PRIVATE mformat::mformat mgraph::mgraph mlayer::mlayer OpenMP::OpenMP_CXX)
 
-add_library(mnet STATIC)
+add_library(mnet STATIC
+    $<TARGET_OBJECTS:mnet_objs>
+    $<TARGET_OBJECTS:mgraph_objs>
+    $<TARGET_OBJECTS:mformat_objs>
+    $<TARGET_OBJECTS:mmat_objs>
+    $<TARGET_OBJECTS:mmemory_objs>
+    $<TARGET_OBJECTS:mplatform_objs>)
 if(mnet_enable_avx2 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     target_compile_options(mnet INTERFACE -mavx2 -mfma)
 endif()
-target_link_libraries(mnet
-    PUBLIC $<BUILD_INTERFACE:mnet_objs>
-    INTERFACE mformat::mformat mgraph::mgraph mlayer::mlayer OpenMP::OpenMP_CXX)
+target_link_libraries(mnet PUBLIC OpenMP::OpenMP_CXX)
 add_library(mnet::mnet ALIAS mnet)
 
 target_include_directories(mnet
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../mlayer/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../mgraph/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/mgraph/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../mformat/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/mformat/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../mmat/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/mformat/mmat/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../mmemory/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/mformat/mmat/mmemory/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../mplatform/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/mformat/mmat/mmemory/mplatform/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 # Packaging/export is added once mlayer/mgraph/mformat are installed packages.
+
+if(PROJECT_IS_TOP_LEVEL)
+    include(CMakePackageConfigHelpers)
+
+    install(TARGETS mnet EXPORT mnetTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../mlayer/include/mlayer
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../mgraph/include/mgraph
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/mgraph/include/mgraph/config.hpp
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mgraph)
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../mformat/include/mformat
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/mformat/include/mformat/config.hpp
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mformat)
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../mmat/include/mmat
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/mformat/mmat/include/mmat/config.hpp
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mmat)
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../mmemory/include/mmemory
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/mformat/mmat/mmemory/include/mmemory/config.hpp
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mmemory)
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../mplatform/include/mplatform
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/mformat/mmat/mmemory/mplatform/include/mplatform/config.hpp
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mplatform)
+
+    install(EXPORT mnetTargets NAMESPACE mnet:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mnet)
+    configure_package_config_file(cmake/mnetConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/mnetConfig.cmake
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mnet)
+    write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/mnetConfigVersion.cmake
+        VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/mnetConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/mnetConfigVersion.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mnet)
+
+    add_executable(mnet_probe tools/mnet_probe.cpp)
+    target_link_libraries(mnet_probe PRIVATE mnet::mnet)
+    target_compile_options(mnet_probe PRIVATE ${MNET_WARNINGS})
+endif()
 
 if(mnet_build_tests AND BUILD_TESTING)
     add_subdirectory(tests)
