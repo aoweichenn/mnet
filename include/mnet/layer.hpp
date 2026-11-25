@@ -5,7 +5,6 @@
 #define MNET_LAYER_HPP
 
 #include <mgraph/layer.hpp>
-
 #include <mnet/mat.hpp>
 #include <mnet/option.hpp>
 

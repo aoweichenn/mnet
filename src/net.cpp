@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <cstdio>
+
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -15,7 +16,6 @@
 #include <mgraph/executor.hpp>
 #include <mgraph/extractor.hpp>
 #include <mgraph/graph.hpp>
-
 #include <mnet/layer_registry.hpp>
 
 namespace mnet {

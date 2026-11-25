@@ -4,9 +4,11 @@
 #include <mnet/layer_registry.hpp>
 
 #include <cstdint>
+
 #include <string>
 #include <vector>
 
+#include <mformat/model_bin.hpp>
 #include <mlayer/bias.hpp>
 #include <mlayer/dropout.hpp>
 #include <mlayer/flatten.hpp>
@@ -19,8 +21,6 @@
 #include <mlayer/swish.hpp>
 #include <mlayer/tanh.hpp>
 #include <mlayer/threshold.hpp>
-
-#include <mformat/model_bin.hpp>
 
 namespace mnet {
 namespace {

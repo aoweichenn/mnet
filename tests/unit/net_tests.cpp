@@ -1,14 +1,14 @@
 // Copyright 2026 mcnn authors
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <gtest/gtest.h>
-
 #include <cmath>
 #include <cstdint>
+
 #include <filesystem>
 #include <fstream>
 #include <string>
 
+#include <gtest/gtest.h>
 #include <mnet/net.hpp>
 
 namespace {
