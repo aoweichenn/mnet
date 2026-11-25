@@ -19,10 +19,13 @@
 #include <mlayer/flatten.hpp>
 #include <mlayer/gelu.hpp>
 #include <mlayer/innerproduct.hpp>
+#include <mlayer/interp.hpp>
+#include <mlayer/matmul.hpp>
 #include <mlayer/permute.hpp>
 #include <mlayer/pooling.hpp>
 #include <mlayer/power.hpp>
 #include <mlayer/relu.hpp>
+#include <mlayer/reshape.hpp>
 #include <mlayer/rmsnorm.hpp>
 #include <mlayer/scale.hpp>
 #include <mlayer/shufflechannel.hpp>
@@ -108,6 +111,9 @@ void register_builtins() {
     add("RMSNorm", &make_layer<mlayer::RMSNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("BinaryOp", &make_layer<mlayer::BinaryOp<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Permute", &make_layer<mlayer::Permute<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Reshape", &make_layer<mlayer::Reshape<Layer, MatT, OptionT, ParamDictT>>);
+    add("MatMul", &make_layer<mlayer::MatMul<Layer, MatT, OptionT, ParamDictT>>);
+    add("Interp", &make_layer<mlayer::Interp<Layer, MatT, OptionT, ParamDictT>>);
 }
 
 }  // namespace

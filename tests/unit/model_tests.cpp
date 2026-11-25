@@ -94,3 +94,43 @@ TEST(Net, RunsShufflenetV2EndToEnd) {
     }
     EXPECT_EQ(bad, 0);
 }
+
+TEST(Net, RunsYolo11nEndToEnd) {
+    const char* dir_env = std::getenv("MNET_YOLO11N_DIR");
+    if (dir_env == nullptr) {
+        GTEST_SKIP() << "set MNET_YOLO11N_DIR to run the end-to-end model test";
+    }
+    const std::filesystem::path dir(dir_env);
+    const std::string param = (dir / "yolo11n.ncnn.param").string();
+    const std::string bin = (dir / "yolo11n.ncnn.bin").string();
+
+    mnet::Net net;
+    net.opt().num_threads = 4;
+    ASSERT_EQ(net.load(param.c_str(), bin.c_str()), 0);
+
+    mnet::Mat input(640, 640, 3);
+    for (std::int32_t q = 0; q < input.c; ++q) {
+        float* p = input.channel(q);
+        for (std::int32_t i = 0; i < 640 * 640; ++i) {
+            p[i] = std::sin(0.001F * static_cast<float>(i + q * 17));
+        }
+    }
+
+    mnet::Net::Extractor ex = net.create_extractor();
+    ASSERT_EQ(ex.input("in0", input), 0);
+
+    mnet::Mat out;
+    ASSERT_EQ(ex.extract("out0", out), 0);
+    ASSERT_FALSE(out.empty());
+
+    std::int32_t bad = 0;
+    for (std::int32_t q = 0; q < out.c; ++q) {
+        const float* p = out.channel(q);
+        for (std::int32_t i = 0; i < out.w * out.h * out.d; ++i) {
+            if (!std::isfinite(p[i])) {
+                ++bad;
+            }
+        }
+    }
+    EXPECT_EQ(bad, 0);
+}

@@ -350,3 +350,96 @@ TEST(Kernel, RMSNormAffine) {
         EXPECT_NEAR(out[static_cast<std::size_t>(i)], ref, 1e-5F);
     }
 }
+
+#include <mlayer/interp.hpp>
+#include <mlayer/matmul.hpp>
+#include <mlayer/reshape.hpp>
+
+TEST(Kernel, ReshapeNumericAndExpression) {
+    using RS = mlayer::Reshape<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+
+    mformat::ParamDict pd;
+    pd.set(0, 2);
+    pd.set(1, 3);
+    pd.set(2, 4);
+    RS op;
+    ASSERT_EQ(op.load_param(pd), 0);
+
+    mnet::Mat input(4, 3, 2);
+    for (std::int32_t i = 0; i < 24; ++i) {
+        static_cast<float*>(input)[i] = static_cast<float>(i);
+    }
+    mnet::Option opt;
+    mnet::Mat out;
+    ASSERT_EQ(op.forward(input, out, opt), 0);
+    ASSERT_EQ(out.dims, 3);
+    ASSERT_EQ(out.w, 2);
+    ASSERT_EQ(out.h, 3);
+    ASSERT_EQ(out.c, 4);
+
+    mformat::ParamDict pd2;
+    pd2.set(6, std::string("1w,1h,4"));
+    RS op2;
+    ASSERT_EQ(op2.load_param(pd2), 0);
+    mnet::Mat shape(3, 2);
+    std::vector<mnet::Mat> bottoms = {input, shape};
+    std::vector<mnet::Mat> tops(1);
+    ASSERT_EQ(op2.forward(bottoms, tops, opt), 0);
+    ASSERT_EQ(tops[0].w, 3);
+    ASSERT_EQ(tops[0].h, 2);
+    ASSERT_EQ(tops[0].c, 4);
+}
+
+TEST(Kernel, MatMul2DAndInterpNearest) {
+    using MM = mlayer::MatMul<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+
+    mformat::ParamDict pd;
+    pd.set(0, 0);
+    MM mm;
+    ASSERT_EQ(mm.load_param(pd), 0);
+
+    mnet::Mat a(3, 2);
+    mnet::Mat b(4, 3);
+    for (std::int32_t i = 0; i < 6; ++i) {
+        static_cast<float*>(a)[i] = static_cast<float>(i);
+    }
+    for (std::int32_t i = 0; i < 12; ++i) {
+        static_cast<float*>(b)[i] = static_cast<float>(i);
+    }
+    std::vector<mnet::Mat> bottoms = {a, b};
+    std::vector<mnet::Mat> tops(1);
+    mnet::Option opt;
+    ASSERT_EQ(mm.forward(bottoms, tops, opt), 0);
+    ASSERT_EQ(tops[0].w, 4);
+    ASSERT_EQ(tops[0].h, 2);
+    for (std::int32_t i = 0; i < 2; ++i) {
+        for (std::int32_t j = 0; j < 4; ++j) {
+            float ref = 0.0F;
+            for (std::int32_t k = 0; k < 3; ++k) {
+                ref += a.row(i)[k] * b.row(k)[j];
+            }
+            EXPECT_FLOAT_EQ(tops[0].row(i)[j], ref);
+        }
+    }
+
+    using IP = mlayer::Interp<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict pd2;
+    pd2.set(0, 1);
+    pd2.set(1, 2.0F);
+    pd2.set(2, 2.0F);
+    IP ip;
+    ASSERT_EQ(ip.load_param(pd2), 0);
+    mnet::Mat small(2, 2, 1);
+    small.channel(0)[0] = 1.0F;
+    small.channel(0)[1] = 2.0F;
+    small.channel(0)[2] = 3.0F;
+    small.channel(0)[3] = 4.0F;
+    mnet::Mat up;
+    ASSERT_EQ(ip.forward(small, up, opt), 0);
+    ASSERT_EQ(up.w, 4);
+    ASSERT_EQ(up.h, 4);
+    EXPECT_FLOAT_EQ(up.channel(0)[0], 1.0F);
+    EXPECT_FLOAT_EQ(up.channel(0)[3], 2.0F);
+    EXPECT_FLOAT_EQ(up.channel(0)[12], 3.0F);
+    EXPECT_FLOAT_EQ(up.channel(0)[15], 4.0F);
+}
