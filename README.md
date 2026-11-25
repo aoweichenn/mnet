@@ -89,8 +89,9 @@ ex.extract("output", out);
 已覆盖 14 类算子：3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、Gemm
 （常量转置权重）、Interp（nearest）、SDPA（多输入注意力）、Pooling、Softmax、
 Concat、BatchNorm、Permute、Slice、MatMul、Reshape，最大绝对误差均 ≤ 9.5e-7。
-MultiHeadAttention 目前只与自身全序列结果对齐（KV-cache 单测）；与 ncnn x86
-MHA 的多 token 输出仍存在差异，待定位。
+另提供 `tools/parity/model_compare`：同一模型文件与输入同时跑 ncnn 与 mnet，
+逐 blob 对比。实测端到端误差：squeezenet 4.7e-7、shufflenet 6.2e-6、
+yolo11n 9.0e-5、PP-OCRv5 rec 1.3e-4（含 MultiHeadAttention）、yolov8n 1.1e-4。
 
 尚未完成：
 
