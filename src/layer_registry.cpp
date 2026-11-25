@@ -68,6 +68,7 @@
 #include <mlayer/permute.hpp>
 #include <mlayer/pixelshuffle.hpp>
 #include <mlayer/pooling.hpp>
+#include <mlayer/pooling1d.hpp>
 #include <mlayer/power.hpp>
 #include <mlayer/prelu.hpp>
 #include <mlayer/priorbox.hpp>
@@ -194,6 +195,7 @@ void register_builtins() {
     add("SPP", &make_layer<mlayer::SPP<Layer, MatT, OptionT, ParamDictT, false>>);
     add("StatisticsPooling", &make_layer<mlayer::StatisticsPooling<Layer, MatT, OptionT, ParamDictT>>);
     add("Packing", &make_layer<mlayer::Packing<Layer, MatT, OptionT, ParamDictT>>);
+    add("Pooling1D", &make_layer<mlayer::Pooling1D<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Quantize", &make_layer<mlayer::Quantize<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("Dequantize", &make_layer<mlayer::Dequantize<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("Requantize",
