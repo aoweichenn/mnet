@@ -86,9 +86,10 @@ ex.extract("output", out);
 `mnet_probe --allow-empty` 用于随机输入下检测头输出为空的模型。
 
 数值一致性：`mcnn/tools/parity` 用同一份 param/bin 同时跑上游 ncnn 与 mnet，
-已覆盖 14 类算子：3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、Gemm
+已覆盖 16 类算子：3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、Gemm
 （常量转置权重）、Interp（nearest）、SDPA（多输入注意力）、Pooling、Softmax、
-Concat、BatchNorm、Permute、Slice、MatMul、Reshape，最大绝对误差均 ≤ 9.5e-7。
+Concat、BatchNorm、Permute、Slice、MatMul、Reshape、DetectionOutput、
+Yolov3DetectionOutput，最大绝对误差均 ≤ 9.5e-7。
 另提供 `tools/parity/model_compare`：同一模型文件与输入同时跑 ncnn 与 mnet，
 可比较任意 blob 或多个输出。26 个模型端到端对齐（max_abs_diff / 相对误差）：
 yolo11n 1.2e-4、yolov8n 1.2e-4、PP-OCRv5 rec 1.3e-4（含 MHA）、yolact 1.3e-5、
