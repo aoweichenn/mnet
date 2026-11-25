@@ -29,10 +29,10 @@
 #include <mlayer/crop.hpp>
 #include <mlayer/cumulativesum.hpp>
 #include <mlayer/deconvolution.hpp>
-#include <mlayer/deformableconv2d.hpp>
 #include <mlayer/deconvolution1d.hpp>
 #include <mlayer/deconvolution3d.hpp>
 #include <mlayer/deepcopy.hpp>
+#include <mlayer/deformableconv2d.hpp>
 #include <mlayer/detectionoutput.hpp>
 #include <mlayer/diag.hpp>
 #include <mlayer/dropout.hpp>
@@ -86,6 +86,7 @@
 #include <mlayer/reorg.hpp>
 #include <mlayer/reshape.hpp>
 #include <mlayer/rmsnorm.hpp>
+#include <mlayer/rnn.hpp>
 #include <mlayer/roialign.hpp>
 #include <mlayer/roipooling.hpp>
 #include <mlayer/rotaryembed.hpp>
@@ -99,6 +100,7 @@
 #include <mlayer/slice.hpp>
 #include <mlayer/softmax.hpp>
 #include <mlayer/softplus.hpp>
+#include <mlayer/spectrogram.hpp>
 #include <mlayer/split.hpp>
 #include <mlayer/spp.hpp>
 #include <mlayer/squeeze.hpp>
@@ -243,11 +245,14 @@ void register_builtins() {
     add("Padding", &make_layer<mlayer::Padding<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("Tile", &make_layer<mlayer::Tile<Layer, MatT, OptionT, ParamDictT>>);
     add("Unfold", &make_layer<mlayer::Unfold<Layer, MatT, OptionT, ParamDictT>>);
-    add("DeformableConv2D", &make_layer<mlayer::DeformableConv2D<Layer, MatT, OptionT, ParamDictT, ModelBinT,
-                                                                   false, mnet::activation_ss>>);
+    add("DeformableConv2D",
+        &make_layer<mlayer::DeformableConv2D<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, mnet::activation_ss>>);
     add("Fold", &make_layer<mlayer::Fold<Layer, MatT, OptionT, ParamDictT, mnet::copy_cut_border>>);
     add("GridSample", &make_layer<mlayer::GridSample<Layer, MatT, OptionT, ParamDictT, false>>);
     add("LSTM", &make_layer<mlayer::LSTM<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
+    add("RNN", &make_layer<mlayer::RNN<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
+    add("Spectrogram", &make_layer<mlayer::Spectrogram<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("InverseSpectrogram", &make_layer<mlayer::InverseSpectrogram<Layer, MatT, OptionT, ParamDictT, false>>);
     add("GRU", &make_layer<mlayer::GRU<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
     add("ShortConv", &make_layer<mlayer::ShortConv<Layer, MatT, OptionT>>);
     add("GatedDeltaRule", &make_layer<mlayer::GatedDeltaRule<Layer, MatT, OptionT>>);
