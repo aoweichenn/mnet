@@ -1153,3 +1153,140 @@ TEST(Kernel, Convolution3x3WinogradMatchesReference) {
     }
     EXPECT_LT(max_err, 1e-5F);
 }
+
+TEST(Kernel, MultiHeadAttentionKvCacheMatchesFullSequence) {
+    using MHA = mlayer::MultiHeadAttention<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, mformat::ModelBin>;
+    mformat::ParamDict pd;
+    pd.set(0, 4);   // embed_dim
+    pd.set(1, 2);   // num_heads
+    pd.set(2, 16);  // weight_data_size
+    pd.set(3, 4);   // kdim
+    pd.set(4, 4);   // vdim
+    pd.set(7, 1);   // kv_cache
+    MHA layer;
+    ASSERT_EQ(layer.load_param(pd), 0);
+
+    const std::int32_t E = 4;
+    std::vector<mnet::Mat> weights;
+    for (std::int32_t t = 0; t < 8; ++t) {
+        mnet::Mat w = (t % 2 == 0) ? mnet::Mat(E * E) : mnet::Mat(E);
+        for (std::int32_t i = 0; i < w.w; ++i) {
+            w[static_cast<std::size_t>(i)] = 0.11F * static_cast<float>((i * 7 + t * 3) % 17) - 0.7F;
+        }
+        weights.push_back(w);
+    }
+    ASSERT_EQ(layer.load_model(mformat::ModelBinFromMatArray(weights.data())), 0);
+
+    auto make_x = [&](std::int32_t seq, std::int32_t seed) {
+        mnet::Mat x(E, seq);
+        for (std::int32_t i = 0; i < E * seq; ++i) {
+            x[static_cast<std::size_t>(i)] = std::sin(0.3F * static_cast<float>(i + seed));
+        }
+        return x;
+    };
+
+    mformat::ParamDict full_pd;
+    full_pd.set(0, 4);
+    full_pd.set(1, 2);
+    full_pd.set(2, 16);
+    full_pd.set(3, 4);
+    full_pd.set(4, 4);
+    MHA full_layer;
+    ASSERT_EQ(full_layer.load_param(full_pd), 0);
+    ASSERT_EQ(full_layer.load_model(mformat::ModelBinFromMatArray(weights.data())), 0);
+
+    mnet::Option opt;
+    mnet::Mat full = make_x(2, 1);
+    std::vector<mnet::Mat> full_bottoms = {full};
+    std::vector<mnet::Mat> full_tops(1);
+    ASSERT_EQ(full_layer.forward(full_bottoms, full_tops, opt), 0);
+
+    std::vector<mnet::Mat> top0(3);
+    std::vector<mnet::Mat> b0 = {make_x(1, 1), mnet::Mat(), mnet::Mat()};
+    ASSERT_EQ(layer.forward(b0, top0, opt), 0);
+    ASSERT_EQ(top0[1].dims, 3);
+    ASSERT_EQ(top0[1].w, 2);
+    ASSERT_EQ(top0[1].h, 1);
+    ASSERT_EQ(top0[1].c, 2);
+
+    std::vector<mnet::Mat> top1(3);
+    std::vector<mnet::Mat> b1 = {make_x(1, 1 + E), top0[1], top0[2]};
+    ASSERT_EQ(layer.forward(b1, top1, opt), 0);
+    ASSERT_EQ(top1[1].h, 2);
+
+    for (std::int32_t i = 0; i < E; ++i) {
+        EXPECT_NEAR(top1[0].row(0)[i], full_tops[0].row(1)[i], 1e-5F);
+    }
+}
+
+TEST(Kernel, Convolution3x3SmallInputChannelsMatchesReference) {
+    // Exercises the im2col path for K = inch * 9 = 27 (below the old >= 64 gate).
+    const std::int32_t w = 9;
+    const std::int32_t h = 8;
+    const std::int32_t inch = 3;
+    const std::int32_t outch = 8;
+
+    mformat::ParamDict pd;
+    pd.set(0, outch);
+    pd.set(1, 3);
+    pd.set(11, 3);
+    pd.set(4, 1);
+    pd.set(15, 1);
+    pd.set(14, 1);
+    pd.set(16, 1);
+    pd.set(5, 1);
+    pd.set(6, outch * inch * 9);
+
+    mnet::Mat weights[2];
+    weights[0].create(outch * inch * 9);
+    for (std::int32_t i = 0; i < outch * inch * 9; ++i) {
+        weights[0][static_cast<std::size_t>(i)] = 0.02F * static_cast<float>((i * 5) % 23) - 0.2F;
+    }
+    weights[1].create(outch);
+    for (std::int32_t i = 0; i < outch; ++i) {
+        weights[1][static_cast<std::size_t>(i)] = 0.05F * static_cast<float>(i);
+    }
+
+    Conv conv;
+    ASSERT_EQ(conv.load_param(pd), 0);
+    ASSERT_EQ(conv.load_model(mformat::ModelBinFromMatArray(weights)), 0);
+
+    mnet::Mat input(w, h, inch);
+    for (std::int32_t q = 0; q < inch; ++q) {
+        for (std::int32_t i = 0; i < w * h; ++i) {
+            input.channel(q)[static_cast<std::size_t>(i)] = std::cos(0.08F * static_cast<float>(i + q * 7));
+        }
+    }
+
+    mnet::Option opt;
+    opt.num_threads = 3;
+    mnet::Mat out;
+    ASSERT_EQ(conv.forward(input, out, opt), 0);
+
+    float max_err = 0.0F;
+    for (std::int32_t p = 0; p < outch; ++p) {
+        for (std::int32_t oy = 0; oy < h; ++oy) {
+            for (std::int32_t ox = 0; ox < w; ++ox) {
+                float sum = weights[1][static_cast<std::size_t>(p)];
+                for (std::int32_t q = 0; q < inch; ++q) {
+                    for (std::int32_t ky = 0; ky < 3; ++ky) {
+                        const std::int32_t iy = oy + ky - 1;
+                        if (iy < 0 || iy >= h) {
+                            continue;
+                        }
+                        for (std::int32_t kx = 0; kx < 3; ++kx) {
+                            const std::int32_t ix = ox + kx - 1;
+                            if (ix < 0 || ix >= w) {
+                                continue;
+                            }
+                            sum += input.channel(q)[static_cast<std::size_t>(iy * w + ix)] *
+                                   weights[0][static_cast<std::size_t>((p * inch + q) * 9 + ky * 3 + kx)];
+                        }
+                    }
+                }
+                max_err = std::fmax(max_err, std::fabs(sum - out.channel(p)[static_cast<std::size_t>(oy * w + ox)]));
+            }
+        }
+    }
+    EXPECT_LT(max_err, 1e-5F);
+}

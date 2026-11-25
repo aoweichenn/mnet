@@ -56,7 +56,7 @@ ex.extract("output", out);
   - `squeezenet_v1.1`（227x227x3 → 1000 类 softmax，概率和校验）
   - `shufflenet_v2_x0.5`（224x224x3 → 1000 维输出，覆盖 ConvDW/BN/Slice/ShuffleChannel）
   - `yolo11n`（640x640x3 → `out0`，覆盖 Reshape/Permute/Slice/BinaryOp/MatMul/Interp；
-    Release+AVX2 约 52 ms，峰值 RSS 100 MB；3x3 stride1 走 Winograd F(2x2,3x3)）
+    Release+AVX2 约 46–47 ms，峰值 RSS 98 MB；3x3 stride1 走 Winograd F(2x2,3x3)）
   - 另外通过 `mnet_probe` 验证 35 个真实模型（AVX2 Release，含峰值 RSS），覆盖
     pose、scrfd、yolo11n_seg/pose/obb、yolov8n/seg/pose/obb/cls、yolov5s/5s.ncnn/
     5s_6.0、yolov6n、yolov7-tiny、nanodet_m、yolact、yolov8s_worldv2、pelee、
@@ -85,14 +85,16 @@ ex.extract("output", out);
 `mnet_probe --allow-empty` 用于随机输入下检测头输出为空的模型。
 
 数值一致性：`mcnn/tools/parity` 用同一份 param/bin 同时跑上游 ncnn 与 mnet，
-已覆盖 12 类算子：3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、Gemm
+已覆盖 14 类算子：3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、Gemm
 （常量转置权重）、Interp（nearest）、SDPA（多输入注意力）、Pooling、Softmax、
-Concat、BatchNorm、Permute、Slice，最大绝对误差均 ≤ 9.5e-7。
+Concat、BatchNorm、Permute、Slice、MatMul、Reshape，最大绝对误差均 ≤ 9.5e-7。
+MultiHeadAttention 目前只与自身全序列结果对齐（KV-cache 单测）；与 ncnn x86
+MHA 的多 token 输出仍存在差异，待定位。
 
 尚未完成：
 
 - SSD 系列在随机输入下无检测框（`DetectionOutput` 返回空，行为与 ncnn 一致）；
-- yolo11n 约 1.6 倍慢于 ncnn（52 ms vs 32 ms），热点仍是 3x3 Convolution
+- yolo11n 约 1.45 倍慢于 ncnn（46–47 ms vs 32 ms），热点仍是 3x3 Convolution
   （Winograd 后约 31 ms）与 1x1 Convolution（约 12 ms）；
   `MultiHeadAttention` 的 KV-cache 与量化路径尚未移植（遇到时返回 -1）；
 - 与 ncnn 参考输出的逐层数值对比测试；
