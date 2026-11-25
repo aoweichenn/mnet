@@ -192,6 +192,7 @@ int main(int argc, char** argv) {
     bool fast_int4 = false;
     bool int8_kv = false;
     std::int32_t kv_capacity = 0;
+    long long max_mem_mb = 0;
     std::int32_t prefill_chunk = 512;
     for (std::int32_t i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
@@ -208,6 +209,8 @@ int main(int argc, char** argv) {
             fast_int4 = true;
         } else if (std::strcmp(argv[i], "--int8-kv") == 0) {
             int8_kv = true;
+        } else if (std::strcmp(argv[i], "--max-mem-mb") == 0 && i + 1 < argc) {
+            max_mem_mb = std::atoll(argv[++i]);
         } else if (std::strcmp(argv[i], "--kv-capacity") == 0 && i + 1 < argc) {
             kv_capacity = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--prefill-chunk") == 0 && i + 1 < argc) {
@@ -220,7 +223,7 @@ int main(int argc, char** argv) {
     if (model_dir.empty()) {
         std::fprintf(stderr,
                      "usage: mnet_llm --model DIR [--prompt TEXT] [--threads N] [--max-new-tokens N] "
-                     "[--fast-int4] [--int8-kv] [--kv-capacity N] [--prefill-chunk N]\n");
+                     "[--fast-int4] [--int8-kv] [--kv-capacity N] [--prefill-chunk N] [--max-mem-mb N]\n");
         return 2;
     }
 
@@ -234,6 +237,24 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "tokenizer load failed\n");
         return 1;
     }
+
+    // One process budget, shared by the three sub-graphs: embeddings and the
+    // LM head are loaded outside the budgeted allocator, so subtract their file
+    // sizes and give the rest to the decoder (where KV cache and activations
+    // live). Without this a big --kv-capacity would be OOM-killed on WSL.
+    std::size_t mem_budget = 0;
+    if (max_mem_mb > 0) {
+        mem_budget = static_cast<std::size_t>(max_mem_mb) * 1024U * 1024U;
+    } else if (const char* env = std::getenv("MNET_MAX_MEM_MB")) {
+        const long long mb = std::atoll(env);
+        if (mb > 0) {
+            mem_budget = static_cast<std::size_t>(mb) * 1024U * 1024U;
+        }
+    }
+    const auto file_bytes = [](const std::string& path) -> std::size_t {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        return f ? static_cast<std::size_t>(f.tellg()) : 0;
+    };
 
     mnet::Net embed_net;
     embed_net.opt().num_threads = threads;
@@ -251,6 +272,16 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "decoder load failed\n");
         return 1;
     }
+    if (mem_budget != 0) {
+        const std::size_t embed_bytes = file_bytes(model_dir + "/" + cfg.embed_bin);
+        const std::size_t proj_bytes = file_bytes(model_dir + "/" + cfg.proj_bin);
+        const std::size_t others = embed_bytes + proj_bytes;
+        const std::size_t decoder_budget = mem_budget > others ? mem_budget - others : 1;
+        decoder_net.set_memory_budget_bytes(decoder_budget);
+        std::printf("mem_budget_mb=%zu decoder_budget_mb=%zu\n", mem_budget / (1024U * 1024U),
+                    decoder_budget / (1024U * 1024U));
+    }
+
     mnet::Net proj_net;
     proj_net.opt().num_threads = threads;
     proj_net.opt().use_fast_int4_gemm = fast_int4;
@@ -297,6 +328,11 @@ int main(int argc, char** argv) {
             const std::string out_name = "out_" + cache_names[i];
             if (ex.extract(out_name.c_str(), caches[i]) != 0) {
                 std::fprintf(stderr, "decoder cache %s extract failed\n", out_name.c_str());
+                if (decoder_net.memory_budget_exhausted()) {
+                    std::fprintf(stderr, "mnet: decoder memory budget exhausted (budget=%zu MiB, peak=%zu MiB)\n",
+                                 decoder_net.memory_budget_bytes() / (1024U * 1024U),
+                                 decoder_net.memory_peak_bytes() / (1024U * 1024U));
+                }
             }
         }
         return hidden_out;
@@ -405,9 +441,11 @@ int main(int argc, char** argv) {
     const double peak_vm_mb = 0.0;
 #endif
     std::printf("model=%s threads=%d prompt_tokens=%d tokens=%zu prefill=%.1fms decode=%.2fms/tok peak_rss_mb=%.1f "
-                "peak_vm_mb=%.1f text=%s\n",
+                "peak_vm_mb=%.1f mem_peak_mb=%.1f mem_budget_mb=%zu budget_hit=%d text=%s\n",
                 model_dir.c_str(), threads, prompt_len, generated.size(), prefill_ms,
                 decode_steps > 0 ? decode_ms / static_cast<double>(decode_steps) : 0.0, peak_rss_mb, peak_vm_mb,
+                static_cast<double>(decoder_net.memory_peak_bytes()) / (1024.0 * 1024.0),
+                decoder_net.memory_budget_bytes() / (1024U * 1024U), decoder_net.memory_budget_exhausted() ? 1 : 0,
                 tokenizer.decode(generated).c_str());
     return 0;
 }

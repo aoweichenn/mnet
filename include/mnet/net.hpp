@@ -4,6 +4,7 @@
 #ifndef MNET_NET_HPP
 #define MNET_NET_HPP
 
+#include <cstddef>
 #include <cstdint>
 
 #include <memory>
@@ -37,6 +38,17 @@ public:
     // Load weights from memory.
     std::int32_t load_model_mem(const void* data, std::size_t size);
     std::int32_t load(const char* param_path, const char* bin_path);
+
+    // Hard cap for activation/workspace bytes (0 = unlimited). Weight bytes
+    // (the model file size) are subtracted from it, so a graph whose weights
+    // alone exceed the budget fails before loading. Exceeding the budget makes
+    // the offending allocation return nullptr, i.e. a normal layer failure
+    // instead of an OS OOM kill.
+    void set_memory_budget_bytes(std::size_t bytes);
+    [[nodiscard]] std::size_t memory_budget_bytes() const;
+    [[nodiscard]] std::size_t memory_peak_bytes() const;
+    [[nodiscard]] std::size_t memory_current_bytes() const;
+    [[nodiscard]] bool memory_budget_exhausted() const;
 
     [[nodiscard]] Option& opt() { return this->opt_; }
     [[nodiscard]] const Option& opt() const { return this->opt_; }

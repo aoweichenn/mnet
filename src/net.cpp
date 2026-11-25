@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <algorithm>
+
 #include <chrono>
 #include <fstream>
 #include <sstream>
@@ -37,6 +39,40 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
     mutable std::int32_t profile_index = 0;
     mmemory::UnlockedPoolAllocator blob_allocator;
     mmemory::UnlockedPoolAllocator workspace_allocator;
+    mmemory::BudgetAllocator budget_blob{this->blob_allocator, 0};
+    mmemory::BudgetAllocator budget_workspace{this->workspace_allocator, 0};
+    // Total budget and the bytes already taken by weights.
+    std::size_t budget_total = 0;
+    std::size_t weight_bytes = 0;
+
+    // Effective budget for activations: total minus weights.
+    [[nodiscard]] std::size_t activation_budget() const {
+        if (this->budget_total == 0) {
+            return 0;
+        }
+        return this->weight_bytes < this->budget_total ? this->budget_total - this->weight_bytes : 1;
+    }
+
+    mutable bool budget_reported = false;
+
+    // One-line, once-per-model explanation when an allocation was refused.
+    void report_budget() const {
+        if (this->budget_reported) {
+            return;
+        }
+        if (!this->budget_blob.exhausted() && !this->budget_workspace.exhausted()) {
+            return;
+        }
+        this->budget_reported = true;
+        detail::write_diagnostic(
+            "mnet: memory budget exhausted; lower the context length/--kv-capacity or raise MNET_MAX_MEM_MB\n");
+    }
+
+    void apply_budget() {
+        const std::size_t budget = this->activation_budget();
+        this->budget_blob.set_budget(budget);
+        this->budget_workspace.set_budget(budget);
+    }
 
     ~NetPrivate() {
         for (Layer* layer : this->layers) {
@@ -311,8 +347,42 @@ Net::Net() : d(new NetPrivate()) {
     this->opt_.num_threads = 1;
     static_cast<void>(this->d->blob_allocator.set_size_compare_ratio(0.0F));
     static_cast<void>(this->d->workspace_allocator.set_size_compare_ratio(0.0F));
-    this->opt_.blob_allocator = &this->d->blob_allocator;
-    this->opt_.workspace_allocator = &this->d->workspace_allocator;
+    this->opt_.blob_allocator = &this->d->budget_blob;
+    this->opt_.workspace_allocator = &this->d->budget_workspace;
+    // The KV cache is the dominant allocation for long contexts; it must be
+    // under the same budget or a large --kv-capacity still gets OOM-killed.
+    this->opt_.kvcache_allocator = &this->d->budget_blob;
+
+    // WSL runs are frequently killed by the kernel OOM killer, which also
+    // takes down the calling shell. A default budget keeps that from
+    // happening; MNET_MAX_MEM_MB=0 removes it explicitly.
+    if (const char* env = std::getenv("MNET_MAX_MEM_MB")) {
+        const long long mb = std::atoll(env);
+        if (mb > 0) {
+            this->set_memory_budget_bytes(static_cast<std::size_t>(mb) * 1024U * 1024U);
+        }
+    }
+}
+
+void Net::set_memory_budget_bytes(std::size_t bytes) {
+    this->d->budget_total = bytes;
+    this->d->apply_budget();
+}
+
+std::size_t Net::memory_budget_bytes() const {
+    return this->d->budget_total;
+}
+
+std::size_t Net::memory_peak_bytes() const {
+    return std::max(this->d->budget_blob.peak_bytes(), this->d->budget_workspace.peak_bytes());
+}
+
+std::size_t Net::memory_current_bytes() const {
+    return this->d->budget_blob.current_bytes() + this->d->budget_workspace.current_bytes();
+}
+
+bool Net::memory_budget_exhausted() const {
+    return this->d->budget_blob.exhausted() || this->d->budget_workspace.exhausted();
 }
 
 Net::~Net() = default;
@@ -478,6 +548,12 @@ std::vector<std::string> Net::output_names() const {
 }
 
 std::int32_t Net::load_model_mem(const void* data, std::size_t size) {
+    if (this->d->budget_total != 0 && size >= this->d->budget_total) {
+        detail::write_diagnostic("mnet: model weights exceed the memory budget\n");
+        return -1;
+    }
+    this->d->weight_bytes = size;
+    this->d->apply_budget();
     if (data == nullptr || size == 0) {
         return -1;
     }
@@ -503,6 +579,27 @@ std::int32_t Net::load_model(const char* bin_path) {
     if (file == nullptr) {
         return -1;
     }
+
+    // Weights are allocated by ModelBin outside the budgeted allocators, so
+    // check the file size up front: a model that cannot fit must fail here,
+    // not after the kernel has already started swapping/killing.
+    if (std::fseek(file, 0, SEEK_END) == 0) {
+        const long size = std::ftell(file);
+        std::rewind(file);
+        if (size > 0) {
+            const auto weights = static_cast<std::size_t>(size);
+            if (this->d->budget_total != 0 && weights >= this->d->budget_total) {
+                detail::write_diagnostic("mnet: model weights (" + std::to_string(weights / (1024U * 1024U)) +
+                                         " MiB) exceed the memory budget (" +
+                                         std::to_string(this->d->budget_total / (1024U * 1024U)) + " MiB)\n");
+                std::fclose(file);
+                return -1;
+            }
+            this->d->weight_bytes = weights;
+            this->d->apply_budget();
+        }
+    }
+
     std::int32_t ret = 0;
     {
         mformat::DataReaderFromStdio reader(file);
@@ -557,10 +654,15 @@ std::int32_t Net::Extractor::extract(std::int32_t blob_index, Mat& out) {
                                                     this->blob_mats_, this->opt_);
     const std::int32_t ret = extractor.ensure(blob_index);
     if (ret != 0) {
+        this->net_->d->report_budget();
         return ret;
     }
     out = this->blob_mats_[static_cast<std::size_t>(blob_index)];
-    return out.empty() ? -100 : 0;
+    if (out.empty()) {
+        this->net_->d->report_budget();
+        return -100;
+    }
+    return 0;
 }
 
 }  // namespace mnet

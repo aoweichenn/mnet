@@ -63,6 +63,7 @@ static std::int64_t read_vmhwm_kb() {
 
 int main(int argc, char** argv) {
     bool allow_empty = false;
+    long long max_mem_mb = 0;
     std::string dump_out;
     std::string extract_name;
     // --input NAME FILE WxHxC, repeatable: feed real data instead of the sine fill.
@@ -76,6 +77,8 @@ int main(int argc, char** argv) {
     for (std::int32_t i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--allow-empty") == 0) {
             allow_empty = true;
+        } else if (std::strcmp(argv[i], "--max-mem-mb") == 0 && i + 1 < argc) {
+            max_mem_mb = std::atoll(argv[++i]);
         } else if (std::strcmp(argv[i], "--dump-out") == 0 && i + 1 < argc) {
             dump_out = argv[++i];
         } else if (std::strcmp(argv[i], "--extract") == 0 && i + 1 < argc) {
@@ -140,6 +143,9 @@ int main(int argc, char** argv) {
 
     mnet::Net net;
     net.opt().num_threads = threads;
+    if (max_mem_mb > 0) {
+        net.set_memory_budget_bytes(static_cast<std::size_t>(max_mem_mb) * 1024U * 1024U);
+    }
     if (net.load(arg_base[0], arg_base[1]) != 0) {
         std::fprintf(stderr, "load failed\n");
         return 1;
@@ -235,10 +241,13 @@ int main(int argc, char** argv) {
     }
 
     std::printf("model=%s threads=%" PRId32 " iters=%" PRId32
-                " avg_ms=%.3f cpu_ms=%.3f peak_rss_mb=%.1f cpus=%" PRId32 " big=%" PRId32
-                " inputs=%zu outputs=%zu\n",
+                " avg_ms=%.3f cpu_ms=%.3f peak_rss_mb=%.1f mem_peak_mb=%.1f mem_budget_mb=%zu budget_hit=%d"
+                " cpus=%" PRId32 " big=%" PRId32 " inputs=%zu outputs=%zu\n",
                 arg_base[0], threads, iters, avg_ms, cpu_ms,
-                static_cast<double>(read_vmhwm_kb()) / 1024.0, mplatform::get_cpu_count(),
+                static_cast<double>(read_vmhwm_kb()) / 1024.0,
+                static_cast<double>(net.memory_peak_bytes()) / (1024.0 * 1024.0),
+                net.memory_budget_bytes() / (1024U * 1024U), net.memory_budget_exhausted() ? 1 : 0,
+                mplatform::get_cpu_count(),
                 mplatform::get_big_cpu_count(), inputs.size(), outputs.size());
     return 0;
 }
