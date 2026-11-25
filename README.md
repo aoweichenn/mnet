@@ -40,7 +40,9 @@ CPU 路径已在四个平台构建并跑通（数值 smoke：`Scale` 2x+1、1x1 
 | Linux x86_64（含 WSL2） | GCC/Clang + 系统 OpenMP | 系统 libgomp/libomp | `ctest` 6/6；AVX2 |
 | macOS arm64 | CommandLineTools clang + CLT SDK | `mplatform::simpleomp` | 构建 + smoke + probe |
 | Windows x86_64 | llvm-mingw clang（交叉编译，`-static`） | `mplatform::simpleomp` | 构建 + smoke + probe（Windows 原生运行） |
-| Android arm64 | NDK r27c clang（API 26，`c++_static`） | `mplatform::simpleomp` | 构建 + smoke + probe（真机运行） |
+| Android arm64 | NDK r27c clang（API 26，`c++_static`，`-Dmnet_enable_dotprod=ON`） | `mplatform::simpleomp` | 构建 + smoke + probe + Qwen3 0.6B LLM（54.6 ms/tok） |
+| macOS M4 Pro | CLT clang（`-Dmnet_enable_dotprod=ON`） | `mplatform::simpleomp` | 构建 + smoke + Qwen3 0.6B LLM（23.5 ms/tok） |
+| Windows x86_64 | llvm-mingw clang 交叉编译 | `mplatform::simpleomp` | 构建 + smoke + Qwen3 0.6B LLM（29.9 ms/tok @12T） |
 
 无系统 OpenMP 的平台使用：
 
