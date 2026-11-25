@@ -7,6 +7,7 @@
 #include <mnet/net.hpp>
 #include <mnet/tokenizer.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cinttypes>
 #include <cmath>
@@ -167,6 +168,21 @@ std::int32_t argmax(const mnet::Net& proj_net, const mnet::Mat& hidden_row) {
 
 }  // namespace
 
+#if !defined(_WIN32)
+static std::int64_t read_status_kb(const char* key) {
+    std::ifstream status("/proc/self/status");
+    std::string name;
+    std::int64_t value = 0;
+    while (status >> name) {
+        if (name == key) {
+            status >> value;
+            return value;
+        }
+    }
+    return 0;
+}
+#endif
+
 int main(int argc, char** argv) {
     std::string model_dir;
     std::string prompt = "Hello";
@@ -174,6 +190,9 @@ int main(int argc, char** argv) {
     std::int32_t max_new_tokens = 8;
     bool load_only = false;
     bool fast_int4 = false;
+    bool int8_kv = false;
+    std::int32_t kv_capacity = 0;
+    std::int32_t prefill_chunk = 512;
     for (std::int32_t i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             model_dir = argv[++i];
@@ -187,6 +206,12 @@ int main(int argc, char** argv) {
             load_only = true;
         } else if (std::strcmp(argv[i], "--fast-int4") == 0) {
             fast_int4 = true;
+        } else if (std::strcmp(argv[i], "--int8-kv") == 0) {
+            int8_kv = true;
+        } else if (std::strcmp(argv[i], "--kv-capacity") == 0 && i + 1 < argc) {
+            kv_capacity = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--prefill-chunk") == 0 && i + 1 < argc) {
+            prefill_chunk = std::atoi(argv[++i]);
         } else {
             std::fprintf(stderr, "unknown argument %s\n", argv[i]);
             return 2;
@@ -195,7 +220,7 @@ int main(int argc, char** argv) {
     if (model_dir.empty()) {
         std::fprintf(stderr,
                      "usage: mnet_llm --model DIR [--prompt TEXT] [--threads N] [--max-new-tokens N] "
-                     "[--fast-int4]\n");
+                     "[--fast-int4] [--int8-kv] [--kv-capacity N] [--prefill-chunk N]\n");
         return 2;
     }
 
@@ -219,6 +244,8 @@ int main(int argc, char** argv) {
     mnet::Net decoder_net;
     decoder_net.opt().num_threads = threads;
     decoder_net.opt().use_fast_int4_gemm = fast_int4;
+    decoder_net.opt().use_int8_kv_cache = int8_kv;
+    decoder_net.opt().kvcache_max_seqlen_hint = kv_capacity;
     if (decoder_net.load((model_dir + "/" + cfg.decoder_param).c_str(),
                          (model_dir + "/" + cfg.decoder_bin).c_str()) != 0) {
         std::fprintf(stderr, "decoder load failed\n");
@@ -288,18 +315,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    mnet::Mat mask(prompt_len, prompt_len);
-    for (std::int32_t i = 0; i < prompt_len; ++i) {
-        float* row = mask.row(i);
-        for (std::int32_t j = 0; j < prompt_len; ++j) {
-            row[j] = j <= i ? 0.0F : -1e38F;
-        }
-    }
-
     const std::int32_t rope_half = cfg.rope_head_dim / 2;
-    mnet::Mat cos_cache;
-    mnet::Mat sin_cache;
-    make_rope(prompt_len, 0, rope_half, cfg.rope_theta, cos_cache, sin_cache);
+    if (prefill_chunk < 1) {
+        prefill_chunk = prompt_len;
+    }
 
     std::fprintf(stderr, "rss_after_load_kb=%" PRId64 "\n", read_vmhwm_kb());
     if (load_only) {
@@ -307,12 +326,37 @@ int main(int argc, char** argv) {
     }
 
     const auto t0 = std::chrono::steady_clock::now();
-    mnet::Mat hidden = run_decoder(embedding, mask, cos_cache, sin_cache);
-    if (hidden.empty()) {
-        std::fprintf(stderr, "prefill failed\n");
-        return 1;
+    // Chunked prefill: the attention mask is (dst x src) for one chunk only, so
+    // its size stays O(chunk * seqlen) instead of O(seqlen^2). Every chunk
+    // appends to the KV cache, exactly like a decode step.
+    mnet::Mat hidden;
+    std::int32_t last_chunk_len = 0;
+    for (std::int32_t done = 0; done < prompt_len;) {
+        const std::int32_t n = std::min(prefill_chunk, prompt_len - done);
+        const std::int32_t dst = done + n;
+
+        mnet::Mat mask(dst, n);
+        for (std::int32_t i = 0; i < n; ++i) {
+            float* row = mask.row(i);
+            const std::int32_t visible = done + i + 1;
+            for (std::int32_t j = 0; j < dst; ++j) {
+                row[j] = j < visible ? 0.0F : -1e38F;
+            }
+        }
+
+        mnet::Mat cos_cache;
+        mnet::Mat sin_cache;
+        make_rope(n, done, rope_half, cfg.rope_theta, cos_cache, sin_cache);
+
+        hidden = run_decoder(embedding.row_range(done, n), mask, cos_cache, sin_cache);
+        if (hidden.empty()) {
+            std::fprintf(stderr, "prefill failed at %d/%d\n", done, prompt_len);
+            return 1;
+        }
+        last_chunk_len = n;
+        done += n;
     }
-    std::int32_t token = argmax(proj_net, hidden.row_range(prompt_len - 1, 1));
+    std::int32_t token = argmax(proj_net, hidden.row_range(last_chunk_len - 1, 1));
     const auto t1 = std::chrono::steady_clock::now();
     if (token < 0) {
         std::fprintf(stderr, "proj argmax failed\n");
@@ -353,9 +397,17 @@ int main(int argc, char** argv) {
     const double prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     const double decode_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
     const std::size_t decode_steps = generated.size() - 1;
-    std::printf("model=%s threads=%d tokens=%zu prefill=%.1fms decode=%.2fms/tok text=%s\n", model_dir.c_str(),
-                threads, generated.size(), prefill_ms,
-                decode_steps > 0 ? decode_ms / static_cast<double>(decode_steps) : 0.0,
+#if !defined(_WIN32)
+    const double peak_rss_mb = static_cast<double>(read_status_kb("VmHWM:")) / 1024.0;
+    const double peak_vm_mb = static_cast<double>(read_status_kb("VmPeak:")) / 1024.0;
+#else
+    const double peak_rss_mb = 0.0;
+    const double peak_vm_mb = 0.0;
+#endif
+    std::printf("model=%s threads=%d prompt_tokens=%d tokens=%zu prefill=%.1fms decode=%.2fms/tok peak_rss_mb=%.1f "
+                "peak_vm_mb=%.1f text=%s\n",
+                model_dir.c_str(), threads, prompt_len, generated.size(), prefill_ms,
+                decode_steps > 0 ? decode_ms / static_cast<double>(decode_steps) : 0.0, peak_rss_mb, peak_vm_mb,
                 tokenizer.decode(generated).c_str());
     return 0;
 }

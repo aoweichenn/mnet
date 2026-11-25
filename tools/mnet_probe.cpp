@@ -3,6 +3,8 @@
 
 #include <mnet/net.hpp>
 
+#include <mplatform/cpu.hpp>
+
 #include <chrono>
 #include <cmath>
 #include <cinttypes>
@@ -12,6 +14,38 @@
 #include <fstream>
 #include <string>
 #include <vector>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
+static std::int64_t process_cpu_us() {
+    FILETIME created;
+    FILETIME exited;
+    FILETIME kernel;
+    FILETIME user;
+    if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user) == 0) {
+        return 0;
+    }
+    ULARGE_INTEGER k;
+    ULARGE_INTEGER u;
+    k.LowPart = kernel.dwLowDateTime;
+    k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime;
+    u.HighPart = user.dwHighDateTime;
+    return static_cast<std::int64_t>((k.QuadPart + u.QuadPart) / 10);
+}
+#else
+#include <sys/resource.h>
+
+static std::int64_t process_cpu_us() {
+    rusage usage{};
+    getrusage(RUSAGE_SELF, &usage);
+    return static_cast<std::int64_t>(usage.ru_utime.tv_sec) * 1000000 + usage.ru_utime.tv_usec +
+           static_cast<std::int64_t>(usage.ru_stime.tv_sec) * 1000000 + usage.ru_stime.tv_usec;
+}
+#endif
 
 static std::int64_t read_vmhwm_kb() {
     std::ifstream status("/proc/self/status");
@@ -72,6 +106,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    const std::int64_t cpu_us_start = process_cpu_us();
+
     const auto start = std::chrono::steady_clock::now();
     for (std::int32_t i = 0; i < iters; ++i) {
         mnet::Net::Extractor ex = net.create_extractor();
@@ -106,8 +142,12 @@ int main(int argc, char** argv) {
     }
     const auto end = std::chrono::steady_clock::now();
     const double avg_ms = std::chrono::duration<double, std::milli>(end - start).count() / iters;
-    std::printf("model=%s threads=%" PRId32 " iters=%" PRId32 " avg_ms=%.3f peak_rss_mb=%.1f inputs=%zu outputs=%zu\n",
-                argv[arg_base + 0], threads, iters, avg_ms, static_cast<double>(read_vmhwm_kb()) / 1024.0,
-                inputs.size(), outputs.size());
+    const double cpu_ms = static_cast<double>(process_cpu_us() - cpu_us_start) / 1000.0 / iters;
+    std::printf("model=%s threads=%" PRId32 " iters=%" PRId32
+                " avg_ms=%.3f cpu_ms=%.3f peak_rss_mb=%.1f cpus=%" PRId32 " big=%" PRId32
+                " inputs=%zu outputs=%zu\n",
+                argv[arg_base + 0], threads, iters, avg_ms, cpu_ms,
+                static_cast<double>(read_vmhwm_kb()) / 1024.0, mplatform::get_cpu_count(),
+                mplatform::get_big_cpu_count(), inputs.size(), outputs.size());
     return 0;
 }

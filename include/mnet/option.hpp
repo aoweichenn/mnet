@@ -32,6 +32,9 @@ struct Option {
 
     mmemory::Allocator* kvcache_allocator = nullptr;
     std::int32_t kvcache_max_seqlen_hint = 0;
+    // Store the SDPA KV cache as int8 (values + per-token descales) instead of
+    // fp32. Halves/quarters long-context memory at a small accuracy cost.
+    bool use_int8_kv_cache = false;
 };
 
 }  // namespace mnet

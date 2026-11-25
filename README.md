@@ -40,9 +40,9 @@ CPU 路径已在四个平台构建并跑通（数值 smoke：`Scale` 2x+1、1x1 
 | Linux x86_64（含 WSL2） | GCC/Clang + 系统 OpenMP | 系统 libgomp/libomp | `ctest` 6/6；AVX2 |
 | macOS arm64 | CommandLineTools clang + CLT SDK | `mplatform::simpleomp` | 构建 + smoke + probe |
 | Windows x86_64 | llvm-mingw clang（交叉编译，`-static`） | `mplatform::simpleomp` | 构建 + smoke + probe（Windows 原生运行） |
-| Android arm64 | NDK r27c clang（API 26，`c++_static`，`-Dmnet_enable_dotprod=ON`） | `mplatform::simpleomp` | 构建 + smoke + probe + Qwen3 0.6B LLM（54.6 ms/tok） |
+| Android arm64 | NDK r27c clang（API 26，`c++_static`，`-Dmnet_enable_dotprod=ON`） | `mplatform::simpleomp` | 构建 + smoke + probe + Qwen3 0.6B LLM（24.4 ms/tok @5T） |
 | macOS M4 Pro | CLT clang（`-Dmnet_enable_dotprod=ON`） | `mplatform::simpleomp` | 构建 + smoke + Qwen3 0.6B LLM（23.5 ms/tok） |
-| Windows x86_64 | llvm-mingw clang 交叉编译 | `mplatform::simpleomp` | 构建 + smoke + Qwen3 0.6B LLM（29.9 ms/tok @12T） |
+| Windows x86_64 | llvm-mingw clang 交叉编译 | `mplatform::simpleomp` | 构建 + smoke + Qwen3 0.6B LLM（33.8 ms/tok @8T） |
 
 无系统 OpenMP 的平台使用：
 
@@ -116,6 +116,59 @@ Android 使用 `-DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26
   ncnn 的 `ncnnllm2int` 把 `model.json` 里的 `proj_out` 权重压成 8-bit
   （block 64），其余文件以相对软链复用，并改写 `model.json` 指向新权重；
   对绑定词表的模型会保留共享的 embedding 权重文件。
+
+### 长上下文：int8 KV cache、容量预分配与分块 prefill
+
+`mnet_llm` 新增三个开关：
+
+| 开关 | 作用 |
+| --- | --- |
+| `--int8-kv` | KV cache 以 int8 存储（每 token 每 head 一个 descale），注意力即时反量化 |
+| `--kv-capacity N` | 首次前向就按 N token 预分配 KV，避免长上下文反复扩容 |
+| `--prefill-chunk N` | prefill 分块，attention mask 只占 `O(chunk × seqlen)` 而不是 `O(seqlen²)` |
+
+Qwen3 0.6B（28 层 / 8 KV heads / head_dim 128，int8 KV = 59 KB/token）：
+
+| `--kv-capacity` | 峰值虚拟内存 | 说明 |
+| --- | --- | --- |
+| 0（按需） | 1.41 GB | 短 prompt |
+| 32768 | 3.19 GB | +1.78 GB |
+| 131072 | 8.73 GB | +7.32 GB |
+
+线性外推 256k：int8 KV ≈ **14.5 GiB**，fp32 KV ≈ **56 GiB**（后者在 32/48 GB
+上都放不下）。`SDPA` 的 int8 路径有单元测试
+（`Kernel.SdpaInt8KvCacheMatchesFp32`）与 fp32 结果比对，误差 < 0.05。
+
+注意 `Mat::create` 走 mmap，容量只是保留地址空间，页在真正写入该 token 时才
+驻留；所以长上下文的 RSS 会随 token 数增长，而不是一次性跳到 14.5 GiB。
+
+### ARM 并行调度：大核亲和 + 精确唤醒
+
+移动端 OCR 图原先出现“线程越多越慢”（1T 120 ms、2T 527 ms、4T 216 ms）。
+`MPLATFORM_OMP_STATS` 统计显示一次 320x48 前向有 243 个 fork/join 区域，
+2 线程时这些区域的总耗时反而比串行还长 3 倍：worker 被唤醒后落到小核
+（2.0 GHz）上，master 每个区域都要等它。
+
+修复（`mplatform`）：
+
+- 任务队列按任务数逐个 `signal()`，不再 `broadcast()` 唤醒整个线程池；
+- worker 进入任务前把自己固定到大核集合
+  （`pin_current_thread_to_big_cores()`，与 cgroup 允许集合取交集），
+  `MPLATFORM_OMP_AFFINITY=all|fits|big` 可覆盖策略。
+
+`PP_OCRv5_mobile_rec`（320x48x3，随机输入，Xiaomi 13 Ultra，5 个大核）：
+
+| 线程 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 1 | 120 ms | 120 ms |
+| 2 | 527 ms | 95 ms |
+| 3 | 308 ms | 69 ms |
+| 4 | 216 ms | 55 ms |
+| 5 | — | **46 ms** |
+| 8 | — | 53 ms |
+
+同一修复让 Qwen3 0.6B 在 Android 上从 54.6 ms/tok（8T）降到
+**24.4 ms/tok（5T）**：4–5 个线程跑满大核比 8 个线程混入小核更快。
 
 所有已发布 `.bin` 的 param 现在都能找到对应 layer 实现；`rfcn_end2end` 与
 `yolov4-opt` 的权重在上游以分卷 `.partNN` 发布，拼接后可端到端运行。

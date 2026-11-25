@@ -562,6 +562,89 @@ TEST(Kernel, RotaryEmbedAndSdpaSingleStep) {
     }
 }
 
+// The int8 KV cache must produce the same attention output as the fp32 cache
+// within quantization noise, while keeping the cache at one byte per value.
+TEST(Kernel, SdpaInt8KvCacheMatchesFp32) {
+    using AP = mlayer::SDPA<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict spd;
+    spd.set(5, 0);
+    spd.set(7, 1);
+    AP sdpa;
+    ASSERT_EQ(sdpa.load_param(spd), 0);
+
+    const std::int32_t heads = 2;
+    const std::int32_t group = 2;
+    const std::int32_t dim = 32;
+    const std::int32_t steps[5] = {3, 1, 1, 1, 1};
+
+    auto run = [&](bool int8_kv, std::vector<float>& flat, mnet::Mat& last_key) {
+        mnet::Option opt;
+        opt.num_threads = 2;
+        opt.use_int8_kv_cache = int8_kv;
+
+        std::uint32_t seed = 20260101u;
+        auto rnd = [&seed]() {
+            seed = seed * 1664525u + 1013904223u;
+            return (static_cast<float>(seed >> 8) / 16777216.0F) * 2.0F - 1.0F;
+        };
+
+        mnet::Mat past_k;
+        mnet::Mat past_v;
+        for (std::int32_t step = 0; step < 5; ++step) {
+            const std::int32_t n = steps[step];
+            mnet::Mat q(dim, n, heads);
+            mnet::Mat k(dim, n, group);
+            mnet::Mat v(dim, n, group);
+            for (std::int32_t c = 0; c < heads; ++c) {
+                for (std::int32_t h = 0; h < n; ++h) {
+                    for (std::int32_t w = 0; w < dim; ++w) {
+                        q.channel(c).row(h)[w] = rnd();
+                    }
+                }
+            }
+            for (std::int32_t c = 0; c < group; ++c) {
+                for (std::int32_t h = 0; h < n; ++h) {
+                    for (std::int32_t w = 0; w < dim; ++w) {
+                        k.channel(c).row(h)[w] = rnd();
+                        v.channel(c).row(h)[w] = rnd();
+                    }
+                }
+            }
+
+            std::vector<mnet::Mat> bottom = {q, k, v, past_k, past_v};
+            std::vector<mnet::Mat> top(3);
+            ASSERT_EQ(sdpa.forward(bottom, top, opt), 0);
+            for (std::int32_t c = 0; c < heads; ++c) {
+                for (std::int32_t h = 0; h < n; ++h) {
+                    for (std::int32_t w = 0; w < dim; ++w) {
+                        flat.push_back(top[0].channel(c).row(h)[w]);
+                    }
+                }
+            }
+            past_k = top[1];
+            past_v = top[2];
+        }
+        last_key = past_k;
+    };
+
+    std::vector<float> ref;
+    std::vector<float> quantized;
+    mnet::Mat fp32_key;
+    mnet::Mat int8_key;
+    run(false, ref, fp32_key);
+    run(true, quantized, int8_key);
+
+    ASSERT_EQ(ref.size(), quantized.size());
+    float max_diff = 0.0F;
+    for (std::size_t i = 0; i < ref.size(); ++i) {
+        max_diff = std::max(max_diff, std::fabs(ref[i] - quantized[i]));
+    }
+    EXPECT_LT(max_diff, 0.05F);
+
+    EXPECT_EQ(int8_key.elemsize, 1u);
+    EXPECT_GT(fp32_key.total() * 4, int8_key.total() * 3);
+}
+
 #include <cstdio>
 
 #include <chrono>
