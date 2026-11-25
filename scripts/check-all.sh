@@ -26,6 +26,11 @@ elif [ "${MNET_NCNN_PARITY:-0}" = "1" ]; then
     printf '\n== ncnn parity ==\nSKIP: mcnn/tools/parity/run.sh not found\n'
 fi
 
+# Optional end-to-end model comparison against the local ncnn-assets zoo.
+if [ "${MNET_NCNN_MODELS:-0}" = "1" ] && [ -x "$lib/../../mcnn/tools/parity/run_models.sh" ]; then
+    run "ncnn models" "$lib/../../mcnn/tools/parity/run_models.sh"
+fi
+
 printf '\n== 测试 ==\n'
 ctest --test-dir "${CPPLIB_BUILD_ROOT:-/tmp/mnet_build}/test" --output-on-failure || fail=1
 

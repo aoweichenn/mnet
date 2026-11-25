@@ -1413,3 +1413,34 @@ TEST(Kernel, ReductionLastAxisOn4dBlob) {
     ASSERT_EQ(out.h, 2);
     ASSERT_EQ(out.c, 4);
 }
+
+TEST(Kernel, ReductionLastAxisOn3dBlob) {
+    using RD = mlayer::Reduction<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict pd;
+    pd.set(0, static_cast<std::int32_t>(RD::ReductionOp_MAX));
+    pd.set(1, 0);
+    mnet::Mat axes(1);
+    static_cast<std::int32_t*>(static_cast<void*>(axes.data))[0] = -1;
+    pd.set(3, axes);
+    pd.set(4, 0);
+    pd.set(5, 1);
+    RD op;
+    ASSERT_EQ(op.load_param(pd), 0);
+
+    mnet::Mat in(5, 3, 2);
+    for (std::int32_t q = 0; q < 2; ++q) {
+        for (std::int32_t i = 0; i < 15; ++i) {
+            in.channel(q)[static_cast<std::size_t>(i)] = static_cast<float>(q * 100 + i);
+        }
+    }
+    mnet::Option opt;
+    mnet::Mat out;
+    ASSERT_EQ(op.forward(in, out, opt), 0);
+    ASSERT_EQ(out.dims, 2);
+    ASSERT_EQ(out.w, 3);
+    ASSERT_EQ(out.h, 2);
+    const float expect[6] = {4.0F, 9.0F, 14.0F, 104.0F, 109.0F, 114.0F};
+    for (std::int32_t i = 0; i < 6; ++i) {
+        EXPECT_FLOAT_EQ(out[static_cast<std::size_t>(i)], expect[i]);
+    }
+}
