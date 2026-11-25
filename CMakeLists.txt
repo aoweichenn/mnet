@@ -74,6 +74,8 @@ add_library(mnet_objs OBJECT
     src/mnet/log.cpp
     src/layer_registry.cpp
     src/net.cpp
+    src/tokenizer.cpp
+    src/tokenizer/bpe_tokenizer.cpp
 )
 
 target_include_directories(mnet_objs

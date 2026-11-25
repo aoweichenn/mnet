@@ -42,10 +42,11 @@ ex.extract("output", out);
   - `yolo11n`（640x640x3 → `out0`，覆盖 Reshape/Permute/Slice/BinaryOp/MatMul/Interp）
   - Qwen3 0.6B int8 单 token：embed → decoder → proj → argmax
   - Qwen3 0.6B int8 两 token decode：把 28 层 KV cache 回灌，验证 cache 复用
+  - 文本生成：BPE tokenizer + 23-token chat prompt → 3 个新 token → `Hello! How can`
 
 尚未完成：
 
 - 二进制 param（`load_param_bin`）与完整 layer type 表；
-- 更多层（BinaryOp/Reshape/Permute/Slice/RMSNorm/SDPA 等）；
+- 更广的层覆盖与二进制 param；
 - 安装包导出（当前 `add_subdirectory` 消费兄弟模块）；
 - 与 ncnn 参考输出的数值对比测试。
