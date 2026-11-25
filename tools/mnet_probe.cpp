@@ -27,24 +27,32 @@ static std::int64_t read_vmhwm_kb() {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 4) {
-        std::fprintf(stderr, "usage: mnet_probe model.param model.bin WxHxC [threads] [iters]\n");
+    bool allow_empty = false;
+    std::int32_t arg_base = 1;
+    if (argc > 1 && std::strcmp(argv[1], "--allow-empty") == 0) {
+        allow_empty = true;
+        arg_base = 2;
+    }
+    if (argc - arg_base < 3) {
+        std::fprintf(stderr,
+                     "usage: mnet_probe [--allow-empty] model.param model.bin WxHxC [threads] [iters]\n");
         return 2;
     }
-    const std::int32_t threads = argc > 4 ? std::atoi(argv[4]) : 4;
-    const std::int32_t iters = argc > 5 ? std::atoi(argv[5]) : 5;
+    const std::int32_t threads = argc - arg_base > 3 ? std::atoi(argv[arg_base + 3]) : 4;
+    const std::int32_t iters = argc - arg_base > 4 ? std::atoi(argv[arg_base + 4]) : 5;
 
     std::int32_t w = 0;
     std::int32_t h = 0;
     std::int32_t c = 0;
-    if (std::sscanf(argv[3], "%" SCNd32 "x%" SCNd32 "x%" SCNd32, &w, &h, &c) != 3 || w <= 0 || h <= 0 || c <= 0) {
-        std::fprintf(stderr, "invalid shape %s\n", argv[3]);
+    if (std::sscanf(argv[arg_base + 2], "%" SCNd32 "x%" SCNd32 "x%" SCNd32, &w, &h, &c) != 3 || w <= 0 || h <= 0 ||
+        c <= 0) {
+        std::fprintf(stderr, "invalid shape %s\n", argv[arg_base + 2]);
         return 2;
     }
 
     mnet::Net net;
     net.opt().num_threads = threads;
-    if (net.load(argv[1], argv[2]) != 0) {
+    if (net.load(argv[arg_base + 0], argv[arg_base + 1]) != 0) {
         std::fprintf(stderr, "load failed\n");
         return 1;
     }
@@ -68,6 +76,17 @@ int main(int argc, char** argv) {
     for (std::int32_t i = 0; i < iters; ++i) {
         mnet::Net::Extractor ex = net.create_extractor();
         for (const std::string& name : inputs) {
+            if (name == "im_info") {
+                mnet::Mat im_info(3);
+                im_info[0] = static_cast<float>(h);
+                im_info[1] = static_cast<float>(w);
+                im_info[2] = 1.0F;
+                if (ex.input(name.c_str(), im_info) != 0) {
+                    std::fprintf(stderr, "input %s failed\n", name.c_str());
+                    return 1;
+                }
+                continue;
+            }
             if (ex.input(name.c_str(), input) != 0) {
                 std::fprintf(stderr, "input %s failed\n", name.c_str());
                 return 1;
@@ -75,7 +94,11 @@ int main(int argc, char** argv) {
         }
         for (const std::string& name : outputs) {
             mnet::Mat out;
-            if (ex.extract(name.c_str(), out) != 0) {
+            const std::int32_t ret = ex.extract(name.c_str(), out);
+            if (ret == -100 && allow_empty) {
+                continue;
+            }
+            if (ret != 0) {
                 std::fprintf(stderr, "extract %s failed\n", name.c_str());
                 return 1;
             }
@@ -84,7 +107,7 @@ int main(int argc, char** argv) {
     const auto end = std::chrono::steady_clock::now();
     const double avg_ms = std::chrono::duration<double, std::milli>(end - start).count() / iters;
     std::printf("model=%s threads=%" PRId32 " iters=%" PRId32 " avg_ms=%.3f peak_rss_mb=%.1f inputs=%zu outputs=%zu\n",
-                argv[1], threads, iters, avg_ms, static_cast<double>(read_vmhwm_kb()) / 1024.0, inputs.size(),
-                outputs.size());
+                argv[arg_base + 0], threads, iters, avg_ms, static_cast<double>(read_vmhwm_kb()) / 1024.0,
+                inputs.size(), outputs.size());
     return 0;
 }

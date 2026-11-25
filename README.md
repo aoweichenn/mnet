@@ -57,11 +57,13 @@ ex.extract("output", out);
   - `shufflenet_v2_x0.5`（224x224x3 → 1000 维输出，覆盖 ConvDW/BN/Slice/ShuffleChannel）
   - `yolo11n`（640x640x3 → `out0`，覆盖 Reshape/Permute/Slice/BinaryOp/MatMul/Interp；
     Release+AVX2 约 52 ms，峰值 RSS 100 MB；3x3 stride1 走 Winograd F(2x2,3x3)）
-  - 另外通过 `mnet_probe` 验证 29 个真实模型（AVX2 Release，含峰值 RSS），覆盖
+  - 另外通过 `mnet_probe` 验证 35 个真实模型（AVX2 Release，含峰值 RSS），覆盖
     pose、scrfd、yolo11n_seg/pose/obb、yolov8n/seg/pose/obb/cls、yolov5s/5s.ncnn/
     5s_6.0、yolov6n、yolov7-tiny、nanodet_m、yolact、yolov8s_worldv2、pelee、
     mnet.25、mobilenet_ssd_voc/ssdlite、PP_OCRv5_mobile_det、yolov4-tiny、
-    mobilenet_yolo、mobilenetv2_yolov3、PP_OCRv5_mobile_rec 等。
+    mobilenet_yolo、mobilenetv2_yolov3、PP_OCRv5_mobile_rec、rfcn_end2end、
+    yolov4-opt 等。ncnn-assets 中所有带 `.bin` 的模型均已跑通
+    （`ZF_faster_rcnn_final` 上游只有 param）。
   - Qwen3 0.6B int8 单 token：embed → decoder → proj → argmax
   - Qwen3 0.6B int8 两 token decode：把 28 层 KV cache 回灌，验证 cache 复用
   - 文本生成：BPE tokenizer + 23-token chat prompt → 3 个新 token → `Hello! How can`
@@ -79,7 +81,8 @@ ex.extract("output", out);
   103.6 ms/tok / 6.25 GB），mnet 的 decode 更快、峰值内存更低。
 
 所有已发布 `.bin` 的 param 现在都能找到对应 layer 实现；`rfcn_end2end` 与
-`yolov4-opt` 上游只发布 param、没有权重，无法端到端验证。
+`yolov4-opt` 的权重在上游以分卷 `.partNN` 发布，拼接后可端到端运行。
+`mnet_probe --allow-empty` 用于随机输入下检测头输出为空的模型。
 
 数值一致性：`mcnn/tools/parity` 用同一份 param/bin 同时跑上游 ncnn 与 mnet，
 已覆盖 12 类算子：3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、Gemm
