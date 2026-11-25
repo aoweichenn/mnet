@@ -62,31 +62,40 @@ static std::int64_t read_vmhwm_kb() {
 
 int main(int argc, char** argv) {
     bool allow_empty = false;
-    std::int32_t arg_base = 1;
-    if (argc > 1 && std::strcmp(argv[1], "--allow-empty") == 0) {
-        allow_empty = true;
-        arg_base = 2;
+    std::string dump_out;
+    std::vector<const char*> positional;
+    for (std::int32_t i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--allow-empty") == 0) {
+            allow_empty = true;
+        } else if (std::strcmp(argv[i], "--dump-out") == 0 && i + 1 < argc) {
+            dump_out = argv[++i];
+        } else {
+            positional.push_back(argv[i]);
+        }
     }
-    if (argc - arg_base < 3) {
+    if (positional.size() < 3) {
         std::fprintf(stderr,
-                     "usage: mnet_probe [--allow-empty] model.param model.bin WxHxC [threads] [iters]\n");
+                     "usage: mnet_probe [--allow-empty] [--dump-out FILE] model.param model.bin WxHxC "
+                     "[threads] [iters]\n");
         return 2;
     }
-    const std::int32_t threads = argc - arg_base > 3 ? std::atoi(argv[arg_base + 3]) : 4;
-    const std::int32_t iters = argc - arg_base > 4 ? std::atoi(argv[arg_base + 4]) : 5;
+    const char* const* arg_base = positional.data();
+    const std::int32_t arg_count = static_cast<std::int32_t>(positional.size());
+    const std::int32_t threads = arg_count > 3 ? std::atoi(arg_base[3]) : 4;
+    const std::int32_t iters = arg_count > 4 ? std::atoi(arg_base[4]) : 5;
 
     std::int32_t w = 0;
     std::int32_t h = 0;
     std::int32_t c = 0;
-    if (std::sscanf(argv[arg_base + 2], "%" SCNd32 "x%" SCNd32 "x%" SCNd32, &w, &h, &c) != 3 || w <= 0 || h <= 0 ||
+    if (std::sscanf(arg_base[2], "%" SCNd32 "x%" SCNd32 "x%" SCNd32, &w, &h, &c) != 3 || w <= 0 || h <= 0 ||
         c <= 0) {
-        std::fprintf(stderr, "invalid shape %s\n", argv[arg_base + 2]);
+        std::fprintf(stderr, "invalid shape %s\n", arg_base[2]);
         return 2;
     }
 
     mnet::Net net;
     net.opt().num_threads = threads;
-    if (net.load(argv[arg_base + 0], argv[arg_base + 1]) != 0) {
+    if (net.load(arg_base[0], arg_base[1]) != 0) {
         std::fprintf(stderr, "load failed\n");
         return 1;
     }
@@ -105,6 +114,9 @@ int main(int argc, char** argv) {
             p[static_cast<std::size_t>(i)] = std::sin(0.01F * static_cast<float>(i + q * 17));
         }
     }
+
+    mnet::Mat last_out;
+    std::string last_out_name;
 
     const std::int64_t cpu_us_start = process_cpu_us();
 
@@ -138,15 +150,28 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "extract %s failed\n", name.c_str());
                 return 1;
             }
+            if (!dump_out.empty()) {
+                last_out = out;
+                last_out_name = name;
+            }
         }
     }
     const auto end = std::chrono::steady_clock::now();
     const double avg_ms = std::chrono::duration<double, std::milli>(end - start).count() / iters;
     const double cpu_ms = static_cast<double>(process_cpu_us() - cpu_us_start) / 1000.0 / iters;
+    if (!dump_out.empty() && !last_out.empty()) {
+        std::ofstream dump(dump_out, std::ios::binary);
+        const std::size_t count = static_cast<std::size_t>(last_out.w) * static_cast<std::size_t>(last_out.h) *
+                                  static_cast<std::size_t>(last_out.c);
+        dump.write(reinterpret_cast<const char*>(last_out.data), static_cast<std::streamsize>(count * sizeof(float)));
+        std::printf("dump=%s blob=%s w=%" PRId32 " h=%" PRId32 " c=%" PRId32 " floats=%zu\n", dump_out.c_str(),
+                    last_out_name.c_str(), last_out.w, last_out.h, last_out.c, count);
+    }
+
     std::printf("model=%s threads=%" PRId32 " iters=%" PRId32
                 " avg_ms=%.3f cpu_ms=%.3f peak_rss_mb=%.1f cpus=%" PRId32 " big=%" PRId32
                 " inputs=%zu outputs=%zu\n",
-                argv[arg_base + 0], threads, iters, avg_ms, cpu_ms,
+                arg_base[0], threads, iters, avg_ms, cpu_ms,
                 static_cast<double>(read_vmhwm_kb()) / 1024.0, mplatform::get_cpu_count(),
                 mplatform::get_big_cpu_count(), inputs.size(), outputs.size());
     return 0;
