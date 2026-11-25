@@ -95,13 +95,19 @@ int main(int argc, char** argv) {
                 return 2;
             }
             ovr.blob.create(ow, oh, oc);
-            f.read(reinterpret_cast<char*>(ovr.blob.data),
-                   static_cast<std::streamsize>(static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh) *
-                                                static_cast<std::size_t>(oc) * sizeof(float)));
-            if (f.gcount() != static_cast<std::streamsize>(static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh) *
-                                                           static_cast<std::size_t>(oc) * sizeof(float))) {
-                std::fprintf(stderr, "%s: short read\n", ovr.path.c_str());
-                return 2;
+            // Rows are copied one at a time: ncnn aligns each channel to 16
+            // bytes, so a flat copy of w*h*c floats lands at the wrong offsets
+            // whenever w*h is not a multiple of 4.
+            for (std::int32_t q = 0; q < oc; ++q) {
+                mnet::Mat plane = ovr.blob.channel(q);
+                for (std::int32_t y = 0; y < oh; ++y) {
+                    f.read(reinterpret_cast<char*>(plane.row(y)),
+                           static_cast<std::streamsize>(static_cast<std::size_t>(ow) * sizeof(float)));
+                    if (f.gcount() != static_cast<std::streamsize>(static_cast<std::size_t>(ow) * sizeof(float))) {
+                        std::fprintf(stderr, "%s: short read\n", ovr.path.c_str());
+                        return 2;
+                    }
+                }
             }
             overrides.push_back(ovr);
             i += 3;
