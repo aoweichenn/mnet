@@ -467,6 +467,8 @@ TEST(Kernel, MatMul2DAndInterpNearest) {
 #include <mlayer/sdpa.hpp>
 #include <mlayer/shortconv.hpp>
 #include <mlayer/relposbias.hpp>
+#include <mlayer/gather.hpp>
+#include <mlayer/scatternd.hpp>
 #include <mlayer/situ.hpp>
 #include <mlayer/stft.hpp>
 
@@ -845,6 +847,66 @@ TEST(Kernel, StftMatchesReference) {
     EXPECT_NEAR(top[0].channel(0).row(1)[1], 0.0F, 1e-5F);
     EXPECT_NEAR(top[0].channel(1).row(1)[1], 1.0F, 1e-5F);
     EXPECT_NEAR(top[0].channel(0).row(1)[2], -1.0F, 1e-5F);
+}
+
+// Gather along axis 0 (1-D and 2-D) and axis 1 (2-D).
+TEST(Kernel, GatherIndices) {
+    using G = mlayer::Gather<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict pd;
+    pd.set(0, 0);
+    G gather;
+    ASSERT_EQ(gather.load_param(pd), 0);
+
+    mnet::Mat data(4);
+    data[0] = 10.0F;
+    data[1] = 20.0F;
+    data[2] = 30.0F;
+    data[3] = 40.0F;
+    mnet::Mat idx(3);
+    idx[0] = 2.0F;
+    idx[1] = 0.0F;
+    idx[2] = 3.0F;
+
+    mnet::Option opt;
+    std::vector<mnet::Mat> bottom = {data, idx};
+    std::vector<mnet::Mat> top(1);
+    ASSERT_EQ(gather.forward(bottom, top, opt), 0);
+    ASSERT_EQ(top[0].w, 3);
+    EXPECT_FLOAT_EQ(top[0][0], 30.0F);
+    EXPECT_FLOAT_EQ(top[0][1], 10.0F);
+    EXPECT_FLOAT_EQ(top[0][2], 40.0F);
+}
+
+// ScatterND for the iSTFT overlap-add: flat 1-D data, [n,1] indices, n updates.
+TEST(Kernel, ScatterNdOverlapAdd) {
+    using S = mlayer::ScatterND<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    S scatter;
+    ASSERT_EQ(scatter.load_param(mformat::ParamDict()), 0);
+
+    mnet::Mat data(6);
+    for (std::int32_t i = 0; i < 6; ++i) {
+        data[static_cast<std::size_t>(i)] = static_cast<float>(i);
+    }
+    mnet::Mat indices(2, 1);
+    indices[0] = 1.0F;
+    indices[1] = 4.0F;
+    mnet::Mat updates(2);
+    updates[0] = -1.0F;
+    updates[1] = -4.0F;
+
+    mnet::Option opt;
+    std::vector<mnet::Mat> bottom = {data, indices, updates};
+    std::vector<mnet::Mat> top(1);
+    ASSERT_EQ(scatter.forward(bottom, top, opt), 0);
+
+    EXPECT_FLOAT_EQ(top[0][0], 0.0F);
+    EXPECT_FLOAT_EQ(top[0][1], -1.0F);
+    EXPECT_FLOAT_EQ(top[0][2], 2.0F);
+    EXPECT_FLOAT_EQ(top[0][3], 3.0F);
+    EXPECT_FLOAT_EQ(top[0][4], -4.0F);
+    EXPECT_FLOAT_EQ(top[0][5], 5.0F);
+    // input must stay intact
+    EXPECT_FLOAT_EQ(data[1], 1.0F);
 }
 
 #include <cstdio>

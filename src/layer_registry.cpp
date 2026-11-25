@@ -47,6 +47,7 @@
 #include <mlayer/flip.hpp>
 #include <mlayer/gateddeltarule.hpp>
 #include <mlayer/gelu.hpp>
+#include <mlayer/gather.hpp>
 #include <mlayer/gemm.hpp>
 #include <mlayer/glu.hpp>
 #include <mlayer/gridsample.hpp>
@@ -92,6 +93,7 @@
 #include <mlayer/roipooling.hpp>
 #include <mlayer/rotaryembed.hpp>
 #include <mlayer/scale.hpp>
+#include <mlayer/scatternd.hpp>
 #include <mlayer/sdpa.hpp>
 #include <mlayer/selu.hpp>
 #include <mlayer/shortconv.hpp>
@@ -267,6 +269,8 @@ void register_builtins() {
     add("Situ", &make_layer<mlayer::Situ<Layer, MatT, OptionT, ParamDictT>>);
     add("RelPosBias", &make_layer<mlayer::RelPosBias<Layer, MatT, OptionT, ParamDictT>>);
     add("Stft", &make_layer<mlayer::Stft<Layer, MatT, OptionT, ParamDictT>>);
+    add("Gather", &make_layer<mlayer::Gather<Layer, MatT, OptionT, ParamDictT>>);
+    add("ScatterND", &make_layer<mlayer::ScatterND<Layer, MatT, OptionT, ParamDictT>>);
     add("Erf", &make_layer<mlayer::Erf<Layer, MatT, OptionT>>);
     add("Mish", &make_layer<mlayer::Mish<Layer, MatT, OptionT>>);
     add("SELU", &make_layer<mlayer::SELU<Layer, MatT, OptionT, ParamDictT>>);
