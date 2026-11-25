@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -63,12 +64,47 @@ static std::int64_t read_vmhwm_kb() {
 int main(int argc, char** argv) {
     bool allow_empty = false;
     std::string dump_out;
+    // --input NAME FILE WxHxC, repeatable: feed real data instead of the sine fill.
+    struct InputOverride {
+        std::string name;
+        std::string path;
+        mnet::Mat blob;
+    };
+    std::vector<InputOverride> overrides;
     std::vector<const char*> positional;
     for (std::int32_t i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--allow-empty") == 0) {
             allow_empty = true;
         } else if (std::strcmp(argv[i], "--dump-out") == 0 && i + 1 < argc) {
             dump_out = argv[++i];
+        } else if (std::strcmp(argv[i], "--input") == 0 && i + 3 < argc) {
+            InputOverride ovr;
+            ovr.name = argv[i + 1];
+            ovr.path = argv[i + 2];
+            std::int32_t ow = 0;
+            std::int32_t oh = 0;
+            std::int32_t oc = 0;
+            if (std::sscanf(argv[i + 3], "%" SCNd32 "x%" SCNd32 "x%" SCNd32, &ow, &oh, &oc) != 3 || ow <= 0 ||
+                oh <= 0 || oc <= 0) {
+                std::fprintf(stderr, "invalid --input shape %s\n", argv[i + 3]);
+                return 2;
+            }
+            std::ifstream f(ovr.path, std::ios::binary);
+            if (!f) {
+                std::fprintf(stderr, "cannot open %s\n", ovr.path.c_str());
+                return 2;
+            }
+            ovr.blob.create(ow, oh, oc);
+            f.read(reinterpret_cast<char*>(ovr.blob.data),
+                   static_cast<std::streamsize>(static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh) *
+                                                static_cast<std::size_t>(oc) * sizeof(float)));
+            if (f.gcount() != static_cast<std::streamsize>(static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh) *
+                                                           static_cast<std::size_t>(oc) * sizeof(float))) {
+                std::fprintf(stderr, "%s: short read\n", ovr.path.c_str());
+                return 2;
+            }
+            overrides.push_back(ovr);
+            i += 3;
         } else {
             positional.push_back(argv[i]);
         }
@@ -124,6 +160,15 @@ int main(int argc, char** argv) {
     for (std::int32_t i = 0; i < iters; ++i) {
         mnet::Net::Extractor ex = net.create_extractor();
         for (const std::string& name : inputs) {
+            const auto it = std::find_if(overrides.begin(), overrides.end(),
+                                         [&](const InputOverride& o) { return o.name == name; });
+            if (it != overrides.end()) {
+                if (ex.input(name.c_str(), it->blob) != 0) {
+                    std::fprintf(stderr, "input %s failed\n", name.c_str());
+                    return 1;
+                }
+                continue;
+            }
             if (name == "im_info") {
                 mnet::Mat im_info(3);
                 im_info[0] = static_cast<float>(h);
@@ -161,9 +206,17 @@ int main(int argc, char** argv) {
     const double cpu_ms = static_cast<double>(process_cpu_us() - cpu_us_start) / 1000.0 / iters;
     if (!dump_out.empty() && !last_out.empty()) {
         std::ofstream dump(dump_out, std::ios::binary);
+        // Rows are written one at a time: ncnn aligns each channel to 16 bytes,
+        // so a flat copy of `data` would include the padding.
         const std::size_t count = static_cast<std::size_t>(last_out.w) * static_cast<std::size_t>(last_out.h) *
                                   static_cast<std::size_t>(last_out.c);
-        dump.write(reinterpret_cast<const char*>(last_out.data), static_cast<std::streamsize>(count * sizeof(float)));
+        for (std::int32_t q = 0; q < last_out.c; ++q) {
+            const mnet::Mat plane = last_out.channel(q);
+            for (std::int32_t y = 0; y < last_out.h; ++y) {
+                dump.write(reinterpret_cast<const char*>(plane.row(y)),
+                           static_cast<std::streamsize>(static_cast<std::size_t>(last_out.w) * sizeof(float)));
+            }
+        }
         std::printf("dump=%s blob=%s w=%" PRId32 " h=%" PRId32 " c=%" PRId32 " floats=%zu\n", dump_out.c_str(),
                     last_out_name.c_str(), last_out.w, last_out.h, last_out.c, count);
     }
