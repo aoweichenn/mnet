@@ -31,6 +31,30 @@ ex.extract("output", out);
 - `-DCMAKE_BUILD_TYPE=Release`：Benchmark 必须用 Release；Debug 会慢 3–6 倍。
 - `-Dmnet_enable_avx2=ON`：为 mnet 对象和测试打开 AVX2/FMA 快路径。
 
+## 平台支持
+
+CPU 路径已在四个平台构建并跑通（数值 smoke：`Scale` 2x+1、1x1 卷积 probe）：
+
+| 平台 | 工具链 | OpenMP 后端 | 验证 |
+| --- | --- | --- | --- |
+| Linux x86_64（含 WSL2） | GCC/Clang + 系统 OpenMP | 系统 libgomp/libomp | `ctest` 6/6；AVX2 |
+| macOS arm64 | CommandLineTools clang + CLT SDK | `mplatform::simpleomp` | 构建 + smoke + probe |
+| Windows x86_64 | llvm-mingw clang（交叉编译，`-static`） | `mplatform::simpleomp` | 构建 + smoke + probe（Windows 原生运行） |
+| Android arm64 | NDK r27c clang（API 26，`c++_static`） | `mplatform::simpleomp` | 构建 + smoke + probe（真机运行） |
+
+无系统 OpenMP 的平台使用：
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -Dmnet_use_simple_omp=ON
+```
+
+该选项会把 `mplatform/src/omp/simpleomp.cpp` 编入 `libmnet.a`，并由 mplatform
+生成一个 `<omp.h>` 兼容头；Apple clang 自动加 `-Xpreprocessor -fopenmp`。
+Android 使用 `-DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26
+-DANDROID_STL=c++_static`；Windows 交叉编译需要 Windows 版 CMake 运行测试或把
+产物拷到 Windows 执行。
+
 ## 当前状态
 
 - `Net::load_param` 按 magic（`7767517`）自动识别文本/二进制 param，分别走

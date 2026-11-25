@@ -20,8 +20,15 @@ endif()
 
 option(mnet_build_tests "Build mnet tests" ${PROJECT_IS_TOP_LEVEL})
 option(mnet_enable_avx2 "Enable AVX2/FMA fast paths (x86_64)" OFF)
+option(mnet_use_simple_omp "Use mplatform's portable OpenMP runtime instead of system OpenMP" OFF)
 
-find_package(OpenMP REQUIRED)
+if(mnet_use_simple_omp)
+    # Must be set before the sibling subprojects are configured; mplatform is
+    # added transitively through mformat -> mmat -> mmemory.
+    set(MPLATFORM_WITH_SIMPLEOMP ON CACHE BOOL "" FORCE)
+else()
+    find_package(OpenMP REQUIRED)
+endif()
 
 # Sibling modules are consumed from source when mnet is built inside the mcnn
 # tree; installed packages work through the exported target dependencies.
@@ -35,6 +42,21 @@ if(NOT TARGET mgraph::mgraph)
 endif()
 if(NOT TARGET mlayer::mlayer)
     add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../mlayer" "${CMAKE_CURRENT_BINARY_DIR}/mlayer")
+endif()
+
+# OpenMP abstraction: system OpenMP by default, portable simpleomp when asked.
+add_library(mnet_omp INTERFACE)
+if(mnet_use_simple_omp)
+    # simpleomp is compiled into libmnet.a below, so the public interface only
+    # needs the pragma-enabling flag (no external OpenMP runtime to export).
+    # Apple clang only exposes OpenMP lowering through the preprocessor flag.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+        target_compile_options(mnet_omp INTERFACE -Xpreprocessor -fopenmp)
+    else()
+        target_compile_options(mnet_omp INTERFACE -fopenmp)
+    endif()
+else()
+    target_link_libraries(mnet_omp INTERFACE OpenMP::OpenMP_CXX)
 endif()
 
 # 警告基线：per-target，禁止 add_compile_options（会污染第三方子项目）。
@@ -82,6 +104,12 @@ add_library(mnet_objs OBJECT
     src/tokenizer/bpe_tokenizer.cpp
 )
 
+if(mnet_use_simple_omp)
+    target_sources(mnet_objs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../mplatform/src/omp/simpleomp.cpp)
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../mplatform/src/omp/simpleomp.cpp
+        PROPERTIES COMPILE_OPTIONS "-w")
+endif()
+
 target_include_directories(mnet_objs
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -92,7 +120,7 @@ target_compile_options(mnet_objs PRIVATE ${MNET_WARNINGS})
 if(mnet_enable_avx2 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     target_compile_options(mnet_objs PRIVATE -mavx2 -mfma)
 endif()
-target_link_libraries(mnet_objs PRIVATE mformat::mformat mgraph::mgraph mlayer::mlayer OpenMP::OpenMP_CXX)
+target_link_libraries(mnet_objs PRIVATE mformat::mformat mgraph::mgraph mlayer::mlayer mnet_omp)
 
 add_library(mnet STATIC
     $<TARGET_OBJECTS:mnet_objs>
@@ -104,7 +132,7 @@ add_library(mnet STATIC
 if(mnet_enable_avx2 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     target_compile_options(mnet INTERFACE -mavx2 -mfma)
 endif()
-target_link_libraries(mnet PUBLIC OpenMP::OpenMP_CXX)
+target_link_libraries(mnet PUBLIC mnet_omp)
 add_library(mnet::mnet ALIAS mnet)
 
 target_include_directories(mnet
@@ -128,7 +156,7 @@ target_include_directories(mnet
 if(PROJECT_IS_TOP_LEVEL)
     include(CMakePackageConfigHelpers)
 
-    install(TARGETS mnet EXPORT mnetTargets
+    install(TARGETS mnet mnet_omp EXPORT mnetTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
