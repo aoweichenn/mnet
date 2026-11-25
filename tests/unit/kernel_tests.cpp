@@ -13,6 +13,8 @@
 #include <mlayer/expanddims.hpp>
 #include <mlayer/gateddeltarule.hpp>
 #include <mlayer/multiheadattention.hpp>
+#include <mlayer/proposal.hpp>
+#include <mlayer/psroipooling.hpp>
 #include <mlayer/reduction.hpp>
 #include <mlayer/shortconv.hpp>
 #include <mlayer/squeeze.hpp>
@@ -1003,4 +1005,78 @@ TEST(Kernel, MultiHeadAttentionSelfAttention) {
     ASSERT_EQ(tops[0].h, 1);
     EXPECT_NEAR(tops[0].row(0)[0], 1.0F, 1e-5F);
     EXPECT_NEAR(tops[0].row(0)[1], 0.0F, 1e-5F);
+}
+
+TEST(Kernel, PSROIPoolingAveragesRoi) {
+    using PS = mlayer::PSROIPooling<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict pd;
+    pd.set(0, 2);     // pooled_width
+    pd.set(1, 2);     // pooled_height
+    pd.set(2, 1.0F);  // spatial_scale
+    pd.set(3, 1);     // output_dim
+    PS layer;
+    ASSERT_EQ(layer.load_param(pd), 0);
+
+    mnet::Mat feature(4, 4, 4);
+    for (std::int32_t q = 0; q < 4; ++q) {
+        for (std::int32_t i = 0; i < 16; ++i) {
+            feature.channel(q)[static_cast<std::size_t>(i)] = static_cast<float>(i + 1);
+        }
+    }
+    mnet::Mat roi(4);
+    roi[0] = 0.0F;
+    roi[1] = 0.0F;
+    roi[2] = 3.0F;
+    roi[3] = 3.0F;
+
+    std::vector<mnet::Mat> bottoms = {feature, roi};
+    std::vector<mnet::Mat> tops(1);
+    mnet::Option opt;
+    ASSERT_EQ(layer.forward(bottoms, tops, opt), 0);
+    ASSERT_EQ(tops[0].w, 2);
+    ASSERT_EQ(tops[0].h, 2);
+    ASSERT_EQ(tops[0].c, 1);
+    // Each 2x2 bin of the 4x4 map: {1,2,5,6}, {3,4,7,8}, {9,10,13,14}, {11,12,15,16}
+    EXPECT_NEAR(tops[0][0], 3.5F, 1e-5F);
+    EXPECT_NEAR(tops[0][1], 5.5F, 1e-5F);
+    EXPECT_NEAR(tops[0][2], 11.5F, 1e-5F);
+    EXPECT_NEAR(tops[0][3], 13.5F, 1e-5F);
+}
+
+TEST(Kernel, ProposalProducesClampedRois) {
+    using PR = mlayer::Proposal<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    PR layer;
+    ASSERT_EQ(layer.load_param(mformat::ParamDict()), 0);
+    ASSERT_EQ(layer.anchors.h, 9);
+
+    const std::int32_t w = 2;
+    const std::int32_t h = 2;
+    const std::int32_t num_anchors = layer.anchors.h;
+    mnet::Mat scores(2 * num_anchors, w * h);
+    scores.fill(1.0F);
+    mnet::Mat bbox(4 * num_anchors, w * h);
+    bbox.fill(0.0F);
+    mnet::Mat im_info(3);
+    im_info[0] = 600.0F;
+    im_info[1] = 600.0F;
+    im_info[2] = 1.0F;
+
+    std::vector<mnet::Mat> bottoms = {scores, bbox, im_info};
+    std::vector<mnet::Mat> tops(2);
+    mnet::Option opt;
+    ASSERT_EQ(layer.forward(bottoms, tops, opt), 0);
+    ASSERT_EQ(tops[0].dims, 3);
+    ASSERT_EQ(tops[0].w, 4);
+    ASSERT_EQ(tops[0].h, 1);
+    ASSERT_GT(tops[0].c, 0);
+    for (std::int32_t i = 0; i < tops[0].c; ++i) {
+        const float* r = tops[0].channel(i);
+        EXPECT_GE(r[0], 0.0F);
+        EXPECT_GE(r[1], 0.0F);
+        EXPECT_LE(r[2], 599.0F);
+        EXPECT_LE(r[3], 599.0F);
+        EXPECT_LE(r[0], r[2]);
+        EXPECT_LE(r[1], r[3]);
+    }
+    EXPECT_EQ(tops[1].c, tops[0].c);
 }
