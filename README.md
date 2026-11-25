@@ -82,9 +82,9 @@ ex.extract("output", out);
 `yolov4-opt` 上游只发布 param、没有权重，无法端到端验证。
 
 数值一致性：`mcnn/tools/parity` 用同一份 param/bin 同时跑上游 ncnn 与 mnet，
-已覆盖 3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、Gemm（常量转置权重）、
-Interp（nearest）、SDPA（多输入注意力）、Pooling、Softmax、Concat，最大绝对
-误差均 ≤ 9.5e-7。
+已覆盖 12 类算子：3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、Gemm
+（常量转置权重）、Interp（nearest）、SDPA（多输入注意力）、Pooling、Softmax、
+Concat、BatchNorm、Permute、Slice，最大绝对误差均 ≤ 9.5e-7。
 
 尚未完成：
 
