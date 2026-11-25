@@ -236,6 +236,15 @@ int main(int argc, char** argv) {
                            static_cast<std::streamsize>(static_cast<std::size_t>(last_out.w) * sizeof(float)));
             }
         }
+        // A released or uninitialised blob can carry garbage dimensions; a
+        // 14 GiB dump from a bogus w once filled the disk, so refuse them.
+        constexpr std::int64_t kMaxDumpFloats = 1LL << 28;   // 1 GiB of floats
+        if (last_out.w <= 0 || last_out.h < 0 || last_out.c <= 0 ||
+            static_cast<std::int64_t>(last_out.w) * last_out.h * last_out.c > kMaxDumpFloats) {
+            std::fprintf(stderr, "refusing to dump implausible blob %s w=%d h=%d c=%d\n", last_out_name.c_str(),
+                         last_out.w, last_out.h, last_out.c);
+            return 1;
+        }
         std::printf("dump=%s blob=%s w=%" PRId32 " h=%" PRId32 " c=%" PRId32 " floats=%zu\n", dump_out.c_str(),
                     last_out_name.c_str(), last_out.w, last_out.h, last_out.c, count);
     }
