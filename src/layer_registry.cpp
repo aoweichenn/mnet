@@ -290,7 +290,7 @@ void register_builtins() {
     add("MatMul", &make_layer<mlayer::MatMul<Layer, MatT, OptionT, ParamDictT>>);
     add("Interp", &make_layer<mlayer::Interp<Layer, MatT, OptionT, ParamDictT>>);
     add("Gemm", &make_layer<mlayer::Gemm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
-    add("Embed", &make_layer<mlayer::Embed<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
+    add("Embed", &make_layer<mlayer::Embed<Layer, MatT, OptionT, ParamDictT, ModelBinT, true>>);
     add("RotaryEmbed", &make_layer<mlayer::RotaryEmbed<Layer, MatT, OptionT, ParamDictT>>);
     add("SDPA", &make_layer<mlayer::SDPA<Layer, MatT, OptionT, ParamDictT>>);
 }
