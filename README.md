@@ -91,15 +91,16 @@ ex.extract("output", out);
 `mnet_probe --allow-empty` 用于随机输入下检测头输出为空的模型。
 
 数值一致性：`mcnn/tools/parity` 用同一份 param/bin 同时跑上游 ncnn 与 mnet，
-已覆盖 39 类算子：3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、Gemm
-（常量转置权重）、InnerProduct、Interp、SDPA、Pooling、Softmax、Concat、
-BatchNorm、GroupNorm、LayerNorm、Permute、Slice、Split、MatMul、Reshape、
-DetectionOutput、Yolov3DetectionOutput、Eltwise、BinaryOp（张量与标量）、
-PReLU、Clip、ExpandDims、Reduction、Einsum、UnaryOp、Swish、ReLU、
-Sigmoid、HardSigmoid、HardSwish、Dropout、Noop、Flatten、ShuffleChannel、
-MemoryData、MultiHeadAttention（prefill 与单 token KV-cache 解码），
-最大绝对误差均 ≤ 1e-6。
-`MNET_NCNN_PARITY=1` 运行 39 类层对齐，`MNET_NCNN_MODELS=1` 运行 34 个模型
+已覆盖 46 类算子：3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、
+Deconvolution、DeconvolutionDepthWise、Gemm（常量转置权重）、InnerProduct、
+Interp、SDPA、Pooling、Softmax、Concat、BatchNorm、GroupNorm、LayerNorm、
+LRN、Permute、Slice、Split、Crop、Squeeze、MatMul、Reshape、
+DetectionOutput、Yolov3DetectionOutput、YoloDetectionOutput、PriorBox、
+Eltwise、BinaryOp（张量与标量）、PReLU、Clip、ExpandDims、Reduction、
+Einsum、UnaryOp、Swish、ReLU、Sigmoid、HardSigmoid、HardSwish、Dropout、
+Noop、Flatten、ShuffleChannel、MemoryData、MultiHeadAttention（prefill 与
+单 token KV-cache 解码），最大绝对误差均 ≤ 1e-6。
+`MNET_NCNN_PARITY=1` 运行 46 类层对齐，`MNET_NCNN_MODELS=1` 运行 34 个模型
 的端到端对齐（模型清单见 `mcnn/tools/parity/models.txt`，可用参数替换）。
 另提供 `tools/parity/model_compare`：同一模型文件与输入同时跑 ncnn 与 mnet，
 可比较任意 blob 或多个输出。34 个带权重模型端到端对齐，最差绝对误差 ≤ 8.5e-3

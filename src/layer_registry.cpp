@@ -42,6 +42,7 @@
 #include <mlayer/interp.hpp>
 #include <mlayer/layernorm.hpp>
 #include <mlayer/log.hpp>
+#include <mlayer/lrn.hpp>
 #include <mlayer/matmul.hpp>
 #include <mlayer/memorydata.hpp>
 #include <mlayer/mish.hpp>
@@ -160,6 +161,7 @@ void register_builtins() {
     add("Clip", &make_layer<mlayer::Clip<Layer, MatT, OptionT, ParamDictT>>);
     add("Exp", &make_layer<mlayer::Exp<Layer, MatT, OptionT, ParamDictT>>);
     add("Log", &make_layer<mlayer::Log<Layer, MatT, OptionT, ParamDictT>>);
+    add("LRN", &make_layer<mlayer::LRN<Layer, MatT, OptionT, ParamDictT>>);
     add("HardSigmoid", &make_layer<mlayer::HardSigmoid<Layer, MatT, OptionT, ParamDictT>>);
     add("HardSwish", &make_layer<mlayer::HardSwish<Layer, MatT, OptionT, ParamDictT>>);
     add("GroupNorm", &make_layer<mlayer::GroupNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
@@ -265,6 +267,8 @@ Layer* create_layer_by_index(std::int32_t type_index) {
             return create_layer("Input");
         case 17:
             return create_layer("Log");
+        case 18:
+            return create_layer("LRN");
         case 19:
             return create_layer("MemoryData");
         case 21:
