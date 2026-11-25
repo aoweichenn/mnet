@@ -4,7 +4,9 @@
 #include <mnet/net.hpp>
 
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 
 #include <fstream>
 #include <sstream>
@@ -18,11 +20,17 @@
 #include <mgraph/graph.hpp>
 #include <mnet/layer_registry.hpp>
 
+#include <mmemory/allocator.hpp>
+
 namespace mnet {
 
 struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
     std::vector<Layer*> layers;
     std::vector<mgraph::Blob> blobs;
+    std::vector<std::string> layer_types;
+    mutable std::int32_t profile_index = 0;
+    mmemory::UnlockedPoolAllocator blob_allocator;
+    mmemory::UnlockedPoolAllocator workspace_allocator;
 
     ~NetPrivate() {
         for (Layer* layer : this->layers) {
@@ -38,6 +46,21 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
     [[nodiscard]] bool should_release_bottom(const Mat&, const Option&) const override { return false; }
 
     std::int32_t invoke(const Layer* layer, std::vector<Mat>& blob_mats, const Option& opt) const override {
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::int32_t result = this->invoke_impl(layer, blob_mats, opt);
+        if (std::getenv("MNET_PROFILE") != nullptr) {
+            const auto t1 = std::chrono::steady_clock::now();
+            const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            const std::int32_t index = this->profile_index++;
+            const char* type = index < static_cast<std::int32_t>(this->layer_types.size())
+                                   ? this->layer_types[static_cast<std::size_t>(index)].c_str()
+                                   : "?";
+            std::fprintf(stderr, "PROFILE %d %s %.3f\n", index, type, ms);
+        }
+        return result;
+    }
+
+    std::int32_t invoke_impl(const Layer* layer, std::vector<Mat>& blob_mats, const Option& opt) const {
         if (layer->one_blob_only) {
             if (layer->bottoms.size() != 1 || layer->tops.size() != 1) {
                 return -1;
@@ -50,11 +73,18 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
             const Mat& bottom = blob_mats[bottom_index];
             Mat& top = blob_mats[top_index];
             if (layer->support_inplace) {
-                top = bottom.clone(opt.blob_allocator);
-                if (top.empty()) {
-                    return -100;
+                const bool exclusive = bottom.refcount != nullptr && *bottom.refcount == 1;
+                if (top_index != bottom_index) {
+                    if (exclusive) {
+                        top = bottom;
+                    } else {
+                        top = bottom.clone(opt.blob_allocator);
+                        if (top.empty()) {
+                            return -100;
+                        }
+                    }
                 }
-                const std::int32_t ret = layer->forward_inplace(top, opt);
+                const std::int32_t ret = layer->forward_inplace(blob_mats[top_index], opt);
                 if (ret != 0) {
                     return ret;
                 }
@@ -101,6 +131,10 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
 
 Net::Net() : d(new NetPrivate()) {
     this->opt_.num_threads = 1;
+    this->d->blob_allocator.set_size_compare_ratio(0.0F);
+    this->d->workspace_allocator.set_size_compare_ratio(0.0F);
+    this->opt_.blob_allocator = &this->d->blob_allocator;
+    this->opt_.workspace_allocator = &this->d->workspace_allocator;
 }
 
 Net::~Net() = default;
@@ -125,6 +159,7 @@ std::int32_t Net::load_param(const char* param_path) {
     }
 
     std::vector<Layer*> layers;
+    std::vector<std::string> layer_types;
     layers.reserve(graph.layers.size());
     for (const mgraph::LayerSpec& spec : graph.layers) {
         Layer* layer = create_layer(spec.type.c_str());
@@ -145,6 +180,7 @@ std::int32_t Net::load_param(const char* param_path) {
         layer->tops = spec.tops;
         layer->typeindex = spec.type_index;
         layers.push_back(layer);
+        layer_types.push_back(spec.type);
     }
 
     for (Layer* layer : this->d->layers) {
@@ -152,6 +188,7 @@ std::int32_t Net::load_param(const char* param_path) {
     }
     this->d->layers = std::move(layers);
     this->d->blobs = graph.blobs;
+    this->d->layer_types = std::move(layer_types);
     return 0;
 }
 
