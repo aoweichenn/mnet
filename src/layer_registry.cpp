@@ -29,6 +29,7 @@
 #include <mlayer/crop.hpp>
 #include <mlayer/cumulativesum.hpp>
 #include <mlayer/deconvolution.hpp>
+#include <mlayer/deformableconv2d.hpp>
 #include <mlayer/deconvolution1d.hpp>
 #include <mlayer/deconvolution3d.hpp>
 #include <mlayer/deepcopy.hpp>
@@ -242,6 +243,8 @@ void register_builtins() {
     add("Padding", &make_layer<mlayer::Padding<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("Tile", &make_layer<mlayer::Tile<Layer, MatT, OptionT, ParamDictT>>);
     add("Unfold", &make_layer<mlayer::Unfold<Layer, MatT, OptionT, ParamDictT>>);
+    add("DeformableConv2D", &make_layer<mlayer::DeformableConv2D<Layer, MatT, OptionT, ParamDictT, ModelBinT,
+                                                                   false, mnet::activation_ss>>);
     add("Fold", &make_layer<mlayer::Fold<Layer, MatT, OptionT, ParamDictT, mnet::copy_cut_border>>);
     add("GridSample", &make_layer<mlayer::GridSample<Layer, MatT, OptionT, ParamDictT, false>>);
     add("LSTM", &make_layer<mlayer::LSTM<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
