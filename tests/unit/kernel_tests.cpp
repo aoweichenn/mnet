@@ -1362,3 +1362,54 @@ TEST(Kernel, Convolution3x3Winograd43MatchesReference) {
     }
     EXPECT_LT(max_err, 1e-4F);
 }
+
+TEST(Kernel, InterpBilinearEdgeClamps) {
+    using IP = mlayer::Interp<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict pd;
+    pd.set(0, 2);  // bilinear
+    pd.set(3, 4);  // output height
+    pd.set(4, 4);  // output width
+    IP op;
+    ASSERT_EQ(op.load_param(pd), 0);
+
+    mnet::Mat in(2, 2);
+    in[0] = 1.0F;
+    in[1] = 2.0F;
+    in[2] = 3.0F;
+    in[3] = 4.0F;
+    mnet::Option opt;
+    mnet::Mat out;
+    ASSERT_EQ(op.forward(in, out, opt), 0);
+    ASSERT_EQ(out.w, 4);
+    ASSERT_EQ(out.h, 4);
+    const float expect[16] = {1.0F, 1.25F, 1.75F, 2.0F, 1.5F, 1.75F, 2.25F, 2.5F,
+                              2.5F, 2.75F, 3.25F, 3.5F, 3.0F, 3.25F, 3.75F, 4.0F};
+    for (std::int32_t i = 0; i < 16; ++i) {
+        EXPECT_NEAR(out[static_cast<std::size_t>(i)], expect[i], 1e-6F);
+    }
+}
+
+TEST(Kernel, ReductionLastAxisOn4dBlob) {
+    using RD = mlayer::Reduction<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict pd;
+    pd.set(0, static_cast<std::int32_t>(RD::ReductionOp_MAX));
+    pd.set(1, 0);
+    mnet::Mat axes(1);
+    static_cast<std::int32_t*>(static_cast<void*>(axes.data))[0] = -1;
+    pd.set(3, axes);
+    pd.set(4, 0);
+    pd.set(5, 1);
+    RD op;
+    ASSERT_EQ(op.load_param(pd), 0);
+
+    mnet::Mat in(8, 3, 2, 4);
+    in.fill(1.0F);
+    mnet::Option opt;
+    mnet::Mat out;
+    ASSERT_EQ(op.forward(in, out, opt), 0);
+    // w is reduced; h, d, c are preserved as a 3D blob (h, d, c).
+    ASSERT_EQ(out.dims, 3);
+    ASSERT_EQ(out.w, 3);
+    ASSERT_EQ(out.h, 2);
+    ASSERT_EQ(out.c, 4);
+}

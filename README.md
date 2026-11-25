@@ -90,8 +90,11 @@ ex.extract("output", out);
 （常量转置权重）、Interp（nearest）、SDPA（多输入注意力）、Pooling、Softmax、
 Concat、BatchNorm、Permute、Slice、MatMul、Reshape，最大绝对误差均 ≤ 9.5e-7。
 另提供 `tools/parity/model_compare`：同一模型文件与输入同时跑 ncnn 与 mnet，
-逐 blob 对比。实测端到端误差：squeezenet 4.7e-7、shufflenet 6.2e-6、
-yolo11n 9.0e-5、PP-OCRv5 rec 1.3e-4（含 MultiHeadAttention）、yolov8n 1.1e-4。
+可比较任意 blob 或多个输出。26 个模型端到端对齐（max_abs_diff / 相对误差）：
+yolo11n 1.2e-4、yolov8n 1.2e-4、PP-OCRv5 rec 1.3e-4（含 MHA）、yolact 1.3e-5、
+nanodet_m 3.3e-6、worldv2 8.5e-3（相对 4e-5）、squeezenet 4.7e-7。
+该工具先后定位并修复了 Interp 双线性边界越界外插和 Reduction 4D→3D 形状映射
+两个 bug。
 
 尚未完成：
 
