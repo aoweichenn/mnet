@@ -468,6 +468,7 @@ TEST(Kernel, MatMul2DAndInterpNearest) {
 #include <mlayer/shortconv.hpp>
 #include <mlayer/relposbias.hpp>
 #include <mlayer/situ.hpp>
+#include <mlayer/stft.hpp>
 
 TEST(Kernel, GemmConstantBAndC) {
     using G = mlayer::Gemm<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, mformat::ModelBin>;
@@ -793,6 +794,57 @@ TEST(Kernel, RelPosBiasMatchesReference) {
             }
         }
     }
+}
+
+// One-sided STFT: framing + window + DFT, output (bins, frames, 2).
+TEST(Kernel, StftMatchesReference) {
+    using S = mlayer::Stft<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    S stft;
+    ASSERT_EQ(stft.load_param(mformat::ParamDict()), 0);
+
+    // 12 samples, frame 4, step 2 -> 5 frames.
+    const float samples[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    mnet::Mat signal(12);
+    for (std::int32_t i = 0; i < 12; ++i) {
+        signal[static_cast<std::size_t>(i)] = samples[i];
+    }
+    mnet::Mat window(4);
+    window.fill(1.0F);
+    mnet::Mat step(1);
+    step[0] = 2.0F;
+
+    mnet::Option opt;
+    std::vector<mnet::Mat> bottom = {signal, window, step};
+    std::vector<mnet::Mat> top(1);
+    ASSERT_EQ(stft.forward(bottom, top, opt), 0);
+    ASSERT_EQ(top[0].w, 3);   // bins = 4/2 + 1
+    ASSERT_EQ(top[0].h, 5);   // frames
+    ASSERT_EQ(top[0].c, 2);
+
+    for (std::int32_t f = 0; f < 5; ++f) {
+        for (std::int32_t k = 0; k < 3; ++k) {
+            double re = 0.0;
+            double im = 0.0;
+            for (std::int32_t n = 0; n < 4; ++n) {
+                const double angle = 2.0 * 3.14159265358979323846 * static_cast<double>(k) *
+                                     static_cast<double>(n) / 4.0;
+                const double v = static_cast<double>(samples[f * 2 + n]);
+                re += v * std::cos(angle);
+                im -= v * std::sin(angle);
+            }
+            EXPECT_NEAR(top[0].channel(0).row(f)[k], re, 1e-5F);
+            EXPECT_NEAR(top[0].channel(1).row(f)[k], im, 1e-5F);
+        }
+    }
+
+    // DC bin is the frame sum, Nyquist alternates sign: [1,0,0,0] -> [1,1,1].
+    EXPECT_NEAR(top[0].channel(0).row(0)[0], 1.0F, 1e-5F);
+    EXPECT_NEAR(top[0].channel(0).row(0)[1], 1.0F, 1e-5F);
+    EXPECT_NEAR(top[0].channel(0).row(0)[2], 1.0F, 1e-5F);
+    // frame 1 is samples[2..5] = [0,0,0,1] -> X = [1, +i, -1]
+    EXPECT_NEAR(top[0].channel(0).row(1)[1], 0.0F, 1e-5F);
+    EXPECT_NEAR(top[0].channel(1).row(1)[1], 1.0F, 1e-5F);
+    EXPECT_NEAR(top[0].channel(0).row(1)[2], -1.0F, 1e-5F);
 }
 
 #include <cstdio>

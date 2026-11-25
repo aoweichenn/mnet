@@ -96,6 +96,7 @@
 #include <mlayer/selu.hpp>
 #include <mlayer/shortconv.hpp>
 #include <mlayer/situ.hpp>
+#include <mlayer/stft.hpp>
 #include <mlayer/shrink.hpp>
 #include <mlayer/shufflechannel.hpp>
 #include <mlayer/sigmoid.hpp>
@@ -265,6 +266,7 @@ void register_builtins() {
     add("ELU", &make_layer<mlayer::ELU<Layer, MatT, OptionT, ParamDictT>>);
     add("Situ", &make_layer<mlayer::Situ<Layer, MatT, OptionT, ParamDictT>>);
     add("RelPosBias", &make_layer<mlayer::RelPosBias<Layer, MatT, OptionT, ParamDictT>>);
+    add("Stft", &make_layer<mlayer::Stft<Layer, MatT, OptionT, ParamDictT>>);
     add("Erf", &make_layer<mlayer::Erf<Layer, MatT, OptionT>>);
     add("Mish", &make_layer<mlayer::Mish<Layer, MatT, OptionT>>);
     add("SELU", &make_layer<mlayer::SELU<Layer, MatT, OptionT, ParamDictT>>);
