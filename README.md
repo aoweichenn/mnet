@@ -186,6 +186,36 @@ decode 46.5 ms/tok。
 同一修复让 Qwen3 0.6B 在 Android 上从 54.6 ms/tok（8T）降到
 **24.4 ms/tok（5T）**：4–5 个线程跑满大核比 8 个线程混入小核更快。
 
+### OCR 端到端（det → DB 后处理 → rec → CTC）
+
+`tools/mnet_ocr` 是完整的 PP-OCRv5 流水线，不依赖 OpenCV：
+
+```bash
+./mnet_ocr --image in.bmp \
+  --det-param PP_OCRv5_mobile_det.ncnn.param --det-bin PP_OCRv5_mobile_det.ncnn.bin \
+  --rec-param PP_OCRv5_mobile_rec.ncnn.param --rec-bin PP_OCRv5_mobile_rec.ncnn.bin \
+  --dict ppocrv5_dict.txt --threads 5
+```
+
+- 输入为未压缩 24/32-bit BMP（BGR→RGB、双线性缩放、常量 114 填充到 32 的倍数、
+  PaddleOCR 的 `mean=[0.485,0.456,0.406]`/`std` 归一化）；
+- det 输出 sigmoid 概率图，0.3 阈值 + 8 邻域连通域 + 区域均分 0.6 过滤 +
+  矩形 unclip（短边 ×1.95、长边 + 原短边 ×0.95）；
+- 每个框裁切后等比缩放到高 48，rec 输出 `18385 × T`，CTC 贪心解码，
+  字典 `ppocrv5_dict.txt`（从 `ncnn/examples/ppocrv5_dict.h` 导出，18383 项）。
+
+900x320、3 行中英文的测试图：
+
+| 平台 | 线程 | det | rec | 端到端 |
+| --- | --- | --- | --- | --- |
+| WSL x86_64 | 8 | 23.2 ms | 41.1 ms | **64.3 ms** |
+| Windows x86_64 | 8 | 29.6 ms | 71.1 ms | **100.7 ms** |
+| Android 8 Gen 2 | 5 | 90.7 ms | 163.3 ms | **254.1 ms** |
+| Android 8 Gen 2 | 1 | 197.1 ms | 425.5 ms | 622.6 ms |
+
+三个平台输出一致（`HelloWorld123` / `安卓端侧推理2026` / `mnetocRendtoend`），
+证明预处理、DB 后处理与 CTC 解码都是跨平台同一份实现。
+
 所有已发布 `.bin` 的 param 现在都能找到对应 layer 实现；`rfcn_end2end` 与
 `yolov4-opt` 的权重在上游以分卷 `.partNN` 发布，拼接后可端到端运行。
 `mnet_probe --allow-empty` 用于随机输入下检测头输出为空的模型。
