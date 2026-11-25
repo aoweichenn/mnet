@@ -69,6 +69,9 @@ set(MNET_WARNINGS
     $<$<CXX_COMPILER_ID:GNU>:${MNET_WARNINGS_GCC}>
 )
 
+# Vendored Apache-2.0 BPE tokenizer keeps its upstream warning level.
+set_source_files_properties(src/tokenizer/bpe_tokenizer.cpp PROPERTIES COMPILE_OPTIONS "-w")
+
 add_library(mnet_objs OBJECT
     src/mnet/base/error.cpp
     src/mnet/log.cpp
