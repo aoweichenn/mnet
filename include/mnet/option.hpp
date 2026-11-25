@@ -23,6 +23,9 @@ struct Option {
     bool use_fp16_packed = false;
     bool use_fp16_arithmetic = false;
     bool use_vulkan_compute = false;
+
+    mmemory::Allocator* kvcache_allocator = nullptr;
+    std::int32_t kvcache_max_seqlen_hint = 0;
 };
 
 }  // namespace mnet

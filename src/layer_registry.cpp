@@ -16,8 +16,10 @@
 #include <mlayer/convolution.hpp>
 #include <mlayer/convolutiondepthwise.hpp>
 #include <mlayer/dropout.hpp>
+#include <mlayer/embed.hpp>
 #include <mlayer/flatten.hpp>
 #include <mlayer/gelu.hpp>
+#include <mlayer/gemm.hpp>
 #include <mlayer/innerproduct.hpp>
 #include <mlayer/interp.hpp>
 #include <mlayer/matmul.hpp>
@@ -27,7 +29,9 @@
 #include <mlayer/relu.hpp>
 #include <mlayer/reshape.hpp>
 #include <mlayer/rmsnorm.hpp>
+#include <mlayer/rotaryembed.hpp>
 #include <mlayer/scale.hpp>
+#include <mlayer/sdpa.hpp>
 #include <mlayer/shufflechannel.hpp>
 #include <mlayer/sigmoid.hpp>
 #include <mlayer/slice.hpp>
@@ -114,6 +118,10 @@ void register_builtins() {
     add("Reshape", &make_layer<mlayer::Reshape<Layer, MatT, OptionT, ParamDictT>>);
     add("MatMul", &make_layer<mlayer::MatMul<Layer, MatT, OptionT, ParamDictT>>);
     add("Interp", &make_layer<mlayer::Interp<Layer, MatT, OptionT, ParamDictT>>);
+    add("Gemm", &make_layer<mlayer::Gemm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("Embed", &make_layer<mlayer::Embed<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
+    add("RotaryEmbed", &make_layer<mlayer::RotaryEmbed<Layer, MatT, OptionT, ParamDictT>>);
+    add("SDPA", &make_layer<mlayer::SDPA<Layer, MatT, OptionT, ParamDictT>>);
 }
 
 }  // namespace

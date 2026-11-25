@@ -35,11 +35,12 @@ ex.extract("output", out);
   `Threshold`、`Power`、`GELU`、`Softmax`、`Bias`、`Scale`、`Convolution`、
   `Pooling`、`InnerProduct`、`Concat`、`Split`、`ConvolutionDepthWise`、
   `BatchNorm`、`ShuffleChannel`、`Slice`、`RMSNorm`、`BinaryOp`、`Permute`、
-  `Reshape`、`MatMul`、`Interp`。
+  `Reshape`、`MatMul`、`Interp`、`Embed`、`Gemm`、`RotaryEmbed`、`SDPA`（KV cache）。
 - `tests/unit/model_tests.cpp` 已端到端跑通：
   - `squeezenet_v1.1`（227x227x3 → 1000 类 softmax，概率和校验）
   - `shufflenet_v2_x0.5`（224x224x3 → 1000 维输出，覆盖 ConvDW/BN/Slice/ShuffleChannel）
   - `yolo11n`（640x640x3 → `out0`，覆盖 Reshape/Permute/Slice/BinaryOp/MatMul/Interp）
+  - Qwen3 0.6B 单 token：embed → decoder → proj → argmax（覆盖 Gemm/RotaryEmbed/SDPA/KV cache）
 
 尚未完成：
 

@@ -42,7 +42,7 @@ TEST(Kernel, Convolution1x1MultiChannel) {
     weights[0][4] = -2.0F;
     weights[0][5] = -3.0F;
     weights[1].create(outch);
-    weights[1][0] = 0.5F;
+    weights[1][static_cast<std::size_t>(0)] = 0.5F;
     weights[1][1] = -0.5F;
 
     Conv conv;
@@ -401,7 +401,7 @@ TEST(Kernel, MatMul2DAndInterpNearest) {
     mnet::Mat a(3, 2);
     mnet::Mat b(4, 3);
     for (std::int32_t i = 0; i < 6; ++i) {
-        static_cast<float*>(a)[i] = static_cast<float>(i);
+        static_cast<float*>(a)[static_cast<std::size_t>(i)] = static_cast<float>(i);
     }
     for (std::int32_t i = 0; i < 12; ++i) {
         static_cast<float*>(b)[i] = static_cast<float>(i);
@@ -442,4 +442,104 @@ TEST(Kernel, MatMul2DAndInterpNearest) {
     EXPECT_FLOAT_EQ(up.channel(0)[3], 2.0F);
     EXPECT_FLOAT_EQ(up.channel(0)[12], 3.0F);
     EXPECT_FLOAT_EQ(up.channel(0)[15], 4.0F);
+}
+
+#include <mlayer/gemm.hpp>
+#include <mlayer/rotaryembed.hpp>
+#include <mlayer/sdpa.hpp>
+
+TEST(Kernel, GemmConstantBAndC) {
+    using G = mlayer::Gemm<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, mformat::ModelBin>;
+
+    mformat::ParamDict pd;
+    pd.set(3, 1);
+    pd.set(5, 1);
+    pd.set(6, 1);
+    pd.set(7, 2);
+    pd.set(8, 4);
+    pd.set(9, 3);
+    pd.set(10, 0);
+    G gemm;
+    ASSERT_EQ(gemm.load_param(pd), 0);
+
+    mnet::Mat weights[2];
+    weights[0].create(3, 4);
+    for (std::int32_t i = 0; i < 12; ++i) {
+        static_cast<float*>(weights[0])[static_cast<std::size_t>(i)] = static_cast<float>(i + 1);
+    }
+    weights[1].create(1);
+    weights[1][static_cast<std::size_t>(0)] = 0.5F;
+    ASSERT_EQ(gemm.load_model(mformat::ModelBinFromMatArray(weights)), 0);
+
+    mnet::Mat a(3, 2);
+    for (std::int32_t i = 0; i < 6; ++i) {
+        static_cast<float*>(a)[static_cast<std::size_t>(i)] = static_cast<float>(i);
+    }
+
+    mnet::Option opt;
+    opt.num_threads = 2;
+    mnet::Mat out;
+    ASSERT_EQ(gemm.forward(a, out, opt), 0);
+    ASSERT_EQ(out.w, 4);
+    ASSERT_EQ(out.h, 2);
+    for (std::int32_t i = 0; i < 2; ++i) {
+        for (std::int32_t j = 0; j < 4; ++j) {
+            float ref = 0.5F;
+            for (std::int32_t k = 0; k < 3; ++k) {
+                ref += a.row(i)[k] * weights[0].row(j)[k];
+            }
+            EXPECT_NEAR(out.row(i)[j], ref, 1e-5F);
+        }
+    }
+}
+
+TEST(Kernel, RotaryEmbedAndSdpaSingleStep) {
+    using RE = mlayer::RotaryEmbed<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict pd;
+    RE rope;
+    ASSERT_EQ(rope.load_param(pd), 0);
+
+    mnet::Mat x(4, 1, 1);
+    x.channel(0)[0] = 1.0F;
+    x.channel(0)[1] = 0.0F;
+    x.channel(0)[2] = 0.0F;
+    x.channel(0)[3] = 1.0F;
+    mnet::Mat cos_cache(2, 1);
+    mnet::Mat sin_cache(2, 1);
+    cos_cache.row(0)[0] = 0.0F;
+    cos_cache.row(0)[1] = 0.0F;
+    sin_cache.row(0)[0] = 1.0F;
+    sin_cache.row(0)[1] = 1.0F;
+
+    std::vector<mnet::Mat> rb = {x, cos_cache, sin_cache};
+    std::vector<mnet::Mat> rt(1);
+    mnet::Option opt;
+    ASSERT_EQ(rope.forward(rb, rt, opt), 0);
+    EXPECT_NEAR(rt[0].channel(0)[0], 0.0F, 1e-6F);
+    EXPECT_NEAR(rt[0].channel(0)[1], -1.0F, 1e-6F);
+    EXPECT_NEAR(rt[0].channel(0)[2], 1.0F, 1e-6F);
+    EXPECT_NEAR(rt[0].channel(0)[3], 0.0F, 1e-6F);
+
+    using AP = mlayer::SDPA<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict spd;
+    spd.set(5, 0);
+    spd.set(7, 0);
+    AP sdpa;
+    ASSERT_EQ(sdpa.load_param(spd), 0);
+
+    mnet::Mat q(4, 1, 1);
+    mnet::Mat k(4, 1, 1);
+    mnet::Mat v(4, 1, 1);
+    for (std::int32_t i = 0; i < 4; ++i) {
+        q.channel(0)[static_cast<std::size_t>(i)] = static_cast<float>(i + 1);
+        k.channel(0)[static_cast<std::size_t>(i)] = static_cast<float>(i + 1);
+        v.channel(0)[static_cast<std::size_t>(i)] = static_cast<float>(10 + i);
+    }
+    std::vector<mnet::Mat> sb = {q, k, v};
+    std::vector<mnet::Mat> st(1);
+    ASSERT_EQ(sdpa.forward(sb, st, opt), 0);
+    ASSERT_EQ(st[0].w, 4);
+    for (std::int32_t i = 0; i < 4; ++i) {
+        EXPECT_NEAR(st[0].channel(0)[static_cast<std::size_t>(i)], v.channel(0)[static_cast<std::size_t>(i)], 1e-5F);
+    }
 }
