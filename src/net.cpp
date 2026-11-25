@@ -180,6 +180,120 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
         return 0;
     }
 
+    // Graph-level optimization: absorb activation layers that directly follow a
+    // convolution into the convolution epilogue. This removes one full
+    // read+write pass over every feature map and the intermediate blob. The
+    // pass is conservative: the convolution output must have exactly one
+    // consumer and the activation output must not be a requested model output.
+    void fuse_convolution_activation() {
+        const auto blob_count = static_cast<std::int32_t>(this->blobs.size());
+        std::vector<std::vector<std::int32_t>> consumers(static_cast<std::size_t>(blob_count));
+        for (std::size_t i = 0; i < this->layers.size(); ++i) {
+            for (const std::int32_t bottom : this->layers[i]->bottoms) {
+                if (bottom >= 0 && bottom < blob_count) {
+                    consumers[static_cast<std::size_t>(bottom)].push_back(static_cast<std::int32_t>(i));
+                }
+            }
+        }
+
+        std::vector<bool> removed(this->layers.size(), false);
+        std::size_t fused = 0;
+        for (std::size_t i = 0; i < this->layers.size(); ++i) {
+            Layer* act = this->layers[i];
+            if (act->bottoms.size() != 1 || act->tops.size() != 1) {
+                continue;
+            }
+            std::int32_t type = 0;
+            Mat params;
+            if (act->get_fused_activation(type, params) != 0) {
+                continue;
+            }
+            const std::int32_t bottom = act->bottoms[0];
+            const std::int32_t top = act->tops[0];
+            if (bottom < 0 || top < 0 || bottom >= blob_count || top >= blob_count) {
+                continue;
+            }
+            bool is_output = false;
+            for (const std::int32_t output : this->output_blobs) {
+                if (output == top) {
+                    is_output = true;
+                }
+            }
+            if (is_output) {
+                continue;
+            }
+            const std::int32_t producer = this->blobs[static_cast<std::size_t>(bottom)].producer;
+            if (producer < 0 || static_cast<std::size_t>(producer) >= this->layers.size()) {
+                continue;
+            }
+            Layer* conv = this->layers[static_cast<std::size_t>(producer)];
+            if (conv->tops.size() != 1 || conv->tops[0] != bottom) {
+                continue;
+            }
+            if (!conv->can_fuse_activation(type)) {
+                continue;
+            }
+            if (consumers[static_cast<std::size_t>(bottom)].size() != 1) {
+                continue;
+            }
+
+            conv->set_fused_activation(type, params);
+            for (const std::int32_t consumer : consumers[static_cast<std::size_t>(top)]) {
+                for (std::int32_t& consumer_bottom : this->layers[static_cast<std::size_t>(consumer)]->bottoms) {
+                    if (consumer_bottom == top) {
+                        consumer_bottom = bottom;
+                    }
+                }
+            }
+            removed[i] = true;
+            ++fused;
+        }
+
+        if (fused == 0) {
+            return;
+        }
+
+        std::vector<Layer*> kept_layers;
+        std::vector<std::string> kept_types;
+        kept_layers.reserve(this->layers.size() - fused);
+        kept_types.reserve(this->layers.size() - fused);
+        std::vector<std::int32_t> remap(this->layers.size(), -1);
+        this->layer_index.clear();
+        for (std::size_t i = 0; i < this->layers.size(); ++i) {
+            if (removed[i]) {
+                delete this->layers[i];
+                continue;
+            }
+            remap[i] = static_cast<std::int32_t>(kept_layers.size());
+            this->layer_index[this->layers[i]] = static_cast<std::int32_t>(kept_layers.size());
+            kept_layers.push_back(this->layers[i]);
+            kept_types.push_back(i < this->layer_types.size() ? this->layer_types[i] : std::string());
+        }
+        this->layers = std::move(kept_layers);
+        this->layer_types = std::move(kept_types);
+
+        // Blob producer/consumer indices refer to layer positions, so they have
+        // to follow the compaction. Blobs produced by a removed activation are
+        // no longer produced at all.
+        for (mgraph::Blob& blob : this->blobs) {
+            blob.producer = blob.producer >= 0 && static_cast<std::size_t>(blob.producer) < remap.size()
+                                ? remap[static_cast<std::size_t>(blob.producer)]
+                                : -1;
+            blob.consumer = blob.consumer >= 0 && static_cast<std::size_t>(blob.consumer) < remap.size()
+                                ? remap[static_cast<std::size_t>(blob.consumer)]
+                                : -1;
+        }
+
+        this->blob_last_use.assign(this->blobs.size(), -1);
+        for (std::size_t i = 0; i < this->layers.size(); ++i) {
+            for (const std::int32_t bottom : this->layers[i]->bottoms) {
+                if (bottom >= 0 && static_cast<std::size_t>(bottom) < this->blob_last_use.size()) {
+                    this->blob_last_use[static_cast<std::size_t>(bottom)] = static_cast<std::int32_t>(i);
+                }
+            }
+        }
+    }
+
     [[nodiscard]] std::int32_t find_blob(const char* name) const {
         if (name == nullptr) {
             return -1;
@@ -308,6 +422,9 @@ std::int32_t Net::load_param(const char* param_path) {
     this->d->blob_last_use = plan.blob_last_use;
     this->d->input_blobs = std::move(input_blobs);
     this->d->output_blobs = plan.output_blobs;
+    if (std::getenv("MNET_NO_FUSE_ACTIVATION") == nullptr) {
+        this->d->fuse_convolution_activation();
+    }
     return 0;
 }
 

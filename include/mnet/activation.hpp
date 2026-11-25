@@ -50,6 +50,10 @@ inline float activation_ss(float v, std::int32_t activation_type, const Mat& par
             }
             return v * (v * alpha + beta);
         }
+        case 7:
+            // SiLU, only produced by the graph fusion pass (ncnn keeps Swish as
+            // a separate layer, so this id never comes from a param file).
+            return v / (1.0F + std::exp(-v));
         default:
             return v;
     }
