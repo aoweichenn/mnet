@@ -51,7 +51,7 @@ ex.extract("output", out);
   `YoloDetectionOutput`、`Yolov3DetectionOutput`、`ShortConv`、`GatedDeltaRule`、
   `MultiHeadAttention`（fp32 与量化：weight-block int4/int6/int8、legacy int8；
   自注意力/交叉注意力、可选 mask、KV cache）、`Proposal`、
-  `PSROIPooling`（Faster-RCNN / RFCN 的 ROI 生成与池化）、`ELU`、`SELU`、`Erf`、
+  `ROIPooling` / `PSROIPooling`（Faster-RCNN / RFCN 的 ROI 生成与池化）、`ELU`、`SELU`、`Erf`、
   `Mish`、`Softplus`、`PixelShuffle`、`Reorg`、`Convolution1D`、`Convolution3D`。
 - `tests/unit/model_tests.cpp` 已端到端跑通：
   - `squeezenet_v1.1`（227x227x3 → 1000 类 softmax，概率和校验）
@@ -100,8 +100,8 @@ DetectionOutput、Yolov3DetectionOutput、YoloDetectionOutput、PriorBox、
 Eltwise、BinaryOp（张量与标量）、PReLU、Clip、ExpandDims、Reduction、
 Einsum、UnaryOp、Swish、ReLU、Sigmoid、HardSigmoid、HardSwish、Dropout、
 Noop、Flatten、ShuffleChannel、MemoryData、MultiHeadAttention（fp32 prefill/
-KV-cache 解码 + int8/int4 权重量化 + legacy int8），共 63 组对比，
-最大绝对误差 ≤ 1e-6。
+KV-cache 解码 + int8/int4 权重量化 + legacy int8）、ROIPooling、
+PSROIPooling、Proposal，共 67 组对比，最大绝对误差 ≤ 2e-5。
 `MNET_NCNN_PARITY=1` 运行 46 类层对齐，`MNET_NCNN_MODELS=1` 运行 34 个模型
 的端到端对齐（模型清单见 `mcnn/tools/parity/models.txt`，可用参数替换）。
 另提供 `tools/parity/model_compare`：同一模型文件与输入同时跑 ncnn 与 mnet，

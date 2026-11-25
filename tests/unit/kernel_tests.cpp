@@ -17,6 +17,7 @@
 #include <mlayer/proposal.hpp>
 #include <mlayer/psroipooling.hpp>
 #include <mlayer/reduction.hpp>
+#include <mlayer/roipooling.hpp>
 #include <mlayer/shortconv.hpp>
 #include <mlayer/squeeze.hpp>
 #include <mlayer/unaryop.hpp>
@@ -1596,6 +1597,79 @@ TEST(Kernel, ConvolutionGemmPackOddShapes) {
                     EXPECT_NEAR(out.channel(p)[static_cast<std::size_t>(y * out.w + x)], expect, 1e-5F)
                         << "k=" << shape.kw << " s=" << shape.stride << " p=" << p << " y=" << y << " x=" << x;
                 }
+            }
+        }
+    }
+}
+
+TEST(Kernel, RoiPoolingMatchesReference) {
+    using ROI = mlayer::ROIPooling<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+
+    mformat::ParamDict pd;
+    pd.set(0, 3);
+    pd.set(1, 2);
+    pd.set(2, 0.5F);
+    ROI op;
+    ASSERT_EQ(op.load_param(pd), 0);
+
+    const std::int32_t w = 8;
+    const std::int32_t h = 6;
+    const std::int32_t c = 2;
+    mnet::Mat feat(w, h, c);
+    std::vector<float> src(static_cast<std::size_t>(w * h * c));
+    for (std::int32_t i = 0; i < w * h * c; ++i) {
+        src[static_cast<std::size_t>(i)] = std::sin(0.37F * static_cast<float>(i) - 0.4F);
+        feat.channel(i / (w * h))[static_cast<std::size_t>(i % (w * h))] = src[static_cast<std::size_t>(i)];
+    }
+    mnet::Mat rois(4, 1);
+    rois[0] = 1.0F;
+    rois[1] = 2.0F;
+    rois[2] = 12.0F;
+    rois[3] = 9.0F;
+
+    std::vector<mnet::Mat> bottoms = {feat, rois};
+    std::vector<mnet::Mat> tops = {mnet::Mat()};
+    mnet::Option opt;
+    ASSERT_EQ(op.forward(bottoms, tops, opt), 0);
+    const mnet::Mat& out = tops[0];
+    ASSERT_EQ(out.w, 3);
+    ASSERT_EQ(out.h, 2);
+    ASSERT_EQ(out.c, c);
+
+    const std::int32_t roi_x1 = static_cast<std::int32_t>(std::round(rois[0] * 0.5F));
+    const std::int32_t roi_y1 = static_cast<std::int32_t>(std::round(rois[1] * 0.5F));
+    const std::int32_t roi_x2 = static_cast<std::int32_t>(std::round(rois[2] * 0.5F));
+    const std::int32_t roi_y2 = static_cast<std::int32_t>(std::round(rois[3] * 0.5F));
+    const std::int32_t roi_w = std::max(roi_x2 - roi_x1 + 1, 1);
+    const std::int32_t roi_h = std::max(roi_y2 - roi_y1 + 1, 1);
+    const float bin_w = static_cast<float>(roi_w) / 3.0F;
+    const float bin_h = static_cast<float>(roi_h) / 2.0F;
+
+    for (std::int32_t q = 0; q < c; ++q) {
+        for (std::int32_t ph = 0; ph < 2; ++ph) {
+            for (std::int32_t pw = 0; pw < 3; ++pw) {
+                const float phf = static_cast<float>(ph);
+                const float pwf = static_cast<float>(pw);
+                std::int32_t hstart = static_cast<std::int32_t>(static_cast<float>(roi_y1) + std::floor(phf * bin_h));
+                std::int32_t wstart = static_cast<std::int32_t>(static_cast<float>(roi_x1) + std::floor(pwf * bin_w));
+                std::int32_t hend =
+                    static_cast<std::int32_t>(static_cast<float>(roi_y1) + std::ceil((phf + 1.0F) * bin_h));
+                std::int32_t wend =
+                    static_cast<std::int32_t>(static_cast<float>(roi_x1) + std::ceil((pwf + 1.0F) * bin_w));
+                hstart = std::min(std::max(hstart, 0), h);
+                wstart = std::min(std::max(wstart, 0), w);
+                hend = std::min(std::max(hend, 0), h);
+                wend = std::min(std::max(wend, 0), w);
+                float expect = 0.0F;
+                bool first = true;
+                for (std::int32_t y = hstart; y < hend; ++y) {
+                    for (std::int32_t x = wstart; x < wend; ++x) {
+                        const float v = src[static_cast<std::size_t>((q * h + y) * w + x)];
+                        expect = first ? v : std::max(expect, v);
+                        first = false;
+                    }
+                }
+                EXPECT_FLOAT_EQ(out.channel(q)[static_cast<std::size_t>(ph * 3 + pw)], first ? 0.0F : expect);
             }
         }
     }

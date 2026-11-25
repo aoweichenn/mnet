@@ -62,6 +62,7 @@
 #include <mlayer/reorg.hpp>
 #include <mlayer/reshape.hpp>
 #include <mlayer/rmsnorm.hpp>
+#include <mlayer/roipooling.hpp>
 #include <mlayer/rotaryembed.hpp>
 #include <mlayer/scale.hpp>
 #include <mlayer/sdpa.hpp>
@@ -177,6 +178,7 @@ void register_builtins() {
     add("ShortConv", &make_layer<mlayer::ShortConv<Layer, MatT, OptionT>>);
     add("GatedDeltaRule", &make_layer<mlayer::GatedDeltaRule<Layer, MatT, OptionT>>);
     add("Proposal", &make_layer<mlayer::Proposal<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("ROIPooling", &make_layer<mlayer::ROIPooling<Layer, MatT, OptionT, ParamDictT>>);
     add("PSROIPooling", &make_layer<mlayer::PSROIPooling<Layer, MatT, OptionT, ParamDictT, false>>);
     add("ELU", &make_layer<mlayer::ELU<Layer, MatT, OptionT, ParamDictT>>);
     add("Erf", &make_layer<mlayer::Erf<Layer, MatT, OptionT>>);
@@ -285,6 +287,8 @@ Layer* create_layer_by_index(std::int32_t type_index) {
             return create_layer("ReLU");
         case 27:
             return create_layer("Reshape");
+        case 28:
+            return create_layer("ROIPooling");
         case 29:
             return create_layer("Scale");
         case 30:
