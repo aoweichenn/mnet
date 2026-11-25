@@ -82,6 +82,7 @@
 #include <mlayer/psroipooling.hpp>
 #include <mlayer/quantize_layer.hpp>
 #include <mlayer/reduction.hpp>
+#include <mlayer/relposbias.hpp>
 #include <mlayer/relu.hpp>
 #include <mlayer/reorg.hpp>
 #include <mlayer/reshape.hpp>
@@ -263,6 +264,7 @@ void register_builtins() {
     add("PSROIPooling", &make_layer<mlayer::PSROIPooling<Layer, MatT, OptionT, ParamDictT, false>>);
     add("ELU", &make_layer<mlayer::ELU<Layer, MatT, OptionT, ParamDictT>>);
     add("Situ", &make_layer<mlayer::Situ<Layer, MatT, OptionT, ParamDictT>>);
+    add("RelPosBias", &make_layer<mlayer::RelPosBias<Layer, MatT, OptionT, ParamDictT>>);
     add("Erf", &make_layer<mlayer::Erf<Layer, MatT, OptionT>>);
     add("Mish", &make_layer<mlayer::Mish<Layer, MatT, OptionT>>);
     add("SELU", &make_layer<mlayer::SELU<Layer, MatT, OptionT, ParamDictT>>);

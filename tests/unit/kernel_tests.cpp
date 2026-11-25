@@ -466,6 +466,7 @@ TEST(Kernel, MatMul2DAndInterpNearest) {
 #include <mlayer/rotaryembed.hpp>
 #include <mlayer/sdpa.hpp>
 #include <mlayer/shortconv.hpp>
+#include <mlayer/relposbias.hpp>
 #include <mlayer/situ.hpp>
 
 TEST(Kernel, GemmConstantBAndC) {
@@ -730,6 +731,67 @@ TEST(Kernel, ShortConvCausalKernel) {
         EXPECT_NEAR(top[1].row(g)[0], 0.0F, 1e-6F);
         EXPECT_NEAR(top[1].row(g)[1], x.row(0)[g], 1e-6F);
         EXPECT_NEAR(top[1].row(g)[2], x.row(1)[g], 1e-6F);
+    }
+}
+
+// Relative-position bias + attention sink: bias[h,q,k] = dot(rel_bias[:,d], R[:,h,q]) - sink[h,q].
+TEST(Kernel, RelPosBiasMatchesReference) {
+    using B = mlayer::RelPosBias<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    B bias;
+    ASSERT_EQ(bias.load_param(mformat::ParamDict()), 0);
+
+    const std::int32_t n_rel = 2;
+    const std::int32_t extent = 3;
+    const std::int32_t heads = 2;
+    const std::int32_t tokens = 2;
+    const std::int32_t n_kv = 4;
+
+    mnet::Mat rel(n_rel, tokens, heads);
+    mnet::Mat table(n_rel, extent);
+    mnet::Mat sink(heads, tokens);
+    mnet::Mat rel_pos(n_kv, tokens);
+
+    for (std::int32_t h = 0; h < heads; ++h) {
+        for (std::int32_t q = 0; q < tokens; ++q) {
+            rel.channel(h).row(q)[0] = 1.0F + static_cast<float>(h) + 0.1F * static_cast<float>(q);
+            rel.channel(h).row(q)[1] = -0.5F + static_cast<float>(q);
+            sink.row(q)[h] = 0.25F * static_cast<float>(h + 1);
+        }
+    }
+    for (std::int32_t d = 0; d < extent; ++d) {
+        table.row(d)[0] = 0.1F * static_cast<float>(d);
+        table.row(d)[1] = 1.0F - 0.2F * static_cast<float>(d);
+    }
+    // distances: key 0..3 for query 0 -> 0,1,2,extent(out of window)
+    rel_pos.row(0)[0] = 0.0F;
+    rel_pos.row(0)[1] = 1.0F;
+    rel_pos.row(0)[2] = 2.0F;
+    rel_pos.row(0)[3] = static_cast<float>(extent);
+    rel_pos.row(1)[0] = 1.0F;
+    rel_pos.row(1)[1] = 100.0F;  // clamps out of window
+    rel_pos.row(1)[2] = 0.0F;
+    rel_pos.row(1)[3] = 2.0F;
+
+    mnet::Option opt;
+    std::vector<mnet::Mat> bottom = {rel, table, sink, rel_pos};
+    std::vector<mnet::Mat> top(1);
+    ASSERT_EQ(bias.forward(bottom, top, opt), 0);
+    ASSERT_EQ(top[0].w, n_kv);
+    ASSERT_EQ(top[0].h, tokens);
+    ASSERT_EQ(top[0].c, heads);
+
+    for (std::int32_t h = 0; h < heads; ++h) {
+        for (std::int32_t q = 0; q < tokens; ++q) {
+            for (std::int32_t k = 0; k < n_kv; ++k) {
+                const float d = rel_pos.row(q)[k];
+                float sum = 0.0F;
+                if (d >= 0.0F && d < static_cast<float>(extent)) {
+                    const auto di = static_cast<std::int32_t>(d);
+                    sum = table.row(di)[0] * rel.channel(h).row(q)[0] + table.row(di)[1] * rel.channel(h).row(q)[1];
+                }
+                EXPECT_NEAR(top[0].channel(h).row(q)[k], sum - sink.row(q)[h], 1e-6F);
+            }
+        }
     }
 }
 
