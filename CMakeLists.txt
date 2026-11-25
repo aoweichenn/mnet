@@ -21,6 +21,7 @@ endif()
 option(mnet_build_tests "Build mnet tests" ${PROJECT_IS_TOP_LEVEL})
 option(mnet_enable_avx2 "Enable AVX2/FMA fast paths (x86_64)" OFF)
 option(mnet_use_simple_omp "Use mplatform's portable OpenMP runtime instead of system OpenMP" OFF)
+option(mnet_enable_dotprod "Enable ARMv8.2 dot-product intrinsics (arm64)" OFF)
 
 if(mnet_use_simple_omp)
     # Must be set before the sibling subprojects are configured; mplatform is
@@ -120,6 +121,9 @@ target_compile_options(mnet_objs PRIVATE ${MNET_WARNINGS})
 if(mnet_enable_avx2 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     target_compile_options(mnet_objs PRIVATE -mavx2 -mfma)
 endif()
+if(mnet_enable_dotprod AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
+    target_compile_options(mnet_objs PRIVATE -march=armv8.2-a+dotprod)
+endif()
 target_link_libraries(mnet_objs PRIVATE mformat::mformat mgraph::mgraph mlayer::mlayer mnet_omp)
 
 add_library(mnet STATIC
@@ -131,6 +135,9 @@ add_library(mnet STATIC
     $<TARGET_OBJECTS:mplatform_objs>)
 if(mnet_enable_avx2 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     target_compile_options(mnet INTERFACE -mavx2 -mfma)
+endif()
+if(mnet_enable_dotprod AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
+    target_compile_options(mnet INTERFACE -march=armv8.2-a+dotprod)
 endif()
 target_link_libraries(mnet PUBLIC mnet_omp)
 add_library(mnet::mnet ALIAS mnet)
