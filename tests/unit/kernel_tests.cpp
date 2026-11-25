@@ -1512,3 +1512,91 @@ TEST(Kernel, LrnMatchesReference) {
         }
     }
 }
+
+TEST(Kernel, ConvolutionGemmPackOddShapes) {
+    // Exercises the pack8 GEMM tail paths: pixel count not a multiple of the
+    // 32-pixel tile and output channels not a multiple of the 4-channel block.
+    struct Shape {
+        std::int32_t kw;
+        std::int32_t stride;
+        std::int32_t pad;
+    };
+    const Shape shapes[3] = {{1, 1, 0}, {3, 1, 1}, {3, 2, 1}};
+
+    for (const Shape& shape : shapes) {
+        const std::int32_t w = 7;
+        const std::int32_t h = 5;
+        const std::int32_t inch = 5;
+        const std::int32_t outch = 6;
+        const std::int32_t maxk = shape.kw * shape.kw;
+
+        mformat::ParamDict pd;
+        pd.set(0, outch);
+        pd.set(1, shape.kw);
+        pd.set(11, shape.kw);
+        pd.set(3, shape.stride);
+        pd.set(13, shape.stride);
+        pd.set(4, shape.pad);
+        pd.set(14, shape.pad);
+        pd.set(15, shape.pad);
+        pd.set(16, shape.pad);
+        pd.set(5, 1);
+        pd.set(6, outch * inch * maxk);
+        pd.set(9, 1);  // ReLU
+
+        mnet::Mat weights[2];
+        weights[0].create(outch * inch * maxk);
+        weights[1].create(outch);
+        std::vector<float> wv(static_cast<std::size_t>(outch * inch * maxk));
+        for (std::int32_t i = 0; i < outch * inch * maxk; ++i) {
+            wv[static_cast<std::size_t>(i)] = std::sin(0.37F * static_cast<float>(i)) * 0.4F;
+            weights[0][static_cast<std::size_t>(i)] = wv[static_cast<std::size_t>(i)];
+        }
+        for (std::int32_t i = 0; i < outch; ++i) {
+            weights[1][static_cast<std::size_t>(i)] = 0.05F * static_cast<float>(i) - 0.1F;
+        }
+
+        Conv conv;
+        ASSERT_EQ(conv.load_param(pd), 0);
+        ASSERT_EQ(conv.load_model(mformat::ModelBinFromMatArray(weights)), 0);
+
+        mnet::Mat input(w, h, inch);
+        std::vector<float> in(static_cast<std::size_t>(w * h * inch));
+        for (std::int32_t i = 0; i < w * h * inch; ++i) {
+            in[static_cast<std::size_t>(i)] = std::sin(0.53F * static_cast<float>(i) + 0.2F);
+            input.channel(i / (w * h))[static_cast<std::size_t>(i % (w * h))] = in[static_cast<std::size_t>(i)];
+        }
+
+        mnet::Option opt;
+        mnet::Mat out;
+        ASSERT_EQ(conv.forward(input, out, opt), 0);
+        ASSERT_EQ(out.w, (w + 2 * shape.pad - shape.kw) / shape.stride + 1);
+        ASSERT_EQ(out.h, (h + 2 * shape.pad - shape.kw) / shape.stride + 1);
+        ASSERT_EQ(out.c, outch);
+
+        for (std::int32_t p = 0; p < outch; ++p) {
+            const float* wp = wv.data() + static_cast<std::size_t>(p * inch * maxk);
+            for (std::int32_t y = 0; y < out.h; ++y) {
+                for (std::int32_t x = 0; x < out.w; ++x) {
+                    float sum = weights[1][static_cast<std::size_t>(p)];
+                    for (std::int32_t q = 0; q < inch; ++q) {
+                        for (std::int32_t ky = 0; ky < shape.kw; ++ky) {
+                            for (std::int32_t kx = 0; kx < shape.kw; ++kx) {
+                                const std::int32_t sy = y * shape.stride + ky - shape.pad;
+                                const std::int32_t sx = x * shape.stride + kx - shape.pad;
+                                if (sy < 0 || sy >= h || sx < 0 || sx >= w) {
+                                    continue;
+                                }
+                                sum += wp[static_cast<std::size_t>((q * maxk) + ky * shape.kw + kx)] *
+                                       in[static_cast<std::size_t>((q * h + sy) * w + sx)];
+                            }
+                        }
+                    }
+                    const float expect = sum > 0.0F ? sum : 0.0F;
+                    EXPECT_NEAR(out.channel(p)[static_cast<std::size_t>(y * out.w + x)], expect, 1e-5F)
+                        << "k=" << shape.kw << " s=" << shape.stride << " p=" << p << " y=" << y << " x=" << x;
+                }
+            }
+        }
+    }
+}

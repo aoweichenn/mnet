@@ -56,8 +56,8 @@ ex.extract("output", out);
   - `squeezenet_v1.1`（227x227x3 → 1000 类 softmax，概率和校验）
   - `shufflenet_v2_x0.5`（224x224x3 → 1000 维输出，覆盖 ConvDW/BN/Slice/ShuffleChannel）
   - `yolo11n`（640x640x3 → `out0`，覆盖 Reshape/Permute/Slice/BinaryOp/MatMul/Interp；
-    Release+AVX2 约 47 ms，峰值 RSS 98 MB；3x3 stride1 按尺寸选 Winograd
-    F(2x2,3x3) 或 F(4x4,3x3)）
+    Release+AVX2 4 线程 29.5–30.3 ms，峰值 RSS 73 MB；1x1 与 3x3 卷积走
+    8 像素×4 输出通道的 pack8 im2col-GEMM 微内核）
   - 另外通过 `mnet_probe` 验证 35 个真实模型（AVX2 Release，含峰值 RSS），覆盖
     pose、scrfd、yolo11n_seg/pose/obb、yolov8n/seg/pose/obb/cls、yolov5s/5s.ncnn/
     5s_6.0、yolov6n、yolov7-tiny、nanodet_m、yolact、yolov8s_worldv2、pelee、
@@ -91,7 +91,7 @@ ex.extract("output", out);
 `mnet_probe --allow-empty` 用于随机输入下检测头输出为空的模型。
 
 数值一致性：`mcnn/tools/parity` 用同一份 param/bin 同时跑上游 ncnn 与 mnet，
-已覆盖 46 类算子：3x3 Winograd 卷积、1x1 卷积、ConvolutionDepthWise、
+已覆盖 46 类算子：3x3 卷积、1x1 卷积、ConvolutionDepthWise、
 Deconvolution、DeconvolutionDepthWise、Gemm（常量转置权重）、InnerProduct、
 Interp、SDPA、Pooling、Softmax、Concat、BatchNorm、GroupNorm、LayerNorm、
 LRN、Permute、Slice、Split、Crop、Squeeze、MatMul、Reshape、
@@ -103,17 +103,20 @@ Noop、Flatten、ShuffleChannel、MemoryData、MultiHeadAttention（prefill 与
 `MNET_NCNN_PARITY=1` 运行 46 类层对齐，`MNET_NCNN_MODELS=1` 运行 34 个模型
 的端到端对齐（模型清单见 `mcnn/tools/parity/models.txt`，可用参数替换）。
 另提供 `tools/parity/model_compare`：同一模型文件与输入同时跑 ncnn 与 mnet，
-可比较任意 blob 或多个输出。34 个带权重模型端到端对齐，最差绝对误差 ≤ 8.5e-3
-（worldv2，相对 4e-4），其余 ≤ 3.5e-4：yolo11n 1.2e-4、yolov8n 1.2e-4、
-PP-OCRv5 rec 1.3e-4（含 MHA）、yolact 1.3e-5、nanodet_m 3.3e-6、squeezenet 4.7e-7。
+可比较任意 blob 或多个输出。34 个带权重模型端到端对齐，判定按每个通道取
+`max(1e-3, 1e-3 * 通道幅值)`：除 worldv2 外最大绝对误差 ≤ 2.4e-4
+（yolo11n 8.0e-5、yolov8n 7.4e-5、PP-OCRv5 rec 1.4e-4、yolact 1.4e-5、
+nanodet_m 3.6e-6、squeezenet 4.5e-7）；worldv2 3.9e-2，但其通道幅值约 200，
+相对误差 1.8e-4，与 ncnn 自身 Winograd/SGEMM 两种算法之间的差异
+（同一 blob 上 max 1.26e-2）同一量级。
 该工具先后定位并修复了 Interp 双线性边界越界外插和 Reduction 4D→3D 形状映射
 两个 bug，并确认 `yolov4-tiny-opt` 只能在导出尺寸 416 下运行（固定 Crop）。
 
 尚未完成：
 
 - SSD 系列在随机输入下无检测框（`DetectionOutput` 返回空，行为与 ncnn 一致）；
-- yolo11n 约 1.45 倍慢于 ncnn（46–47 ms vs 32 ms），热点仍是 3x3 Convolution
-  （Winograd 后约 31 ms）与 1x1 Convolution（约 12 ms）；
-  `MultiHeadAttention` 的 KV-cache 与量化路径尚未移植（遇到时返回 -1）；
+- graph 级 elempack 传播（把数据在整个图里保持 pack8）尚未实现：当前只在卷积
+  微内核内部打包，层与层之间仍是 1 通道布局；
+  `MultiHeadAttention` 的量化路径尚未移植（fp32 路径含 KV-cache）；
 - 与 ncnn 参考输出的逐层数值对比测试；
 - 安装包导出已支持（`cmake --install` + `find_package(mnet)` 消费测试通过）。
