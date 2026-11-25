@@ -49,7 +49,8 @@ ex.extract("output", out);
   `YoloV5Focus`、`MemoryData`、`PriorBox`、`DetectionOutput`、`Eltwise`、`Noop`、
   `UnaryOp`、`ExpandDims`、`Reduction`、`Einsum`、`Crop`、`Squeeze`、
   `YoloDetectionOutput`、`Yolov3DetectionOutput`、`ShortConv`、`GatedDeltaRule`、
-  `MultiHeadAttention`（fp32、自注意力/交叉注意力、可选 mask）、`Proposal`、
+  `MultiHeadAttention`（fp32 与量化：weight-block int4/int6/int8、legacy int8；
+  自注意力/交叉注意力、可选 mask、KV cache）、`Proposal`、
   `PSROIPooling`（Faster-RCNN / RFCN 的 ROI 生成与池化）、`ELU`、`SELU`、`Erf`、
   `Mish`、`Softplus`、`PixelShuffle`、`Reorg`、`Convolution1D`、`Convolution3D`。
 - `tests/unit/model_tests.cpp` 已端到端跑通：
@@ -98,8 +99,9 @@ LRN、Permute、Slice、Split、Crop、Squeeze、MatMul、Reshape、
 DetectionOutput、Yolov3DetectionOutput、YoloDetectionOutput、PriorBox、
 Eltwise、BinaryOp（张量与标量）、PReLU、Clip、ExpandDims、Reduction、
 Einsum、UnaryOp、Swish、ReLU、Sigmoid、HardSigmoid、HardSwish、Dropout、
-Noop、Flatten、ShuffleChannel、MemoryData、MultiHeadAttention（prefill 与
-单 token KV-cache 解码），最大绝对误差均 ≤ 1e-6。
+Noop、Flatten、ShuffleChannel、MemoryData、MultiHeadAttention（fp32 prefill/
+KV-cache 解码 + int8/int4 权重量化 + legacy int8），共 63 组对比，
+最大绝对误差 ≤ 1e-6。
 `MNET_NCNN_PARITY=1` 运行 46 类层对齐，`MNET_NCNN_MODELS=1` 运行 34 个模型
 的端到端对齐（模型清单见 `mcnn/tools/parity/models.txt`，可用参数替换）。
 另提供 `tools/parity/model_compare`：同一模型文件与输入同时跑 ncnn 与 mnet，
@@ -117,6 +119,5 @@ nanodet_m 3.6e-6、squeezenet 4.5e-7）；worldv2 3.9e-2，但其通道幅值约
 - SSD 系列在随机输入下无检测框（`DetectionOutput` 返回空，行为与 ncnn 一致）；
 - graph 级 elempack 传播（把数据在整个图里保持 pack8）尚未实现：当前只在卷积
   微内核内部打包，层与层之间仍是 1 通道布局；
-  `MultiHeadAttention` 的量化路径尚未移植（fp32 路径含 KV-cache）；
 - 与 ncnn 参考输出的逐层数值对比测试；
 - 安装包导出已支持（`cmake --install` + `find_package(mnet)` 消费测试通过）。
