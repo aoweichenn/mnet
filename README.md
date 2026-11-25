@@ -42,7 +42,7 @@ CPU 路径已在四个平台构建并跑通（数值 smoke：`Scale` 2x+1、1x1 
 | Windows x86_64 | llvm-mingw clang（交叉编译，`-static`） | `mplatform::simpleomp` | 构建 + smoke + probe（Windows 原生运行） |
 | Android arm64 | NDK r27c clang（API 26，`c++_static`，`-Dmnet_enable_dotprod=ON`） | `mplatform::simpleomp` | 构建 + smoke + probe + Qwen3 0.6B LLM（24.4 ms/tok @5T） |
 | macOS M4 Pro | CLT clang（`-Dmnet_enable_dotprod=ON`） | `mplatform::simpleomp` | 构建 + smoke + Qwen3 0.6B LLM（23.5 ms/tok） |
-| Windows x86_64 | llvm-mingw clang 交叉编译 | `mplatform::simpleomp` | 构建 + smoke + Qwen3 0.6B LLM（33.8 ms/tok @8T） |
+| Windows x86_64 | llvm-mingw clang 交叉编译 | `mplatform::simpleomp` | 构建 + smoke + Qwen3 0.6B LLM（27.0 ms/tok @12T） |
 
 无系统 OpenMP 的平台使用：
 
@@ -168,7 +168,9 @@ decode 46.5 ms/tok。
 - 任务队列按任务数逐个 `signal()`，不再 `broadcast()` 唤醒整个线程池；
 - worker 进入任务前把自己固定到大核集合
   （`pin_current_thread_to_big_cores()`，与 cgroup 允许集合取交集），
-  `MPLATFORM_OMP_AFFINITY=all|fits|big` 可覆盖策略。
+  `MPLATFORM_OMP_AFFINITY=big|fits|all` 可覆盖策略。默认值按架构区分：
+  ARM 固定大核（小核顺序执行、慢数倍），x86 只在“线程数不超过大核数”时固定
+  （E-core 仍有 P-core 的 60–70%，12 线程时 27.0 ms/tok vs 固定大核 36.7）。
 
 `PP_OCRv5_mobile_rec`（320x48x3，随机输入，Xiaomi 13 Ultra，5 个大核）：
 
