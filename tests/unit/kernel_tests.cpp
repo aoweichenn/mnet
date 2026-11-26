@@ -1078,9 +1078,11 @@ TEST(Kernel, StftMatchesReference) {
     std::vector<mnet::Mat> bottom = {signal, window, step};
     std::vector<mnet::Mat> top(1);
     ASSERT_EQ(stft.forward(bottom, top, opt), 0);
-    ASSERT_EQ(top[0].w, 3);   // bins = 4/2 + 1
-    ASSERT_EQ(top[0].h, 5);   // frames
-    ASSERT_EQ(top[0].c, 2);
+    ASSERT_EQ(top[0].dims, 4);
+    ASSERT_EQ(top[0].w, 2);   // real/imag
+    ASSERT_EQ(top[0].h, 3);   // bins = 4/2 + 1
+    ASSERT_EQ(top[0].d, 1);
+    ASSERT_EQ(top[0].c, 5);   // frames
 
     for (std::int32_t f = 0; f < 5; ++f) {
         for (std::int32_t k = 0; k < 3; ++k) {
@@ -1093,19 +1095,19 @@ TEST(Kernel, StftMatchesReference) {
                 re += v * std::cos(angle);
                 im -= v * std::sin(angle);
             }
-            EXPECT_NEAR(top[0].channel(0).row(f)[k], re, 1e-5F);
-            EXPECT_NEAR(top[0].channel(1).row(f)[k], im, 1e-5F);
+            EXPECT_NEAR(top[0].channel(f).row(k)[0], re, 1e-5F);
+            EXPECT_NEAR(top[0].channel(f).row(k)[1], im, 1e-5F);
         }
     }
 
     // DC bin is the frame sum, Nyquist alternates sign: [1,0,0,0] -> [1,1,1].
     EXPECT_NEAR(top[0].channel(0).row(0)[0], 1.0F, 1e-5F);
-    EXPECT_NEAR(top[0].channel(0).row(0)[1], 1.0F, 1e-5F);
-    EXPECT_NEAR(top[0].channel(0).row(0)[2], 1.0F, 1e-5F);
+    EXPECT_NEAR(top[0].channel(0).row(1)[0], 1.0F, 1e-5F);
+    EXPECT_NEAR(top[0].channel(0).row(2)[0], 1.0F, 1e-5F);
     // frame 1 is samples[2..5] = [0,0,0,1] -> X = [1, +i, -1]
-    EXPECT_NEAR(top[0].channel(0).row(1)[1], 0.0F, 1e-5F);
+    EXPECT_NEAR(top[0].channel(1).row(1)[0], 0.0F, 1e-5F);
     EXPECT_NEAR(top[0].channel(1).row(1)[1], 1.0F, 1e-5F);
-    EXPECT_NEAR(top[0].channel(0).row(1)[2], -1.0F, 1e-5F);
+    EXPECT_NEAR(top[0].channel(1).row(2)[0], -1.0F, 1e-5F);
 }
 
 // Gather along axis 0 (1-D and 2-D) and axis 1 (2-D).
