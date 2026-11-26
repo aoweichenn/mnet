@@ -292,6 +292,68 @@ TEST(Kernel, BinaryOpAddAndScalarMul) {
     }
 }
 
+#include <mlayer/compare.hpp>
+#include <mlayer/where.hpp>
+
+TEST(Kernel, CompareMasksWithPerChannelBroadcast) {
+    using Cmp = mlayer::Compare<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+    mformat::ParamDict pd;
+    pd.set(0, 4);   // greater
+    Cmp gt;
+    ASSERT_EQ(gt.load_param(pd), 0);
+
+    constexpr std::int32_t w = 4;
+    constexpr std::int32_t h = 3;
+    mnet::Mat a(w, h, 1);
+    mnet::Mat b(1, h, 1);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            a.channel(0).row(y)[x] = static_cast<float>(x);
+        }
+        b.channel(0).row(y)[0] = static_cast<float>(y);
+    }
+    std::vector<mnet::Mat> bottoms = {a, b};
+    std::vector<mnet::Mat> tops(1);
+    mnet::Option opt;
+    ASSERT_EQ(gt.forward(bottoms, tops, opt), 0);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            const float expect = x > y ? 1.0F : 0.0F;
+            EXPECT_FLOAT_EQ(tops[0].channel(0).row(y)[x], expect) << "x=" << x << " y=" << y;
+        }
+    }
+}
+
+TEST(Kernel, WhereSelectsBroadcastCondition) {
+    using Wh = mlayer::Where<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+    mformat::ParamDict pd;
+    Wh where;
+    ASSERT_EQ(where.load_param(pd), 0);
+
+    constexpr std::int32_t w = 4;
+    constexpr std::int32_t h = 2;
+    mnet::Mat cond(w, h, 1);
+    mnet::Mat a(1, h, 1);
+    mnet::Mat b(1, h, 1);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            cond.channel(0).row(y)[x] = (x % 2 == 0) ? 1.0F : 0.0F;
+        }
+        a.channel(0).row(y)[0] = 10.0F + static_cast<float>(y);
+        b.channel(0).row(y)[0] = 20.0F + static_cast<float>(y);
+    }
+    std::vector<mnet::Mat> bottoms = {cond, a, b};
+    std::vector<mnet::Mat> tops(1);
+    mnet::Option opt;
+    ASSERT_EQ(where.forward(bottoms, tops, opt), 0);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            const float expect = (x % 2 == 0) ? 10.0F + static_cast<float>(y) : 20.0F + static_cast<float>(y);
+            EXPECT_FLOAT_EQ(tops[0].channel(0).row(y)[x], expect) << "x=" << x << " y=" << y;
+        }
+    }
+}
+
 // A per-channel vector must broadcast along the height axis, not the width:
 // ONNX [1, C, 1] against [1, C, L] is the most common transformer pattern.
 TEST(Kernel, BinaryOpBroadcastHeightVector) {
