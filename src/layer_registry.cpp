@@ -205,6 +205,8 @@ void register_builtins() {
     add("AbsVal", &make_layer<mlayer::AbsVal<Layer, MatT, OptionT>>);
     add("BNLL", &make_layer<mlayer::BNLL<Layer, MatT, OptionT>>);
     add("Clip", &make_layer<mlayer::Clip<Layer, MatT, OptionT, ParamDictT>>);
+    add("Compare", &make_layer<mlayer::Compare<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Where", &make_layer<mlayer::Where<Layer, MatT, OptionT, ParamDictT, false>>);
     add("CELU", &make_layer<mlayer::CELU<Layer, MatT, OptionT, ParamDictT>>);
     add("Shrink", &make_layer<mlayer::Shrink<Layer, MatT, OptionT, ParamDictT>>);
     add("DeepCopy", &make_layer<mlayer::DeepCopy<Layer, MatT, OptionT>>);
