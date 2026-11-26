@@ -554,6 +554,24 @@ TEST(Kernel, BinaryOpMixesTwoAndThreeDimensionalBlobs) {
 #include <mlayer/permute.hpp>
 #include <mlayer/rmsnorm.hpp>
 
+TEST(Kernel, PermuteForced4DFrom3D) {
+    using Perm = mlayer::Permute<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+    mformat::ParamDict pd; pd.set(0, 114);
+    Perm perm; ASSERT_EQ(perm.load_param(pd), 0);
+    mnet::Mat in(4, 3, 2);
+    for (std::int32_t t=0;t<2;++t)
+        for (std::int32_t c=0;c<3;++c)
+            for (std::int32_t d=0;d<4;++d)
+                in.channel(t).row(c)[d] = static_cast<float>(t*100+c*10+d);
+    mnet::Mat out; mnet::Option opt;
+    ASSERT_EQ(perm.forward(in,out,opt),0);
+    EXPECT_EQ(out.dims,4); EXPECT_EQ(out.w,4); EXPECT_EQ(out.h,2); EXPECT_EQ(out.d,1); EXPECT_EQ(out.c,3);
+    for (std::int32_t c=0;c<3;++c)
+        for (std::int32_t t=0;t<2;++t)
+            for (std::int32_t d=0;d<4;++d)
+                EXPECT_FLOAT_EQ(out.channel(c).depth(0).row(t)[d], static_cast<float>(t*100+c*10+d));
+}
+
 TEST(Kernel, PermuteSwapsWidthAndHeight) {
     using Perm = mlayer::Permute<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
 
