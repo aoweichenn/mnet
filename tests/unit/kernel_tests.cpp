@@ -318,6 +318,38 @@ TEST(Kernel, ExpandDimsScalarAxisMappings) {
 
 }
 
+#include <mlayer/reshape.hpp>
+
+TEST(Kernel, ReshapeExpandDimsCropChain) {
+    using Reshape = mlayer::Reshape<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    using ED = mlayer::ExpandDims<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+    using Crop = mlayer::Crop<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+    mnet::Option opt;
+    mnet::Mat flat(1024);
+    for (std::int32_t i = 0; i < 1024; ++i) {
+        flat[static_cast<std::size_t>(i)] = static_cast<float>(i);
+    }
+    mformat::ParamDict p_reshape;
+    p_reshape.set(0, 1024); p_reshape.set(1, 1);
+    Reshape reshape; ASSERT_EQ(reshape.load_param(p_reshape), 0);
+    std::vector<mnet::Mat> r_out(1);
+    ASSERT_EQ(reshape.forward(flat, r_out[0], opt), 0);
+    EXPECT_EQ(r_out[0].w, 1024); EXPECT_EQ(r_out[0].h, 1);
+
+    mformat::ParamDict p_ed; p_ed.set(0, 2);   // prepend w
+    ED ed; ASSERT_EQ(ed.load_param(p_ed), 0);
+    std::vector<mnet::Mat> e_out(1);
+    ASSERT_EQ(ed.forward(r_out[0], e_out[0], opt), 0);
+    EXPECT_EQ(e_out[0].w, 1); EXPECT_EQ(e_out[0].h, 1024); EXPECT_EQ(e_out[0].c, 1);
+
+    mformat::ParamDict p_crop; p_crop.set(1, 0); p_crop.set(4, 512);
+    Crop crop; ASSERT_EQ(crop.load_param(p_crop), 0);
+    std::vector<mnet::Mat> bottoms = {e_out[0]}; std::vector<mnet::Mat> c_out(1);
+    ASSERT_EQ(crop.forward(bottoms, c_out, opt), 0);
+    EXPECT_EQ(c_out[0].w, 1); EXPECT_EQ(c_out[0].h, 512);
+    EXPECT_FLOAT_EQ(c_out[0].channel(0).row(511)[0], 511.0F);
+}
+
 #include <mlayer/compare.hpp>
 #include <mlayer/where.hpp>
 
