@@ -292,6 +292,88 @@ TEST(Kernel, BinaryOpAddAndScalarMul) {
     }
 }
 
+// A per-channel vector must broadcast along the height axis, not the width:
+// ONNX [1, C, 1] against [1, C, L] is the most common transformer pattern.
+TEST(Kernel, BinaryOpBroadcastHeightVector) {
+    using BinOp = mlayer::BinaryOp<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+    mformat::ParamDict pd;
+    pd.set(0, 0);
+    BinOp add;
+    ASSERT_EQ(add.load_param(pd), 0);
+
+    constexpr std::int32_t w = 8;
+    constexpr std::int32_t h = 4;
+    mnet::Mat a(w, h, 1);
+    mnet::Mat b(1, h, 1);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            a.channel(0).row(y)[x] = static_cast<float>(x) + 100.0F * static_cast<float>(y);
+        }
+        b.channel(0).row(y)[0] = 1000.0F + static_cast<float>(y);
+    }
+
+    std::vector<mnet::Mat> bottoms = {a, b};
+    std::vector<mnet::Mat> tops(1);
+    mnet::Option opt;
+    opt.num_threads = 2;
+    ASSERT_EQ(add.forward(bottoms, tops, opt), 0);
+    ASSERT_EQ(tops[0].w, w);
+    ASSERT_EQ(tops[0].h, h);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            const float expect = static_cast<float>(x) + 100.0F * static_cast<float>(y) + 1000.0F + static_cast<float>(y);
+            EXPECT_FLOAT_EQ(tops[0].channel(0).row(y)[x], expect) << "at x=" << x << " y=" << y;
+        }
+    }
+
+    // Same values but B as a 1-D blob: the emitter words constants that way.
+    mnet::Mat flat(h);
+    for (std::int32_t y = 0; y < h; ++y) {
+        flat[static_cast<std::size_t>(y)] = 1000.0F + static_cast<float>(y);
+    }
+    std::vector<mnet::Mat> bottoms_flat = {a, flat};
+    std::vector<mnet::Mat> tops_flat(1);
+    ASSERT_EQ(add.forward(bottoms_flat, tops_flat, opt), 0);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            const float expect = static_cast<float>(x) + 100.0F * static_cast<float>(y) + 1000.0F + static_cast<float>(y);
+            EXPECT_FLOAT_EQ(tops_flat[0].channel(0).row(y)[x], expect) << "flat at x=" << x << " y=" << y;
+        }
+    }
+}
+
+// A 2-D (w,h) blob meeting a 3-D (w,h,1) blob must stay elementwise.
+TEST(Kernel, BinaryOpMixesTwoAndThreeDimensionalBlobs) {
+    using BinOp = mlayer::BinaryOp<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+    mformat::ParamDict pd;
+    pd.set(0, 0);
+    BinOp add;
+    ASSERT_EQ(add.load_param(pd), 0);
+
+    constexpr std::int32_t w = 5;
+    constexpr std::int32_t h = 3;
+    mnet::Mat a(w, h);        // dims == 2
+    mnet::Mat b(w, h, 1);     // dims == 3
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            a.row(y)[x] = static_cast<float>(x + y);
+            b.channel(0).row(y)[x] = static_cast<float>(10 * x + y);
+        }
+    }
+    std::vector<mnet::Mat> bottoms = {a, b};
+    std::vector<mnet::Mat> tops(1);
+    mnet::Option opt;
+    ASSERT_EQ(add.forward(bottoms, tops, opt), 0);
+    ASSERT_EQ(tops[0].w, w);
+    ASSERT_EQ(tops[0].h, h);
+    ASSERT_EQ(tops[0].c, 1);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            EXPECT_FLOAT_EQ(tops[0].channel(0).row(y)[x], static_cast<float>(11 * x + 2 * y));
+        }
+    }
+}
+
 #include <mlayer/permute.hpp>
 #include <mlayer/rmsnorm.hpp>
 
