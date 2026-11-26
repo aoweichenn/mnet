@@ -18,6 +18,7 @@
 #include <mlayer/cast.hpp>
 #include <mlayer/celu.hpp>
 #include <mlayer/clip.hpp>
+#include <mlayer/compare.hpp>
 #include <mlayer/concat.hpp>
 #include <mlayer/convolution.hpp>
 #include <mlayer/convolution1d.hpp>
@@ -115,6 +116,7 @@
 #include <mlayer/threshold.hpp>
 #include <mlayer/tile.hpp>
 #include <mlayer/unaryop.hpp>
+#include <mlayer/where.hpp>
 #include <mlayer/unfold.hpp>
 #include <mlayer/yolodetectionoutput.hpp>
 #include <mlayer/yolov3detectionoutput.hpp>
