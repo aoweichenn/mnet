@@ -1225,6 +1225,42 @@ TEST(Kernel, StftMatchesReference) {
     EXPECT_NEAR(top[0].channel(1).row(2)[0], -1.0F, 1e-5F);
 }
 
+TEST(Kernel, StftBluesteinMatchesDirectDft) {
+    using S = mlayer::Stft<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    constexpr std::int32_t MNET_STFT_BLUESTEIN_FRAME = 20;
+    S stft;
+    ASSERT_EQ(stft.load_param(mformat::ParamDict()), 0);
+
+    mnet::Mat signal(MNET_STFT_BLUESTEIN_FRAME);
+    for (std::int32_t i = 0; i < MNET_STFT_BLUESTEIN_FRAME; ++i) {
+        signal[static_cast<std::size_t>(i)] = static_cast<float>((i * 7) % 11) - 5.0F;
+    }
+    mnet::Mat window(MNET_STFT_BLUESTEIN_FRAME);
+    window.fill(1.0F);
+    mnet::Mat step(1);
+    step[0] = static_cast<float>(MNET_STFT_BLUESTEIN_FRAME);
+
+    mnet::Option opt;
+    std::vector<mnet::Mat> bottom = {signal, window, step};
+    std::vector<mnet::Mat> top(1);
+    ASSERT_EQ(stft.forward(bottom, top, opt), 0);
+    ASSERT_EQ(top[0].c, 1);
+
+    for (std::int32_t k = 0; k < MNET_STFT_BLUESTEIN_FRAME / 2 + 1; ++k) {
+        double re = 0.0;
+        double im = 0.0;
+        for (std::int32_t n = 0; n < MNET_STFT_BLUESTEIN_FRAME; ++n) {
+            const double angle = 2.0 * 3.14159265358979323846 * static_cast<double>(k) * static_cast<double>(n) /
+                                 static_cast<double>(MNET_STFT_BLUESTEIN_FRAME);
+            const double value = signal[static_cast<std::size_t>(n)];
+            re += value * std::cos(angle);
+            im -= value * std::sin(angle);
+        }
+        EXPECT_NEAR(top[0].channel(0).row(k)[0], re, 1e-4F);
+        EXPECT_NEAR(top[0].channel(0).row(k)[1], im, 1e-4F);
+    }
+}
+
 // Gather along axis 0 (1-D and 2-D) and axis 1 (2-D).
 TEST(Kernel, GatherIndices) {
     using G = mlayer::Gather<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
