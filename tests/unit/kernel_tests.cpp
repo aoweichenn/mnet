@@ -320,6 +320,20 @@ TEST(Kernel, ExpandDimsScalarAxisMappings) {
 
 #include <mlayer/reduction.hpp>
 
+TEST(Kernel, UnarySqrtScalarAndVector) {
+    using U = mlayer::UnaryOp<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+    mformat::ParamDict pd; pd.set(0, 5);
+    U op; ASSERT_EQ(op.load_param(pd), 0);
+    mnet::Option opt;
+    mnet::Mat one(1); one[0] = 0.07177F;
+    ASSERT_EQ(op.forward_inplace(one, opt), 0);
+    EXPECT_NEAR(one[0], 0.267900F, 1e-5F);
+    mnet::Mat vec(4); vec[0]=1; vec[1]=4; vec[2]=9; vec[3]=16;
+    ASSERT_EQ(op.forward_inplace(vec, opt), 0);
+    EXPECT_FLOAT_EQ(vec[0],1); EXPECT_FLOAT_EQ(vec[1],2);
+    EXPECT_FLOAT_EQ(vec[2],3); EXPECT_FLOAT_EQ(vec[3],4);
+}
+
 TEST(Kernel, ReductionScalarAxisSumsWidthToVector) {
     using Red = mlayer::Reduction<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
     mformat::ParamDict pd;
