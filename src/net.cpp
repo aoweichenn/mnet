@@ -625,6 +625,10 @@ std::int32_t Net::load_model(const char* bin_path) {
         mformat::ModelBinFromDataReader model_bin(reader);
         for (std::size_t i = 0; i < this->d->layers.size(); ++i) {
             ret = this->d->layers[i]->load_model(model_bin);
+            if (std::getenv("MNET_TRACE_BIN") != nullptr) {
+                const long pos = std::ftell(file);
+                std::fprintf(stderr, "[binload] %zu %s %ld\n", i, this->d->layer_types[i].c_str(), pos);
+            }
             if (ret != 0) {
                 const std::string& type = this->d->layer_types[i];
                 detail::write_diagnostic(std::string("mnet: layer load_model failed: ") + type + "\n");
