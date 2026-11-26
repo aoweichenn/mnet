@@ -1289,6 +1289,28 @@ TEST(Kernel, GatherIndices) {
     EXPECT_FLOAT_EQ(top[0][2], 40.0F);
 }
 
+TEST(Kernel, GatherSqueezedVectorIndex) {
+    using G = mlayer::Gather<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    mformat::ParamDict pd;
+    pd.set(0, 0);
+    G gather;
+    ASSERT_EQ(gather.load_param(pd), 0);
+
+    mnet::Mat data(3, 1, 1);
+    data[0] = 1.0F;
+    data[1] = 2.0F;
+    data[2] = 3.0F;
+    mnet::Mat index(1);
+    index[0] = 1.0F;
+
+    mnet::Option opt;
+    std::vector<mnet::Mat> bottom = {data, index};
+    std::vector<mnet::Mat> top(1);
+    ASSERT_EQ(gather.forward(bottom, top, opt), 0);
+    ASSERT_EQ(top[0].w, 1);
+    EXPECT_FLOAT_EQ(top[0][0], 2.0F);
+}
+
 // ScatterND for the iSTFT overlap-add: flat 1-D data, [n,1] indices, n updates.
 TEST(Kernel, ScatterNdOverlapAdd) {
     using S = mlayer::ScatterND<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
