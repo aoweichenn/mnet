@@ -318,6 +318,30 @@ TEST(Kernel, ExpandDimsScalarAxisMappings) {
 
 }
 
+#include <mlayer/reduction.hpp>
+
+TEST(Kernel, ReductionScalarAxisSumsWidthToVector) {
+    using Red = mlayer::Reduction<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+    mformat::ParamDict pd;
+    pd.set(0, 0);   // sum
+    pd.set(6, 1);   // reduce width (2-D: 0=h, 1=w)
+    Red red; ASSERT_EQ(red.load_param(pd), 0);
+    mnet::Mat in(4, 3);
+    for (std::int32_t y = 0; y < 3; ++y) {
+        for (std::int32_t x = 0; x < 4; ++x) {
+            in.row(y)[x] = static_cast<float>(y * 10 + x + 1);
+        }
+    }
+    mnet::Mat out;
+    mnet::Option opt;
+    ASSERT_EQ(red.forward(in, out, opt), 0);
+    EXPECT_EQ(out.dims, 1);
+    EXPECT_EQ(out.w, 3);
+    EXPECT_FLOAT_EQ(out[0], 10.0F);
+    EXPECT_FLOAT_EQ(out[1], 50.0F);
+    EXPECT_FLOAT_EQ(out[2], 90.0F);
+}
+
 #include <mlayer/reshape.hpp>
 
 TEST(Kernel, ReshapeExpandDimsCropChain) {
