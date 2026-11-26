@@ -18,11 +18,15 @@
 #include <mlayer/einsum.hpp>
 #include <mlayer/expanddims.hpp>
 #include <mlayer/gateddeltarule.hpp>
+#include <mlayer/gathernd.hpp>
+#include <mlayer/gatherelements.hpp>
 #include <mlayer/gemm.hpp>
 #include <mlayer/lrn.hpp>
 #include <mlayer/multiheadattention.hpp>
+#include <mlayer/nonzero.hpp>
 #include <mlayer/proposal.hpp>
 #include <mlayer/psroipooling.hpp>
+#include <mlayer/range.hpp>
 #include <mlayer/reduction.hpp>
 #include <mlayer/roipooling.hpp>
 #include <mlayer/shortconv.hpp>
@@ -1309,6 +1313,84 @@ TEST(Kernel, GatherSqueezedVectorIndex) {
     ASSERT_EQ(gather.forward(bottom, top, opt), 0);
     ASSERT_EQ(top[0].w, 1);
     EXPECT_FLOAT_EQ(top[0][0], 2.0F);
+}
+
+TEST(Kernel, RangeAndDynamicGatherOps) {
+    using R = mlayer::Range<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    R range;
+    ASSERT_EQ(range.load_param(mformat::ParamDict()), 0);
+    mnet::Mat start(1);
+    start[0] = 2.0F;
+    mnet::Mat limit(1);
+    limit[0] = 7.0F;
+    mnet::Mat delta(1);
+    delta[0] = 2.0F;
+    mnet::Option opt;
+    std::vector<mnet::Mat> range_bottom = {start, limit, delta};
+    std::vector<mnet::Mat> range_top(1);
+    ASSERT_EQ(range.forward(range_bottom, range_top, opt), 0);
+    ASSERT_EQ(range_top[0].w, 3);
+    EXPECT_FLOAT_EQ(range_top[0][0], 2.0F);
+    EXPECT_FLOAT_EQ(range_top[0][1], 4.0F);
+    EXPECT_FLOAT_EQ(range_top[0][2], 6.0F);
+
+    mnet::Mat mask(3, 2, 1);
+    mask.channel(0).row(0)[0] = 0.0F;
+    mask.channel(0).row(0)[1] = 1.0F;
+    mask.channel(0).row(0)[2] = 0.0F;
+    mask.channel(0).row(1)[0] = 2.0F;
+    mask.channel(0).row(1)[1] = 0.0F;
+    mask.channel(0).row(1)[2] = 3.0F;
+    using NZ = mlayer::NonZero<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    NZ nonzero;
+    ASSERT_EQ(nonzero.load_param(mformat::ParamDict()), 0);
+    mnet::Mat nz;
+    ASSERT_EQ(nonzero.forward(mask, nz, opt), 0);
+    ASSERT_EQ(nz.w, 3);
+    ASSERT_EQ(nz.h, 3);
+    EXPECT_FLOAT_EQ(nz.row(0)[0], 0.0F);
+    EXPECT_FLOAT_EQ(nz.row(1)[1], 1.0F);
+    EXPECT_FLOAT_EQ(nz.row(2)[2], 2.0F);
+
+    mnet::Mat indices(3, 2);
+    indices.row(0)[0] = 0.0F;
+    indices.row(0)[1] = 0.0F;
+    indices.row(0)[2] = 1.0F;
+    indices.row(1)[0] = 0.0F;
+    indices.row(1)[1] = 1.0F;
+    indices.row(1)[2] = 2.0F;
+    using GND = mlayer::GatherND<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    GND gather_nd;
+    ASSERT_EQ(gather_nd.load_param(mformat::ParamDict()), 0);
+    std::vector<mnet::Mat> gnd_bottom = {mask, indices};
+    std::vector<mnet::Mat> gnd_top(1);
+    ASSERT_EQ(gather_nd.forward(gnd_bottom, gnd_top, opt), 0);
+    ASSERT_EQ(gnd_top[0].w, 2);
+    EXPECT_FLOAT_EQ(gnd_top[0][0], 1.0F);
+    EXPECT_FLOAT_EQ(gnd_top[0][1], 3.0F);
+
+    mnet::Mat elements(3, 2);
+    elements.row(0)[0] = 10.0F;
+    elements.row(0)[1] = 20.0F;
+    elements.row(0)[2] = 30.0F;
+    elements.row(1)[0] = 40.0F;
+    elements.row(1)[1] = 50.0F;
+    elements.row(1)[2] = 60.0F;
+    mnet::Mat element_indices(1, 2);
+    element_indices.row(0)[0] = 2.0F;
+    element_indices.row(1)[0] = 0.0F;
+    using GE = mlayer::GatherElements<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+    GE gather_elements;
+    mformat::ParamDict ge_pd;
+    ge_pd.set(0, 0);
+    ASSERT_EQ(gather_elements.load_param(ge_pd), 0);
+    std::vector<mnet::Mat> ge_bottom = {elements, element_indices};
+    std::vector<mnet::Mat> ge_top(1);
+    ASSERT_EQ(gather_elements.forward(ge_bottom, ge_top, opt), 0);
+    ASSERT_EQ(ge_top[0].w, 1);
+    ASSERT_EQ(ge_top[0].h, 2);
+    EXPECT_FLOAT_EQ(ge_top[0].row(0)[0], 30.0F);
+    EXPECT_FLOAT_EQ(ge_top[0].row(1)[0], 40.0F);
 }
 
 // ScatterND for the iSTFT overlap-add: flat 1-D data, [n,1] indices, n updates.

@@ -49,6 +49,8 @@
 #include <mlayer/gateddeltarule.hpp>
 #include <mlayer/gelu.hpp>
 #include <mlayer/gather.hpp>
+#include <mlayer/gatherelements.hpp>
+#include <mlayer/gathernd.hpp>
 #include <mlayer/gemm.hpp>
 #include <mlayer/glu.hpp>
 #include <mlayer/gridsample.hpp>
@@ -69,6 +71,7 @@
 #include <mlayer/multiheadattention.hpp>
 #include <mlayer/mvn.hpp>
 #include <mlayer/noop.hpp>
+#include <mlayer/nonzero.hpp>
 #include <mlayer/normalize.hpp>
 #include <mlayer/packing.hpp>
 #include <mlayer/padding.hpp>
@@ -83,6 +86,8 @@
 #include <mlayer/proposal.hpp>
 #include <mlayer/psroipooling.hpp>
 #include <mlayer/quantize_layer.hpp>
+#include <mlayer/randomnormallike.hpp>
+#include <mlayer/range.hpp>
 #include <mlayer/reduction.hpp>
 #include <mlayer/relposbias.hpp>
 #include <mlayer/relu.hpp>
@@ -274,6 +279,11 @@ void register_builtins() {
     add("RelPosBias", &make_layer<mlayer::RelPosBias<Layer, MatT, OptionT, ParamDictT>>);
     add("Stft", &make_layer<mlayer::Stft<Layer, MatT, OptionT, ParamDictT>>);
     add("Gather", &make_layer<mlayer::Gather<Layer, MatT, OptionT, ParamDictT>>);
+    add("GatherND", &make_layer<mlayer::GatherND<Layer, MatT, OptionT, ParamDictT>>);
+    add("GatherElements", &make_layer<mlayer::GatherElements<Layer, MatT, OptionT, ParamDictT>>);
+    add("NonZero", &make_layer<mlayer::NonZero<Layer, MatT, OptionT, ParamDictT>>);
+    add("Range", &make_layer<mlayer::Range<Layer, MatT, OptionT, ParamDictT>>);
+    add("RandomNormalLike", &make_layer<mlayer::RandomNormalLike<Layer, MatT, OptionT, ParamDictT>>);
     add("ScatterND", &make_layer<mlayer::ScatterND<Layer, MatT, OptionT, ParamDictT>>);
     add("Erf", &make_layer<mlayer::Erf<Layer, MatT, OptionT>>);
     add("Mish", &make_layer<mlayer::Mish<Layer, MatT, OptionT>>);
