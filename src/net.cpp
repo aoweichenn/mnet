@@ -174,8 +174,15 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
             Mat& top = blob_mats[top_index];
             if (layer->support_inplace) {
                 const bool exclusive = bottom.refcount != nullptr && *bottom.refcount == 1;
+                const auto layer_it = this->layer_index.find(layer);
+                const bool last_consumer = layer_it != this->layer_index.end() &&
+                                           static_cast<std::size_t>(bottom_index) < this->blob_last_use.size() &&
+                                           this->blob_last_use[static_cast<std::size_t>(bottom_index)] == layer_it->second;
                 if (top_index != bottom_index) {
-                    if (exclusive) {
+                    // Mat refcount only tracks Mat object aliases, not other
+                    // graph consumers. Aliasing a shared bottom here silently
+                    // corrupts every later reader (e.g. GELU's x + x^3 path).
+                    if (exclusive && last_consumer) {
                         top = bottom;
                     } else {
                         top = bottom.clone(opt.blob_allocator);
