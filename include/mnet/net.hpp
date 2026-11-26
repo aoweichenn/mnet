@@ -19,6 +19,11 @@ namespace mnet {
 
 struct NetPrivate;
 
+// Process default memory budget: MNET_MAX_MEM_MB when set, otherwise 50% of
+// MemTotal on Linux (WSL boxes are small and an OOM kill takes the parent
+// shell with it). Returns 0 when no safe default is known (macOS/Android).
+[[nodiscard]] std::size_t default_memory_budget_bytes();
+
 // Standalone CPU runtime: graph loading through mgraph/mformat and layer
 // execution through mlayer. It never includes or links ncnn.
 class Net {

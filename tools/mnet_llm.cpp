@@ -245,11 +245,10 @@ int main(int argc, char** argv) {
     std::size_t mem_budget = 0;
     if (max_mem_mb > 0) {
         mem_budget = static_cast<std::size_t>(max_mem_mb) * 1024U * 1024U;
-    } else if (const char* env = std::getenv("MNET_MAX_MEM_MB")) {
-        const long long mb = std::atoll(env);
-        if (mb > 0) {
-            mem_budget = static_cast<std::size_t>(mb) * 1024U * 1024U;
-        }
+    } else {
+        // Same default as Net (50% of MemTotal on Linux), so the three
+        // sub-graphs share one cap instead of each taking the full amount.
+        mem_budget = mnet::default_memory_budget_bytes();
     }
     const auto file_bytes = [](const std::string& path) -> std::size_t {
         std::ifstream f(path, std::ios::binary | std::ios::ate);

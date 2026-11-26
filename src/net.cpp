@@ -343,6 +343,30 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
     }
 };
 
+std::size_t default_memory_budget_bytes() {
+    if (const char* env = std::getenv("MNET_MAX_MEM_MB")) {
+        const long long mb = std::atoll(env);
+        return mb > 0 ? static_cast<std::size_t>(mb) * 1024U * 1024U : 0;
+    }
+#if defined(__linux__)
+    // /proc/meminfo: MemTotal in kB. Half of it leaves room for the weight
+    // buffers (allocated outside the budget) and the rest of the session.
+    std::FILE* file = std::fopen("/proc/meminfo", "r");
+    if (file != nullptr) {
+        char line[256];
+        while (std::fgets(line, sizeof(line), file) != nullptr) {
+            unsigned long long kb = 0;
+            if (std::sscanf(line, "MemTotal: %llu kB", &kb) == 1 && kb > 0) {
+                std::fclose(file);
+                return static_cast<std::size_t>(kb / 2U) * 1024U;
+            }
+        }
+        std::fclose(file);
+    }
+#endif
+    return 0;
+}
+
 Net::Net() : d(new NetPrivate()) {
     this->opt_.num_threads = 1;
     static_cast<void>(this->d->blob_allocator.set_size_compare_ratio(0.0F));
@@ -354,14 +378,9 @@ Net::Net() : d(new NetPrivate()) {
     this->opt_.kvcache_allocator = &this->d->budget_blob;
 
     // WSL runs are frequently killed by the kernel OOM killer, which also
-    // takes down the calling shell. A default budget keeps that from
-    // happening; MNET_MAX_MEM_MB=0 removes it explicitly.
-    if (const char* env = std::getenv("MNET_MAX_MEM_MB")) {
-        const long long mb = std::atoll(env);
-        if (mb > 0) {
-            this->set_memory_budget_bytes(static_cast<std::size_t>(mb) * 1024U * 1024U);
-        }
-    }
+    // takes down the calling shell. The budget is on by default; setting
+    // MNET_MAX_MEM_MB=0 disables it explicitly.
+    this->set_memory_budget_bytes(default_memory_budget_bytes());
 }
 
 void Net::set_memory_budget_bytes(std::size_t bytes) {
