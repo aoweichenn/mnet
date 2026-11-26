@@ -501,6 +501,25 @@ TEST(Kernel, BinaryOpBroadcastHeightVector) {
 }
 
 // A 2-D (w,h) blob meeting a 3-D (w,h,1) blob must stay elementwise.
+TEST(Kernel, BinaryOpRowVectorTimesChannelVector) {
+    using BinOp = mlayer::BinaryOp<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+    mformat::ParamDict pd; pd.set(0, 2);
+    BinOp mul; ASSERT_EQ(mul.load_param(pd), 0);
+    constexpr std::int32_t t = 8;
+    constexpr std::int32_t c = 3;
+    mnet::Mat a(1, t);          // (w=1,h=T)
+    mnet::Mat b(c, 1, 1);       // (w=C,h=1,c=1)
+    for (std::int32_t i=0;i<t;++i) a.row(i)[0] = static_cast<float>(i+1);
+    for (std::int32_t i=0;i<c;++i) b.channel(0).row(0)[i] = static_cast<float>(i+2);
+    std::vector<mnet::Mat> bottoms={a,b}, tops(1);
+    mnet::Option opt;
+    ASSERT_EQ(mul.forward(bottoms,tops,opt),0);
+    EXPECT_EQ(tops[0].w,c); EXPECT_EQ(tops[0].h,t); EXPECT_EQ(tops[0].c,1);
+    for (std::int32_t y=0;y<t;++y)
+        for (std::int32_t x=0;x<c;++x)
+            EXPECT_FLOAT_EQ(tops[0].channel(0).row(y)[x], static_cast<float>((x+2)*(y+1)));
+}
+
 TEST(Kernel, BinaryOpMixesTwoAndThreeDimensionalBlobs) {
     using BinOp = mlayer::BinaryOp<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
     mformat::ParamDict pd;
