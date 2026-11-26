@@ -11,6 +11,8 @@
 #include <mformat/model_bin.hpp>
 #include <mformat/param_dict.hpp>
 #include <mlayer/convolution.hpp>
+#include <mlayer/convolution1d.hpp>
+#include <mlayer/cumulativesum.hpp>
 #include <mlayer/convolutiondepthwise.hpp>
 #include <mlayer/crop.hpp>
 #include <mlayer/einsum.hpp>
@@ -570,6 +572,101 @@ TEST(Kernel, PermuteForced4DFrom3D) {
         for (std::int32_t t=0;t<2;++t)
             for (std::int32_t d=0;d<4;++d)
                 EXPECT_FLOAT_EQ(out.channel(c).depth(0).row(t)[d], static_cast<float>(t*100+c*10+d));
+}
+
+TEST(Kernel, Convolution1DMatchesNumpy) {
+    constexpr std::int32_t MNET_CONVOLUTION1D_TEST_WIDTH = 4;
+    constexpr std::int32_t MNET_CONVOLUTION1D_TEST_CHANNELS = 2;
+    constexpr std::int32_t MNET_CONVOLUTION1D_TEST_KERNEL = 3;
+    constexpr std::int32_t MNET_CONVOLUTION1D_TEST_PAD = 1;
+    constexpr std::int32_t MNET_CONVOLUTION1D_TEST_WEIGHT_COUNT =
+        MNET_CONVOLUTION1D_TEST_CHANNELS * MNET_CONVOLUTION1D_TEST_CHANNELS * MNET_CONVOLUTION1D_TEST_KERNEL;
+    constexpr float MNET_CONVOLUTION1D_TEST_FIRST_BIAS = 0.5F;
+    constexpr float MNET_CONVOLUTION1D_TEST_SECOND_BIAS = -1.0F;
+
+    using Conv = mlayer::Convolution1D<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, mformat::ModelBin,
+                                       false, mnet::activation_ss, mnet::copy_make_border, mnet::flatten>;
+
+    mformat::ParamDict pd;
+    pd.set(0, MNET_CONVOLUTION1D_TEST_CHANNELS);
+    pd.set(1, MNET_CONVOLUTION1D_TEST_KERNEL);
+    pd.set(2, 1);
+    pd.set(3, 1);
+    pd.set(4, MNET_CONVOLUTION1D_TEST_PAD);
+    pd.set(5, 1);
+    pd.set(6, MNET_CONVOLUTION1D_TEST_WEIGHT_COUNT);
+
+    Conv conv;
+    ASSERT_EQ(conv.load_param(pd), 0);
+    conv.weight_data.create(MNET_CONVOLUTION1D_TEST_WEIGHT_COUNT);
+    for (std::int32_t i = 0; i < MNET_CONVOLUTION1D_TEST_WEIGHT_COUNT; ++i) {
+        conv.weight_data[static_cast<std::size_t>(i)] = static_cast<float>(i + 1);
+    }
+    conv.bias_data.create(MNET_CONVOLUTION1D_TEST_CHANNELS);
+    conv.bias_data[0] = MNET_CONVOLUTION1D_TEST_FIRST_BIAS;
+    conv.bias_data[1] = MNET_CONVOLUTION1D_TEST_SECOND_BIAS;
+
+    mnet::Mat input(MNET_CONVOLUTION1D_TEST_WIDTH, MNET_CONVOLUTION1D_TEST_CHANNELS);
+    for (std::int32_t channel = 0; channel < MNET_CONVOLUTION1D_TEST_CHANNELS; ++channel) {
+        for (std::int32_t position = 0; position < MNET_CONVOLUTION1D_TEST_WIDTH; ++position) {
+            input.row(channel)[position] =
+                static_cast<float>(channel * (MNET_CONVOLUTION1D_TEST_WIDTH + 1) + position + 1);
+        }
+    }
+
+    mnet::Option opt;
+    mnet::Mat output;
+    ASSERT_EQ(conv.forward(input, output, opt), 0);
+    ASSERT_EQ(output.w, MNET_CONVOLUTION1D_TEST_WIDTH);
+    ASSERT_EQ(output.h, MNET_CONVOLUTION1D_TEST_CHANNELS);
+
+    for (std::int32_t output_channel = 0; output_channel < MNET_CONVOLUTION1D_TEST_CHANNELS; ++output_channel) {
+        for (std::int32_t position = 0; position < MNET_CONVOLUTION1D_TEST_WIDTH; ++position) {
+            float expected =
+                output_channel == 0 ? MNET_CONVOLUTION1D_TEST_FIRST_BIAS : MNET_CONVOLUTION1D_TEST_SECOND_BIAS;
+            for (std::int32_t input_channel = 0; input_channel < MNET_CONVOLUTION1D_TEST_CHANNELS; ++input_channel) {
+                for (std::int32_t kernel = 0; kernel < MNET_CONVOLUTION1D_TEST_KERNEL; ++kernel) {
+                    const auto input_position = position + kernel - MNET_CONVOLUTION1D_TEST_PAD;
+                    if (input_position >= 0 && input_position < MNET_CONVOLUTION1D_TEST_WIDTH) {
+                        const auto weight_index = (output_channel * MNET_CONVOLUTION1D_TEST_CHANNELS + input_channel) *
+                                                      MNET_CONVOLUTION1D_TEST_KERNEL +
+                                                  kernel;
+                        expected += input.row(input_channel)[input_position] *
+                                    conv.weight_data[static_cast<std::size_t>(weight_index)];
+                    }
+                }
+            }
+            EXPECT_FLOAT_EQ(output.row(output_channel)[position], expected);
+        }
+    }
+}
+
+TEST(Kernel, CumulativeSumAxisMatchesHeight) {
+    constexpr std::int32_t MNET_CUMULATIVE_SUM_TEST_WIDTH = 3;
+    constexpr std::int32_t MNET_CUMULATIVE_SUM_TEST_HEIGHT = 4;
+    using CumSum = mlayer::CumulativeSum<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
+
+    mformat::ParamDict pd;
+    pd.set(0, 1);
+    CumSum sum;
+    ASSERT_EQ(sum.load_param(pd), 0);
+
+    mnet::Mat input(MNET_CUMULATIVE_SUM_TEST_WIDTH, MNET_CUMULATIVE_SUM_TEST_HEIGHT, 1);
+    for (std::int32_t y = 0; y < MNET_CUMULATIVE_SUM_TEST_HEIGHT; ++y) {
+        for (std::int32_t x = 0; x < MNET_CUMULATIVE_SUM_TEST_WIDTH; ++x) {
+            input.channel(0).row(y)[x] = static_cast<float>(y * MNET_CUMULATIVE_SUM_TEST_WIDTH + x + 1);
+        }
+    }
+
+    mnet::Option opt;
+    ASSERT_EQ(sum.forward_inplace(input, opt), 0);
+    for (std::int32_t x = 0; x < MNET_CUMULATIVE_SUM_TEST_WIDTH; ++x) {
+        float expected = 0.0F;
+        for (std::int32_t y = 0; y < MNET_CUMULATIVE_SUM_TEST_HEIGHT; ++y) {
+            expected += static_cast<float>(y * MNET_CUMULATIVE_SUM_TEST_WIDTH + x + 1);
+            EXPECT_FLOAT_EQ(input.channel(0).row(y)[x], expected);
+        }
+    }
 }
 
 TEST(Kernel, PermuteSwapsWidthAndHeight) {
