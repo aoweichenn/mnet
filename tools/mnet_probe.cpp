@@ -143,6 +143,9 @@ int main(int argc, char** argv) {
 
     mnet::Net net;
     net.opt().num_threads = threads;
+    // Dumping/extracting needs every blob alive: light mode frees a blob after
+    // its recorded last use, which mis-handles inputs shared by later layers.
+    net.opt().use_light_mode = false;
     if (max_mem_mb > 0) {
         net.set_memory_budget_bytes(static_cast<std::size_t>(max_mem_mb) * 1024U * 1024U);
     }
