@@ -292,6 +292,32 @@ TEST(Kernel, BinaryOpAddAndScalarMul) {
     }
 }
 
+#include <mlayer/expanddims.hpp>
+
+TEST(Kernel, ExpandDimsScalarAxisMappings) {
+    using ED = mlayer::ExpandDims<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;
+    const auto run = [](const mnet::Mat& in, std::int32_t axis, std::int32_t ew, std::int32_t eh,
+                        std::int32_t ec) {
+        mformat::ParamDict pd;
+        pd.set(0, axis);
+        ED ed;
+        EXPECT_EQ(ed.load_param(pd), 0);
+        std::vector<mnet::Mat> tops(1);
+        mnet::Option opt;
+        EXPECT_EQ(ed.forward(in, tops[0], opt), 0);
+        EXPECT_EQ(tops[0].dims, 3);
+        EXPECT_EQ(tops[0].w, ew);
+        EXPECT_EQ(tops[0].h, eh);
+        EXPECT_EQ(tops[0].c, ec);
+    };
+
+    mnet::Mat mat(4, 3);
+    run(mat, 0, 4, 3, 1);       // expand c
+    run(mat, 1, 4, 1, 3);       // expand h
+    run(mat, 2, 1, 4, 3);       // expand w
+
+}
+
 #include <mlayer/compare.hpp>
 #include <mlayer/where.hpp>
 
