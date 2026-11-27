@@ -27,6 +27,480 @@
 namespace mnet::detail::compute {
 namespace {
 
+// llama.cpp's mul_mm Q2_0 kernel. MIT licence, Copyright (c) 2023-2024 The ggml
+// authors (https://github.com/ggml-org/llama.cpp); assembled verbatim for this
+// repository by benchmarks/metal/port_llama_mul_mm.py, see docs/mat-mat-kernel.md.
+// It compiles into a separate library because it brings its own common.h helpers
+// and macros, which would collide with the kernels above.
+//
+// Used for the FFN down projection by default: on that shape it measures 4.84
+// TFLOP/s against the fp16-tile kernel's 4.24, and its fp32 weight tile leaves
+// the final logits closer to the CPU reference (3.96e-3 against 4.70e-3). Using
+// it for all three projections is 2% faster again but takes the deviation to
+// 5.30e-3, past the fast path's 4.754e-3 bound, so it stays opt-in
+// (MNET_MAT_MAT_LLAMA=1; 0 disables it, 3 restricts it to gate/up).
+constexpr const char* kLlamaMatMatSource = R"MSL(
+#include <metal_stdlib>
+#include <metal_simdgroup>
+#include <metal_simdgroup_matrix>
+using namespace metal;
+
+
+
+#ifdef GGML_METAL_HAS_TENSOR
+
+#endif
+
+using namespace metal;
+
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
+#define SWAP(x, y) { auto tmp = (x); (x) = (y); (y) = tmp; }
+
+#define PAD2(x, n) (((x) + (n) - 1) & ~((n) - 1))
+
+#define FOR_UNROLL(x) _Pragma("clang loop unroll(full)") for (x)
+
+#define N_SIMDWIDTH 32 // assuming SIMD group size is 32
+
+// ref: https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf
+//
+// cmd:
+//   .../usr/bin/metal -dM -E -c                             ggml/src/ggml-metal/kernels/<src>.metal
+//   .../usr/bin/metal -dM -E -c -target air64-apple-ios14.0 ggml/src/ggml-metal/kernels/<src>.metal
+//
+#if __METAL_VERSION__ < 310 && defined(GGML_METAL_HAS_BF16)
+#undef GGML_METAL_HAS_BF16
+#endif
+
+#if defined(GGML_METAL_HAS_BF16)
+typedef matrix<bfloat, 4, 4> bfloat4x4;
+typedef matrix<bfloat, 2, 4> bfloat2x4;
+#endif
+
+constexpr constant static float kvalues_iq4nl_f[16] = {
+    -127.f, -104.f, -83.f, -65.f, -49.f, -35.f, -22.f, -10.f, 1.f, 13.f, 25.f, 38.f, 53.f, 69.f, 89.f, 113.f
+};
+
+// E2M1 values, shared by MXFP4 and NVFP4
+constexpr constant static float kvalues_mxfp4_f[16] = {
+    0, .5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f, -0, -.5f, -1.f, -1.5f, -2.f, -3.f, -4.f, -6.f
+};
+
+static inline int best_index_int8(int n, constant float * val, float x) {
+    if (x <= val[0]) return 0;
+    if (x >= val[n-1]) return n-1;
+    int ml = 0, mu = n-1;
+    while (mu-ml > 1) {
+        int mav = (ml+mu)/2;
+        if (x < val[mav]) mu = mav; else ml = mav;
+    }
+    return x - val[mu-1] < val[mu] - x ? mu-1 : mu;
+}
+
+static inline float e8m0_to_fp32(uint8_t x) {
+    uint32_t bits;
+
+    if (x == 0) {
+        bits = 0x00400000;
+    } else {
+        bits = (uint32_t) x << 23;
+    }
+
+    return as_type<float>(bits);
+}
+
+// UE4M3: unsigned, 4 exponent bits with bias 7, 3 mantissa bits - the NVFP4 sub-block scale
+static inline float ue4m3_to_fp32(uint8_t x) {
+    if (x == 0x7F) {
+        return 0.0f;
+    }
+
+    const int e = (x >> 3) & 0xF;
+    const int m = x & 0x7;
+
+    return e == 0 ? m*(1.0f/512.0f) : as_type<float>((uint32_t) (((e + 120) << 23) | (m << 20)));
+}
+
+static inline float dot(float x, float y) {
+    return x*y;
+}
+
+static inline float sum(float x) {
+    return x;
+}
+
+static inline float sum(float4 x) {
+    return x[0] + x[1] + x[2] + x[3];
+}
+
+enum ggml_sort_order {
+    GGML_SORT_ORDER_ASC,
+    GGML_SORT_ORDER_DESC,
+};
+
+constant float GELU_COEF_A     = 0.044715f;
+constant float GELU_QUICK_COEF = -1.702f;
+constant float SQRT_2_OVER_PI  = 0.79788456080286535587989211986876f;
+constant float SQRT_2_INV      = 0.70710678118654752440084436210484f;
+
+// based on Abramowitz and Stegun formula 7.1.26 or similar Hastings' approximation
+// ref: https://www.johndcook.com/blog/python_erf/
+constant float p_erf  = 0.3275911f;
+constant float a1_erf = 0.254829592f;
+constant float a2_erf = -0.284496736f;
+constant float a3_erf = 1.421413741f;
+constant float a4_erf = -1.453152027f;
+constant float a5_erf = 1.061405429f;
+
+template<typename T>
+inline T erf_approx(T x) {
+    T sign_x = sign(x);
+    x = fabs(x);
+    T t = 1.0f / (1.0f + p_erf * x);
+    T y = 1.0f - (((((a5_erf * t + a4_erf) * t) + a3_erf) * t + a2_erf) * t + a1_erf) * t * exp(-x * x);
+    return sign_x * y;
+}
+
+template<typename T> T elu_approx(T x);
+
+template<> inline float elu_approx<float>(float x) {
+    return (x > 0.f) ? x : (exp(x) - 1);
+}
+
+template<> inline float4 elu_approx<float4>(float4 x) {
+    float4 res;
+
+    res[0] = (x[0] > 0.0f) ? x[0] : (exp(x[0]) - 1.0f);
+    res[1] = (x[1] > 0.0f) ? x[1] : (exp(x[1]) - 1.0f);
+    res[2] = (x[2] > 0.0f) ? x[2] : (exp(x[2]) - 1.0f);
+    res[3] = (x[3] > 0.0f) ? x[3] : (exp(x[3]) - 1.0f);
+
+    return res;
+}
+
+template <typename T> struct value_type;
+template <> struct value_type<float4x4> { typedef float type; };
+template <> struct value_type<half4x4>  { typedef half  type; };
+#if defined(GGML_METAL_HAS_BF16)
+template <> struct value_type<bfloat4x4> { typedef bfloat type; };
+#endif
+
+template <typename T> struct value_type_4x4;
+template <> struct value_type_4x4<float>  { typedef float4x4 type; };
+template <> struct value_type_4x4<half>   { typedef half4x4  type; };
+#if defined(GGML_METAL_HAS_BF16)
+template <> struct value_type_4x4<bfloat> { typedef bfloat4x4 type; };
+#endif
+
+template <typename T> struct value_type_2x4;
+template <> struct value_type_2x4<float>  { typedef float2x4 type; };
+template <> struct value_type_2x4<half>   { typedef half2x4  type; };
+#if defined(GGML_METAL_HAS_BF16)
+template <> struct value_type_2x4<bfloat> { typedef bfloat2x4 type; };
+#endif
+
+template <typename T> struct value_type_8x8;
+template <> struct value_type_8x8<float>  { typedef simdgroup_float8x8 type; };
+template <> struct value_type_8x8<half>   { typedef simdgroup_half8x8  type; };
+#if defined(GGML_METAL_HAS_BF16)
+template <> struct value_type_8x8<bfloat> { typedef simdgroup_bfloat8x8 type; };
+#endif
+
+template <typename T> struct value_type_4;
+template <> struct value_type_4<float>  { typedef float4 type; };
+template <> struct value_type_4<half>   { typedef half4  type; };
+template <> struct value_type_4<int32_t> { typedef int4 type; };
+#if defined(GGML_METAL_HAS_BF16)
+template <> struct value_type_4<bfloat> { typedef bfloat4 type; };
+#endif
+
+template <typename T> struct value_type_2;
+template <> struct value_type_2<float>  { typedef float2 type; };
+template <> struct value_type_2<half>   { typedef half2  type; };
+#if defined(GGML_METAL_HAS_BF16)
+template <> struct value_type_2<bfloat> { typedef bfloat2 type; };
+#endif
+
+#define QK2_0 64
+typedef half ggml_half_x;
+typedef struct {
+    ggml_half_x d;
+    uint8_t qs[QK2_0 / 4];
+} block_q2_0;
+
+#define QK_NL 16
+template <typename type4x4>
+void dequantize_q2_0(device const block_q2_0 * xb, short il, thread type4x4 & reg) {
+    device const uint8_t * qs = xb->qs;
+    const float d = xb->d;
+
+    const int byte_offset = il * 4;  // il*16 elements = il*4 bytes (4 elements per byte)
+    float4x4 reg_f;
+
+    for (int i = 0; i < 4; i++) {
+        const uint8_t b = qs[byte_offset + i];
+        reg_f[i][0] = ((float)((b >> 0) & 3) - 1.0f) * d;
+        reg_f[i][1] = ((float)((b >> 2) & 3) - 1.0f) * d;
+        reg_f[i][2] = ((float)((b >> 4) & 3) - 1.0f) * d;
+        reg_f[i][3] = ((float)((b >> 6) & 3) - 1.0f) * d;
+    }
+
+    reg = (type4x4) reg_f;
+}
+
+typedef struct {
+    int32_t  ne00;
+    int32_t  ne02;
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  ne12;
+    uint64_t nb10;
+    uint64_t nb11;
+    uint64_t nb12;
+    uint64_t nb13;
+    int32_t  ne0;
+    int32_t  ne1;
+    int16_t  r2;
+    int16_t  r3;
+} ggml_metal_kargs_mul_mm;
+
+constant auto FC_mul_mm_bc_inp = false;
+constant auto FC_mul_mm_bc_out = false;
+constant auto FC_mul_mm_ne12 = 1;
+constant auto FC_mul_mm_ne13 = 1;
+constant auto FC_mul_mm_r2 = 1;
+constant auto FC_mul_mm_r3 = 1;
+constant auto FC_mul_mm_id_map0_ne02 = 0;
+template<
+    typename S0, typename S1,
+    typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread typename value_type_4x4<S0>::type &),
+    typename T0, typename T1>
+kernel void kernel_mul_mm(
+        constant ggml_metal_kargs_mul_mm & args,
+        device const char * src0,
+        device const char * src1,
+        device       char * dst,
+        threadgroup  char * shmem [[threadgroup(0)]],
+        uint3  tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]],
+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+
+    using S0_4x4 = typename value_type_4x4<S0>::type;
+    using S0_8x8 = typename value_type_8x8<S0>::type;
+    using S1_2x4 = typename value_type_2x4<S1>::type;
+    using S1_8x8 = typename value_type_8x8<S1>::type;
+    using T0_4x4 = typename value_type_4x4<T0>::type;
+    using T1_2x4 = typename value_type_2x4<T1>::type;
+
+    constexpr int NR0 = 64;
+    constexpr int NR1 = 32;
+
+    constexpr int NK  = 32;
+    constexpr int NL0 = NK/16;
+    constexpr int NL1 = NK/8;
+
+    threadgroup S0 * sa = (threadgroup S0 *)(shmem);
+    threadgroup S1 * sb = (threadgroup S1 *)(shmem + NR0*NK*sizeof(S0));
+
+    const int im = tgpig.z;
+    const int r0 = tgpig.y*NR0;
+    const int r1 = tgpig.x*NR1;
+
+    // if this block is of 64x32 shape or smaller
+    const short nr0 = (args.ne0 - r0 < NR0) ? (args.ne0 - r0) : NR0;
+    const short nr1 = (args.ne1 - r1 < NR1) ? (args.ne1 - r1) : NR1;
+
+    // a thread shouldn't load data outside of the matrix
+    const short lr0 = ((short)tiitg/NL0) < nr0 ? ((short)tiitg/NL0) : nr0 - 1; // 0 .. 63
+    const short lr1 = ((short)tiitg/NL1) < nr1 ? ((short)tiitg/NL1) : nr1 - 1; // 0 .. 31
+
+    const short il0 = (tiitg % NL0);
+
+    short il = il0;
+
+    const int i12 = im % FC_mul_mm_ne12;
+    const int i13 = im / FC_mul_mm_ne12;
+
+    const uint64_t offset0 = (i12/FC_mul_mm_r2)*args.nb02 + (i13/FC_mul_mm_r3)*args.nb03;
+    const short    offset1 = il0/nl;
+
+    device const block_q * x = (device const block_q *)(src0 + args.nb01*(r0 + lr0) + offset0) + offset1;
+
+    const short iy = 8*(tiitg % NL1);
+
+    device const T1 * y = (device const T1 *)(src1
+        + args.nb13*i13
+        + args.nb12*i12
+        + args.nb11*(r1 + lr1)
+        + args.nb10*iy);
+
+    S0_8x8 ma[4];
+    S1_8x8 mb[2];
+
+    simdgroup_float8x8 mc[8];
+
+    for (short i = 0; i < 8; i++){
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
+    }
+
+    for (int loop_k = 0; loop_k < args.ne00; loop_k += NK) {
+        // load data and store to threadgroup memory
+        if (is_same<T0_4x4, block_q>::value && FC_mul_mm_bc_inp) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            // no need for dequantization
+            for (short i = 0; i < 16; i++) {
+                const short sx = 2*il0 + i/8;
+                const short sy = (tiitg/NL0)/8;
+
+              //const short lx = i%8;
+              //const short ly = (tiitg/NL0)%8;
+                const short lx = (tiitg/NL0)%8;
+                const short ly = i%8;
+
+                const short ib = 8*sx + sy;
+
+                *(sa + 64*ib + 8*ly + lx) = loop_k + 16*il + i < args.ne00 ? (S0) *((device T0 *) x + i) : 0;
+            }
+        } else {
+            S0_4x4 temp_a;
+            dequantize_func(x, il, temp_a);
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            FOR_UNROLL (short i = 0; i < 16; i++) {
+                const short sx = 2*il0 + i/8;
+                const short sy = (tiitg/NL0)/8;
+
+              //const short lx = i%8;
+              //const short ly = (tiitg/NL0)%8;
+                const short lx = (tiitg/NL0)%8;
+                const short ly = i%8;
+
+                const short ib = 8*sx + sy;
+
+                // NOTE: this is massively slower.. WTF?
+                //sa[64*ib + 8*ly + lx] = temp_a[i/4][i%4];
+
+                *(sa + 64*ib + 8*ly + lx) = temp_a[i/4][i%4];
+            }
+        }
+
+        if (FC_mul_mm_bc_inp) {
+            for (short i = 0; i < 8; ++i) {
+                const short sx = (tiitg%NL1);
+                const short sy = (tiitg/NL1)/8;
+
+                const short lx = i;
+                const short ly = (tiitg/NL1)%8;
+              //const short lx = (tiitg/NL1)%8;
+              //const short ly = i;
+
+                const short ib = 4*sx + sy;
+
+                *(sb + 64*ib + 8*ly + lx) = loop_k + iy + i < args.ne00 ? (S1) *((device T1 *) y + i) : 0;
+            }
+        } else {
+            const short sx = (tiitg%NL1);
+            const short sy = (tiitg/NL1)/8;
+
+          //const short dx = sx;
+          //const short dy = sy;
+
+            const short ly = (tiitg/NL1)%8;
+
+            const short ib = 4*sx + sy;
+
+            *(threadgroup S1_2x4 *)(sb + 64*ib + 8*ly) = (S1_2x4)(*((device T1_2x4 *) y));
+        }
+
+        il = (il + 2 < nl) ? il + 2 : il % 2;
+        x  = (il < 2) ? x + (2 + nl - 1)/nl : x;
+
+        y += NK;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // load matrices from threadgroup memory and conduct outer products
+        threadgroup const S0 * lsma = (sa + 4*64*(sgitg%2));
+        threadgroup const S1 * lsmb = (sb + 2*64*(sgitg/2));
+
+        FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 4; i++) {
+                simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 2; i++) {
+                simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 8; i++){
+                simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
+            }
+
+            lsma += 8*64;
+            lsmb += 4*64;
+        }
+    }
+
+    if (!FC_mul_mm_bc_out || (r0 + NR0 <= args.ne0 && r1 + NR1 <= args.ne1)) {
+        // if no bounds checks on the output are needed, we can directly write to device memory
+        device float * C = (device float *) dst +
+            (r0 + 32*(sgitg &  1)) + \
+            (uint64_t) (r1 + 16*(sgitg >> 1))*args.ne0 + (uint64_t) im*args.ne1*args.ne0;
+
+        for (short i = 0; i < 8; i++) {
+            simdgroup_store(mc[i], C + 8*(i%4) + (uint64_t) 8*args.ne0*(i/4), args.ne0, 0, false);
+        }
+    } else {
+        // block is smaller than 64x32, we should avoid writing data outside of the matrix
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
+
+        for (short i = 0; i < 8; i++) {
+            simdgroup_store(mc[i], temp_str + 8*(i%4) + 8*NR0*(i/4), NR0, 0, false);
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (sgitg == 0) {
+            for (int j = tiitg; j < nr1; j += NR1) {
+                device float  * D  = (device float  *) dst + r0 + (uint64_t) (r1 + j)*args.ne0 + (uint64_t) im*args.ne1*args.ne0;
+                device float4 * D4 = (device float4 *) D;
+
+                threadgroup float  * C  = temp_str + (j*NR0);
+                threadgroup float4 * C4 = (threadgroup float4 *) C;
+
+                int i = 0;
+                for (; i < nr0/4; i++) {
+                    *(D4 + i) = *(C4 + i);
+                }
+
+                i *= 4;
+                for (; i < nr0; i++) {
+                    *(D + i) = *(C + i);
+                }
+            }
+        }
+    }
+}
+
+typedef decltype(kernel_mul_mm<half, half, block_q2_0, 4, dequantize_q2_0, float, float>) mul_mm_t;
+
+// llama.cpp's default (half accumulation) and the f32-precision variant.
+template [[host_name("kernel_mul_mm_q2_0_f32")]]      kernel mul_mm_t kernel_mul_mm<half,  half,  block_q2_0, 4, dequantize_q2_0, float, float>;
+template [[host_name("kernel_mul_mm_q2_0_f32_f32p")]] kernel mul_mm_t kernel_mul_mm<float, float, block_q2_0, 4, dequantize_q2_0, float, float>;
+)MSL";
+
 constexpr const char* kQ2_0Source = R"MSL(
 #include <metal_stdlib>
 #include <metal_simdgroup>
@@ -1467,6 +1941,10 @@ struct SsmLayer {
     std::uint32_t ring = 0;
 };
 
+// MNET_MAT_MAT_LLAMA: 1 both FFN projections, 2 the down projection only,
+// 3 gate/up only. Declared here because the library is compiled during setup.
+int llama_mat_mat_mask();
+
 struct MetalState {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
@@ -1476,6 +1954,7 @@ struct MetalState {
     id<MTLComputePipelineState> fast_f32_multi_pipeline = nil;
     id<MTLComputePipelineState> mat_mat_pipeline = nil;
     id<MTLComputePipelineState> mat_mat_f16_pipeline = nil;
+    id<MTLComputePipelineState> llama_mat_mat_pipeline = nil;
     id<MTLComputePipelineState> dequant_pipeline = nil;
     id<MTLComputePipelineState> q8_quantize_pipeline = nil;
     id<MTLComputePipelineState> swiglu_pipeline = nil;
@@ -1644,6 +2123,93 @@ id<MTLComputePipelineState> tiled_mat_mat_pipeline(MetalState& s) {
         return value == nullptr || std::atoi(value) != 0;
     }();
     return f16 && s.mat_mat_f16_pipeline != nil ? s.mat_mat_f16_pipeline : s.mat_mat_pipeline;
+}
+
+// The argument block and launch geometry of llama.cpp's mul_mm. Kept out of the
+// shared path: its summation order is not the CPU's, so it is only usable where
+// the fast path already is, and it needs 64 rows, 32 tokens and 64 columns.
+struct LlamaMatMatArgs {
+    std::int32_t ne00;
+    std::int32_t ne02;
+    std::uint64_t nb01;
+    std::uint64_t nb02;
+    std::uint64_t nb03;
+    std::int32_t ne12;
+    std::uint64_t nb10;
+    std::uint64_t nb11;
+    std::uint64_t nb12;
+    std::uint64_t nb13;
+    std::int32_t ne0;
+    std::int32_t ne1;
+    std::int16_t r2;
+    std::int16_t r3;
+};
+
+// MNET_MAT_MAT_LLAMA: 1 both FFN projections, 2 the down projection only (the
+// default), 3 gate/up only, 0 the tiled kernel everywhere. Compiled on first use
+// so the exact path never pays for it.
+int llama_mat_mat_mask() {
+    static const int mask = [] {
+        const char* value = std::getenv("MNET_MAT_MAT_LLAMA");
+        return value != nullptr ? std::atoi(value) : 2;
+    }();
+    return mask;
+}
+
+void ensure_llama_mat_mat(MetalState& s) {
+    static std::once_flag once;
+    std::call_once(once, [&s] {
+        NSError* error = nil;
+        MTLCompileOptions* options = [MTLCompileOptions new];
+        options.fastMathEnabled = NO;
+        id<MTLLibrary> library =
+            [s.device newLibraryWithSource:[NSString stringWithUTF8String:kLlamaMatMatSource]
+                                    options:options
+                                      error:&error];
+        id<MTLFunction> function =
+            library != nil ? [library newFunctionWithName:@"kernel_mul_mm_q2_0_f32_f32p"] : nil;
+        if (function != nil) {
+            s.llama_mat_mat_pipeline = [s.device newComputePipelineStateWithFunction:function error:&error];
+        }
+        if (s.llama_mat_mat_pipeline == nil && std::getenv("MNET_METAL_DEBUG") != nullptr) {
+            std::fprintf(stderr, "mnet: llama mat-mat unavailable: %s\n", [[error description] UTF8String]);
+        }
+    });
+}
+
+bool llama_mat_mat_ok(MetalState& s, std::size_t rows, std::size_t columns, std::size_t count, float scale,
+                      bool down) {
+    const int mask = llama_mat_mat_mask();
+    const bool wanted = down ? (mask == 1 || mask == 2) : (mask == 1 || mask == 3);
+    if (!wanted || rows % 64U != 0U || columns % 64U != 0U || count % 32U != 0U || scale != 1.0F) {
+        return false;
+    }
+    ensure_llama_mat_mat(s);
+    return s.llama_mat_mat_pipeline != nil;
+}
+
+void encode_llama_mat_mat(id<MTLComputeCommandEncoder> encoder, MetalState& s, id<MTLBuffer> weights,
+                          NSUInteger weight_offset, id<MTLBuffer> x, id<MTLBuffer> out, std::size_t rows,
+                          std::size_t columns, std::size_t row_bytes, std::size_t out_stride, std::size_t count) {
+    LlamaMatMatArgs args{};
+    args.ne00 = static_cast<std::int32_t>(columns);
+    args.ne02 = 1;
+    args.nb01 = row_bytes;
+    args.nb02 = row_bytes * rows;
+    args.nb10 = sizeof(float);
+    args.nb11 = sizeof(float) * columns;
+    args.ne0 = static_cast<std::int32_t>(out_stride);
+    args.ne1 = static_cast<std::int32_t>(count);
+    args.r2 = 1;
+    args.r3 = 1;
+    [encoder setComputePipelineState:s.llama_mat_mat_pipeline];
+    [encoder setBytes:&args length:sizeof(args) atIndex:0];
+    [encoder setBuffer:weights offset:weight_offset atIndex:1];
+    [encoder setBuffer:x offset:0 atIndex:2];
+    [encoder setBuffer:out offset:0 atIndex:3];
+    [encoder setThreadgroupMemoryLength:12U * 1024U atIndex:0];
+    [encoder dispatchThreadgroups:MTLSizeMake((count + 31U) / 32U, (rows + 63U) / 64U, 1)
+            threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
 }
 
 // Whether the caller wants the tiled mat-mat at all (MNET_MAT_MAT=0 disables).
@@ -2711,8 +3277,16 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
         const std::uint32_t tokens32 = static_cast<std::uint32_t>(count);
         const std::uint32_t x_stride32 = static_cast<std::uint32_t>(columns);
         const std::uint32_t out_stride32 = static_cast<std::uint32_t>(hidden);
+        const bool llama_ok = llama_mat_mat_ok(s, hidden, columns, count, 1.0F, false);
         for (std::size_t pass = 0; pass < 2U; ++pass) {
             const float scale = pass == 0U ? first.gate.scale : first.up.scale;
+            if (llama_ok) {
+                encode_llama_mat_mat(encoder, s, (pass == 0U ? gate_weights.buffer : up_weights.buffer),
+                                     static_cast<NSUInteger>(pass == 0U ? gate_weights.offset : up_weights.offset),
+                                     b.wide, (pass == 0U ? b.gate : b.up), hidden, columns,
+                                     first.gate.row_bytes, hidden, count);
+                continue;
+            }
             [encoder setComputePipelineState:tiled_pipeline];
             [encoder setBuffer:(pass == 0U ? gate_weights.buffer : up_weights.buffer)
                          offset:static_cast<NSUInteger>(pass == 0U ? gate_weights.offset : up_weights.offset)
@@ -2788,7 +3362,10 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
         [encoder setBuffer:b.wide offset:0 atIndex:2];
         [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     }
-    if (tiled_down) {
+    if (tiled_down && llama_mat_mat_ok(s, columns, hidden, count, first.down.scale, true)) {
+        encode_llama_mat_mat(encoder, s, down_weights.buffer, static_cast<NSUInteger>(down_weights.offset), b.wide,
+                             b.out, columns, hidden, first.down.row_bytes, columns, count);
+    } else if (tiled_down) {
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(first.down.row_bytes);
         const std::uint32_t columns32 = static_cast<std::uint32_t>(hidden);
         const float scale = first.down.scale;
