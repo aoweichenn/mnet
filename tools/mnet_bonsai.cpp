@@ -181,17 +181,17 @@ void linear_f32(const std::vector<float>& w, std::size_t out_dim, std::size_t in
 }
 
 [[nodiscard]] float sigmoid(float value) {
-    return 1.0F / (1.0F + std::exp(-value));
+    return 1.0F / (1.0F + mnet::detail::ggml::expf(-value));
 }
 [[nodiscard]] float softplus(float value) {
-    return value > 20.0F ? value : std::log1p(std::exp(value));
+    return value > 20.0F ? value : mnet::detail::ggml::log1pf(mnet::detail::ggml::expf(value));
 }
 
 using mnet::detail::ggml::silu_inplace;
 using mnet::detail::ggml::swiglu;
 
 void rope_neox(float* head, std::size_t head_dim, std::size_t position, float base) {
-    const float theta_scale = std::pow(base, -2.0F / static_cast<float>(kRopeDims));
+    const float theta_scale = mnet::detail::ggml::powf(base, -2.0F / static_cast<float>(kRopeDims));
     float theta = static_cast<float>(position);
     for (std::size_t i = 0; i < kRopeDims / 2; ++i) {
         const float cos_theta = std::cos(theta);
@@ -558,7 +558,7 @@ private:
             const float* kh = k + key_head * kSsmHeadDim;
             const float* vh = v + h * kSsmHeadDim;
             float* sh = state.ssm_state.data() + h * kSsmHeadDim * kSsmHeadDim;
-            const float decay = std::exp(gate[h]);
+            const float decay = mnet::detail::ggml::expf(gate[h]);
             for (std::size_t i = 0; i < kSsmHeadDim * kSsmHeadDim; ++i) {
                 sh[i] *= decay;
             }
@@ -723,12 +723,12 @@ private:
                 if (score > max_score) {
                     const float old_max = max_score;
                     max_score = score;
-                    ms = std::exp(old_max - max_score);
+                    ms = mnet::detail::ggml::expf(old_max - max_score);
                     for (std::size_t i = 0; i < kHeadDim; ++i) {
                         vkq[i] *= ms;
                     }
                 } else {
-                    vs = std::exp(score - max_score);
+                    vs = mnet::detail::ggml::expf(score - max_score);
                 }
                 for (std::size_t i = 0; i < kHeadDim; ++i) {
                     vkq[i] = std::fma(vh[i], vs, vkq[i]);

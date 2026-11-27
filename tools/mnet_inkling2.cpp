@@ -268,20 +268,20 @@ using mnet::detail::ggml::softmax_exp;
         // llama: add(sub(cur, mul(forget, cur)), mul(gain, message)) with each
         // product rounded separately.
         out[i] =
-            (cur[i] - rounded_product(std::tanh(forget[i]), cur[i])) + rounded_product(std::tanh(gain[i]), message[i]);
+            (cur[i] - rounded_product(mnet::detail::ggml::tanhf(forget[i]), cur[i])) + rounded_product(mnet::detail::ggml::tanhf(gain[i]), message[i]);
     }
     return out;
 }
 
 [[nodiscard]] float sigmoid(float value) {
-    return 1.0F / (1.0F + std::exp(-value));
+    return 1.0F / (1.0F + mnet::detail::ggml::expf(-value));
 }
 // llama.cpp: tanh(x * (1/beta)) scaled by beta, then * sigmoid(x) / up.
 [[nodiscard]] float situ_gate(float value, float beta) {
-    return std::tanh(value * (1.0F / beta)) * beta * sigmoid(value);
+    return mnet::detail::ggml::tanhf(value * (1.0F / beta)) * beta * sigmoid(value);
 }
 [[nodiscard]] float situ_linear(float value, float beta) {
-    return std::tanh(value * (1.0F / beta)) * beta;
+    return mnet::detail::ggml::tanhf(value * (1.0F / beta)) * beta;
 }
 
 struct SlotState {
@@ -452,7 +452,7 @@ public:
         const float inv_cap = 1.0F / cap;
         std::vector<float> out(this->config_.n_vocab);
         for (std::size_t i = 0; i < out.size(); ++i) {
-            out[i] = cap * std::tanh(inv_cap * padded[i]);
+            out[i] = cap * mnet::detail::ggml::tanhf(inv_cap * padded[i]);
         }
         if (!dump_dir.empty()) {
             write_floats(dump_dir + "/result_output.bin", out);
@@ -575,7 +575,7 @@ private:
 
         const float tau = static_cast<float>(
             1.0 + static_cast<double>(this->config_.log_scale_alpha) *
-                      std::log(std::max(1.0, static_cast<double>(position + 1) /
+                      mnet::detail::ggml::dlog(std::max(1.0, static_cast<double>(position + 1) /
                                                  static_cast<double>(this->config_.log_scale_floor))));
 
         const auto wq = this->reader_.quantized(this->reader_.tensor(prefix + "attn_q.weight"));
@@ -719,12 +719,12 @@ private:
                 if (score > max_score) {
                     const float old_max = max_score;
                     max_score = score;
-                    ms = std::exp(old_max - max_score);
+                    ms = mnet::detail::ggml::expf(old_max - max_score);
                     for (std::size_t i = 0; i < this->config_.head_dim; ++i) {
                         vkq[i] *= ms;
                     }
                 } else {
-                    vs = std::exp(score - max_score);
+                    vs = mnet::detail::ggml::expf(score - max_score);
                 }
                 for (std::size_t i = 0; i < this->config_.head_dim; ++i) {
                     vkq[i] = std::fma(vh[i], vs, vkq[i]);
@@ -737,13 +737,13 @@ private:
                 float ms = 1.0F;
                 float vs = 1.0F;
                 if (sink_logit > max_score) {
-                    ms = std::exp(max_score - sink_logit);
+                    ms = mnet::detail::ggml::expf(max_score - sink_logit);
                     max_score = sink_logit;
                     for (std::size_t i = 0; i < this->config_.head_dim; ++i) {
                         vkq[i] *= ms;
                     }
                 } else {
-                    vs = std::exp(sink_logit - max_score);
+                    vs = mnet::detail::ggml::expf(sink_logit - max_score);
                 }
                 sum = sum * ms + vs;
             }
