@@ -911,6 +911,51 @@ kernel void ssm_scan(device const float* q            [[buffer(0)]],
     }
     delta[tgid * head_dim + tid] = acc * inv_dim;
 }
+kernel void ssm_scan_batch(device const float* q            [[buffer(0)]],
+                     device const float* k            [[buffer(1)]],
+                     device const float* v            [[buffer(2)]],
+                     device const float* beta         [[buffer(3)]],
+                     device const float* gate         [[buffer(4)]],
+                     device float* state              [[buffer(5)]],
+                     device float* delta              [[buffer(6)]],
+                     constant uint& head_dim          [[buffer(7)]],
+                     constant uint& key_heads         [[buffer(8)]],
+                     constant float& inv_dim          [[buffer(9)]],
+                     constant uint& tokens            [[buffer(10)]],
+                     constant uint& qkv_stride        [[buffer(11)]],
+                     constant uint& gate_stride       [[buffer(12)]],
+                     constant uint& delta_stride      [[buffer(13)]],
+                     uint tgid                        [[threadgroup_position_in_grid]],
+                     uint tid                         [[thread_position_in_threadgroup]]) {
+    // One threadgroup per value head, all tokens in order: the recurrence
+    // carries the state, so the loop stays inside the threadgroup and the state
+    // stops being re-read once per token dispatch.
+    const uint key_head = tgid % key_heads;
+    device float* sh = state + tgid * head_dim * head_dim;
+    for (uint t = 0; t < tokens; ++t) {
+    device const float* qh = q + (ulong)t * qkv_stride + key_head * head_dim;
+    device const float* kh = k + (ulong)t * qkv_stride + key_head * head_dim;
+    device const float* vh = v + (ulong)t * qkv_stride + tgid * head_dim;
+    const float decay = exp(gate[(ulong)t * gate_stride + tgid]);
+    const float b = beta[(ulong)t * gate_stride + tgid];
+    for (uint i = 0; i < head_dim; ++i) {
+        sh[i * head_dim + tid] *= decay;
+    }
+    float d = 0.0f;
+    for (uint i = 0; i < head_dim; ++i) {
+        d = fma(kh[i], sh[i * head_dim + tid], d);
+    }
+    const float delta_coefficient = (vh[tid] - d) * b;
+    for (uint i = 0; i < head_dim; ++i) {
+        sh[i * head_dim + tid] = fma(kh[i], delta_coefficient, sh[i * head_dim + tid]);
+    }
+    float acc = 0.0f;
+    for (uint i = 0; i < head_dim; ++i) {
+        acc = fma(qh[i], sh[i * head_dim + tid], acc);
+    }
+    delta[(ulong)t * delta_stride + tgid * head_dim + tid] = acc * inv_dim;
+    }
+}
 
 // Gated RMS norm per value head and the tiled -> grouped head permute the
 // folded ssm_out weight was built with, in one pass.
@@ -1157,6 +1202,7 @@ struct MetalState {
     id<MTLComputePipelineState> ssm_act_pipeline = nil;
     id<MTLComputePipelineState> ssm_conv_norm_pipeline = nil;
     id<MTLComputePipelineState> ssm_scan_pipeline = nil;
+    id<MTLComputePipelineState> ssm_scan_batch_pipeline = nil;
     id<MTLComputePipelineState> ssm_gate_norm_pipeline = nil;
     FfnBatchBuffers ffn_batch;
     SsmBatchBuffers ssm_batch;
@@ -1244,6 +1290,7 @@ void initialise(MetalState& state) {
         state.ssm_act_pipeline = pipeline_for("ssm_activation");
         state.ssm_conv_norm_pipeline = pipeline_for("ssm_conv_norm");
         state.ssm_scan_pipeline = pipeline_for("ssm_scan");
+        state.ssm_scan_batch_pipeline = pipeline_for("ssm_scan_batch");
         state.ssm_gate_norm_pipeline = pipeline_for("ssm_gate_norm");
         state.dequant_pipeline = pipeline_for("q8_0_dequantize");
         state.hadamard_multi_pipeline = pipeline_for("hadamard_quantize_multi");
@@ -2766,29 +2813,28 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     const std::uint32_t q_offset = 0U;
     const std::uint32_t k_offset = static_cast<std::uint32_t>(key_heads * head_dim);
     const std::uint32_t v_offset = static_cast<std::uint32_t>(2U * key_heads * head_dim);
-    for (std::size_t t = 0; t < count; ++t) {
-        if (skip_scan) {
-            continue;
-        }
-        [encoder setComputePipelineState:s.ssm_scan_pipeline];
-        [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(t * conv_dim * sizeof(float)) + q_offset * sizeof(float)
-                    atIndex:0];
-        [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(t * conv_dim * sizeof(float)) + k_offset * sizeof(float)
-                    atIndex:1];
-        [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(t * conv_dim * sizeof(float)) + v_offset * sizeof(float)
-                    atIndex:2];
-        [encoder setBuffer:b.gates offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float)) atIndex:3];
-        [encoder setBuffer:b.gates
-                     offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float) +
-                                                    value_heads * sizeof(float))
-                    atIndex:4];
+    if (!skip_scan) {
+        const std::uint32_t tokens32 = static_cast<std::uint32_t>(count);
+        const std::uint32_t qkv_stride32 = static_cast<std::uint32_t>(conv_dim);
+        const std::uint32_t gate_stride32 = static_cast<std::uint32_t>(2U * value_heads);
+        const std::uint32_t delta_stride32 = static_cast<std::uint32_t>(hidden);
+        [encoder setComputePipelineState:s.ssm_scan_batch_pipeline];
+        [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(q_offset * sizeof(float)) atIndex:0];
+        [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(k_offset * sizeof(float)) atIndex:1];
+        [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(v_offset * sizeof(float)) atIndex:2];
+        [encoder setBuffer:b.gates offset:0 atIndex:3];
+        [encoder setBuffer:b.gates offset:static_cast<NSUInteger>(value_heads * sizeof(float)) atIndex:4];
         [encoder setBuffer:layer.state offset:0 atIndex:5];
-        [encoder setBuffer:b.delta offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:6];
+        [encoder setBuffer:b.delta offset:0 atIndex:6];
         [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:7];
         [encoder setBytes:&key_heads32 length:sizeof(key_heads32) atIndex:8];
         [encoder setBytes:&inv_dim length:sizeof(inv_dim) atIndex:9];
-        [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
-
+        [encoder setBytes:&tokens32 length:sizeof(tokens32) atIndex:10];
+        [encoder setBytes:&qkv_stride32 length:sizeof(qkv_stride32) atIndex:11];
+        [encoder setBytes:&gate_stride32 length:sizeof(gate_stride32) atIndex:12];
+        [encoder setBytes:&delta_stride32 length:sizeof(delta_stride32) atIndex:13];
+        [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
     }
     if (!skip_norm) {
         [encoder setComputePipelineState:s.gate_norm_multi_pipeline];
