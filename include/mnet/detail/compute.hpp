@@ -228,6 +228,12 @@ void set_layer_prep_backend(LayerPrepFn backend);
 [[nodiscard]] bool layer_prep_f32(const float* input, const float* weight, std::uint64_t size, float eps,
                                   const std::int32_t* signs, std::uint32_t block_size, std::int8_t* qs, float* scales);
 
+// x += delta on the device (host buffers for now; the layer job will bind them
+// directly). Element-wise, so bit-identical to the host loop.
+using ResidualAddFn = bool (*)(float* x, const float* delta, std::uint64_t count);
+void set_residual_add_backend(ResidualAddFn backend);
+[[nodiscard]] bool residual_add(float* x, const float* delta, std::uint64_t count);
+
 // True when the caller may use the tolerance-level fast paths.
 [[nodiscard]] bool fast_path_enabled();
 

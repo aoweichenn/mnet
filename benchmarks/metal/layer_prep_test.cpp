@@ -110,5 +110,23 @@ int main() {
     }
     std::printf("q8 codes differing %zu of %zu, worst relative block scale diff %.3e\n", code_diff, size,
                 worst_scale);
-    return code_diff == 0 ? 0 : 3;
+
+    // residual_add must be bit-identical to the host loop it replaces.
+    std::vector<float> x = residual;
+    std::vector<float> host_x = residual;
+    std::vector<float> delta(size);
+    for (std::size_t i = 0; i < size; ++i) {
+        delta[i] = normed[i] * 1.5F;
+        host_x[i] += delta[i];
+    }
+    const bool added = detail::compute::residual_add(x.data(), delta.data(), size);
+    std::size_t add_diff = 0;
+    for (std::size_t i = 0; i < size; ++i) {
+        if (x[i] != host_x[i]) {
+            ++add_diff;
+        }
+    }
+    std::printf("residual_add: %s, %zu of %zu values differ from the host loop\n", added ? "ok" : "REJECTED",
+                add_diff, size);
+    return (code_diff == 0 && added && add_diff == 0) ? 0 : 3;
 }

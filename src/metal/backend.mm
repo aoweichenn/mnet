@@ -1155,7 +1155,6 @@ void encode_dispatch(MetalState& s, id<MTLComputeCommandEncoder> encoder, const 
     [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
     [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
     [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
-    lanes = matvec_lanes();
     static const bool use_fast = std::getenv("MNET_METAL_FAST") != nullptr && s.fast_pipeline != nil;
     static const bool use_f32 = use_fast && s.fast_f32_pipeline != nil && s.dequant_pipeline != nil;
     if (use_f32) {
@@ -2066,7 +2065,7 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
             [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
             [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
             [encoder setBytes:&lanes length:sizeof(lanes) atIndex:7];
-            [encoder dispatchThreadgroups:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            [encoder dispatchThreadgroups:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(lanes, 1, 1)];
         }
     }
     // SwiGLU and the Hadamard/requantisation are element-wise over the whole
@@ -2116,7 +2115,7 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
         [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
         [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:9];
         [encoder dispatchThreadgroups:MTLSizeMake(columns * count, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                threadsPerThreadgroup:MTLSizeMake(lanes, 1, 1)];
     }
     [encoder endEncoding];
     [command commit];
@@ -2354,7 +2353,7 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
             [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
             [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:9];
             [encoder dispatchThreadgroups:MTLSizeMake(rows * count, 1, 1)
-                    threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                    threadsPerThreadgroup:MTLSizeMake(lanes, 1, 1)];
         }
     }
     // Head gates and the convolution for every token.
@@ -2476,7 +2475,7 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
         [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
         [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:9];
         [encoder dispatchThreadgroups:MTLSizeMake(job.out.rows * count, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                threadsPerThreadgroup:MTLSizeMake(lanes, 1, 1)];
     }
     [encoder endEncoding];
     const std::uint64_t profile_commit = now_ns();
@@ -2663,7 +2662,7 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
             [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
             [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:9];
             [encoder dispatchThreadgroups:MTLSizeMake(rows * count, 1, 1)
-                    threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                    threadsPerThreadgroup:MTLSizeMake(lanes, 1, 1)];
         }
     }
     // Head norms, RoPE, gate sigmoid and the f16 KV append for every token.
@@ -2770,7 +2769,7 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
         [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
         [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:9];
         [encoder dispatchThreadgroups:MTLSizeMake(job.out.rows * count, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                threadsPerThreadgroup:MTLSizeMake(lanes, 1, 1)];
     }
     [encoder endEncoding];
     [command commit];

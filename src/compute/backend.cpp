@@ -53,6 +53,11 @@ std::atomic<SsmQ2_0BatchFn>& ssm_batch_slot() {
     return slot;
 }
 
+std::atomic<ResidualAddFn>& residual_add_slot() {
+    static std::atomic<ResidualAddFn> slot{nullptr};
+    return slot;
+}
+
 std::atomic<LayerPrepFn>& layer_prep_slot() {
     static std::atomic<LayerPrepFn> slot{nullptr};
     return slot;
@@ -142,6 +147,17 @@ void set_attention_batch_backend(AttentionQ2_0BatchFn backend) {
 
 void set_rms_norm_backend(RmsNormFn backend) {
     rms_norm_slot().store(backend);
+}
+
+void set_residual_add_backend(ResidualAddFn backend) {
+    residual_add_slot().store(backend);
+}
+
+bool residual_add(float* x, const float* delta, std::uint64_t count) {
+    static std::once_flag once;
+    std::call_once(once, [] { register_platform_backends(); });
+    const ResidualAddFn backend = residual_add_slot().load();
+    return backend != nullptr && backend(x, delta, count);
 }
 
 void set_layer_prep_backend(LayerPrepFn backend) {
