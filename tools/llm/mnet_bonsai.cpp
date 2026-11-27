@@ -744,6 +744,15 @@ private:
         // (results are garbage): it separates host compute from submission
         // latency inside the inter-block idle.
         static const bool tail_skip = std::getenv("MNET_TAIL_SKIP") != nullptr;
+        // The fused FFN normalises and rotates its input on the device, so the
+        // host copy of that work is only needed for the per-token fallback and
+        // for dumps (log 178).
+        const bool device_prep = !tail_skip && dump_dir == nullptr &&
+                                 mnet::detail::compute::fast_path_enabled() &&
+                                 mnet::detail::compute::fused_ffn_enabled() &&
+                                 std::getenv("MNET_NO_BATCHED_FFN") == nullptr &&
+                                 std::getenv("MNET_HOST_PREP") == nullptr;
+        const auto prepare_host = [&]() {
         for (std::size_t t = 0; !tail_skip && t < tokens; ++t) {
             const float* residual = hidden.data() + t * n_embd;
             rms_norm_into(residual, n_embd, w.post_norm, this->config_.eps, pn.data());
@@ -757,6 +766,10 @@ private:
             hadamard_forward(pn, this->signs_embd_, this->config_.hadamard_block);
             std::copy(pn.begin(), pn.end(), ph.begin() + static_cast<std::ptrdiff_t>(t * n_embd));
         }
+        };
+        if (!device_prep || dump_dir != nullptr) {
+            prepare_host();
+        }
         add_time("tail_cpu", since(t_cpu));
 
         std::vector<float>& down = this->buffer_for(this->scratch_.down, tokens * n_embd);
@@ -765,13 +778,18 @@ private:
         if (batched && mnet::detail::compute::fast_path_enabled() && mnet::detail::compute::fused_ffn_enabled()) {
             std::vector<Reader::FfnEntry> entries(tokens);
             for (std::size_t t = 0; t < tokens; ++t) {
-                entries[t].input = ph.data() + t * n_embd;
+                entries[t].input = device_prep ? nullptr : ph.data() + t * n_embd;
+                entries[t].residual = device_prep ? hidden.data() + t * n_embd : nullptr;
                 entries[t].output = down.data() + t * n_embd;
             }
             fused = Reader::ffn_swiglu_batch(w.ffn_gate, w.ffn_up, w.ffn_down, entries.data(), tokens,
-                                             this->signs_hidden_.data(), this->config_.hadamard_block);
+                                             this->signs_hidden_.data(), this->config_.hadamard_block,
+                                             w.post_norm.data(), this->config_.eps, this->signs_embd_.data());
         }
         if (!fused) {
+            if (device_prep) {
+                prepare_host();
+            }
             for (std::size_t t = 0; t < tokens; ++t) {
                 const float* input = ph.data() + t * n_embd;
                 float* output = down.data() + t * n_embd;

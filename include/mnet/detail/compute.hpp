@@ -62,6 +62,15 @@ struct FfnSwigluEntry {
     MatvecQ8_0Job down;
     const float* input = nullptr;  // n_embd, already Hadamard'ed
     float* output = nullptr;       // n_embd
+    // Optional device preparation of `input`: when all three are set the block
+    // reads `residual` (the raw layer output) and runs the RMSNorm with
+    // post_norm, the signed Hadamard with input_signs and the Q8_0
+    // requantisation itself, instead of waiting for the host to do the first two
+    // (log 178). Same values go in every entry of a batch.
+    const float* residual = nullptr;            // n_embd, un-normalised
+    const float* post_norm = nullptr;           // n_embd
+    const std::int32_t* input_signs = nullptr;  // n_embd, block_size blocks
+    float eps = 0.0F;
 };
 
 using FfnSwigluBatchFn = bool (*)(const FfnSwigluEntry* entries, std::size_t count, std::uint64_t columns,

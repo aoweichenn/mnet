@@ -726,6 +726,13 @@ bool Reader::attention_batch(const Quantized& q, const Quantized& k, const Quant
 bool Reader::ffn_swiglu_batch(const Quantized& gate, const Quantized& up, const Quantized& down,
                               const FfnEntry* entries, std::size_t count, const std::int32_t* signs,
                               std::uint32_t block_size) {
+    return Reader::ffn_swiglu_batch(gate, up, down, entries, count, signs, block_size, nullptr, 0.0F, nullptr);
+}
+
+bool Reader::ffn_swiglu_batch(const Quantized& gate, const Quantized& up, const Quantized& down,
+                              const FfnEntry* entries, std::size_t count, const std::int32_t* signs,
+                              std::uint32_t block_size, const float* post_norm, float eps,
+                              const std::int32_t* input_signs) {
     if (gate.type != kGgmlQ2_0 || up.type != kGgmlQ2_0 || down.type != kGgmlQ2_0 || block_size < 64U ||
         block_size > 1024U || (block_size & (block_size - 1U)) != 0U || entries == nullptr || count == 0U) {
         return false;
@@ -740,9 +747,13 @@ bool Reader::ffn_swiglu_batch(const Quantized& gate, const Quantized& up, const 
     const std::uint64_t down_bytes = down.columns / info.block_elements * info.block_bytes;
     std::vector<mnet::detail::compute::FfnSwigluEntry> batch(count);
     for (std::size_t t = 0; t < count; ++t) {
-        if (entries[t].input == nullptr || entries[t].output == nullptr) {
+        if ((entries[t].input == nullptr && entries[t].residual == nullptr) || entries[t].output == nullptr) {
             return false;
         }
+        batch[t].residual = entries[t].residual;
+        batch[t].post_norm = post_norm;
+        batch[t].input_signs = input_signs;
+        batch[t].eps = eps;
         batch[t].gate = {gate.type,         gate.data(),   gate.rows,   gate_bytes,       gate.scale,
                          entries[t].output, gate.identity, gate.region, gate.region_bytes};
         batch[t].up = {up.type, up.data(),   up.rows,   gate_bytes,     up.scale,

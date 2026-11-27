@@ -993,6 +993,39 @@ kernel void rms_norm_f32(device const float* x        [[buffer(0)]],
     }
 }
 
+// The same reduction as rms_norm_f32, one threadgroup per token, so a whole
+// batch is one dispatch: the per-token form needed 32 of them per layer, which
+// cost more than the host work it replaced (log 178).
+kernel void rms_norm_f32_batch(device const float* x        [[buffer(0)]],
+                               device const float* weight   [[buffer(1)]],
+                               device float* out            [[buffer(2)]],
+                               constant uint& size          [[buffer(3)]],
+                               constant float& eps          [[buffer(4)]],
+                               threadgroup float* partial   [[threadgroup(0)]],
+                               uint tgid                    [[threadgroup_position_in_grid]],
+                               uint tid                     [[thread_position_in_threadgroup]],
+                               uint group_size              [[threads_per_threadgroup]]) {
+    device const float* xb = x + (ulong)tgid * size;
+    device float* ob = out + (ulong)tgid * size;
+    float sum = 0.0f;
+    for (uint i = tid; i < size; i += group_size) {
+        sum = fma(xb[i], xb[i], sum);
+    }
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = group_size / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            partial[tid] += partial[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const float mean = partial[0] / float(size);
+    const float scale = 1.0f / sqrt(mean + eps);
+    for (uint i = tid; i < size; i += group_size) {
+        ob[i] = (xb[i] * scale) * weight[i];
+    }
+}
+
 // Signed, normalised block Hadamard followed by Q8_0 requantisation, with the
 // block kept in threadgroup memory: one threadgroup per block instead of three
 // separate dispatches (sign*scale, FWHT, quantise).
@@ -2042,6 +2075,7 @@ struct MetalState {
     id<MTLComputePipelineState> gate_norm_multi_pipeline = nil;
     id<MTLComputePipelineState> head_gates_pipeline = nil;
     id<MTLComputePipelineState> rms_norm_pipeline = nil;
+    id<MTLComputePipelineState> rms_norm_batch_pipeline = nil;
     id<MTLComputePipelineState> residual_add_pipeline = nil;
     id<MTLComputePipelineState> attn_prep_pipeline = nil;
     id<MTLComputePipelineState> attn_prep_batch_pipeline = nil;
@@ -2065,6 +2099,12 @@ struct MetalState {
     AttentionBuffers attn;
     SsmBuffers ssm;
     std::unordered_map<std::uint64_t, SsmLayer> ssm_layers;
+    // The FFN input's normalisation weights and Hadamard signs, for the
+    // device-side preparation (see FfnSwigluEntry::residual).
+    id<MTLBuffer> prep_norm = nil;
+    id<MTLBuffer> prep_signs = nil;
+    std::size_t prep_norm_capacity = 0;
+    std::size_t prep_signs_capacity = 0;
     std::size_t signs_capacity = 0;
     std::size_t act_capacity = 0;
     std::size_t act_q8_capacity = 0;
@@ -2159,6 +2199,7 @@ void initialise(MetalState& state) {
         state.gate_norm_multi_pipeline = pipeline_for("ssm_gate_norm_multi");
         state.head_gates_pipeline = pipeline_for("ssm_head_gates");
         state.rms_norm_pipeline = pipeline_for("rms_norm_f32");
+        state.rms_norm_batch_pipeline = pipeline_for("rms_norm_f32_batch");
         state.mat_mat_pipeline = pipeline_for("q2_0_mat_mat_f32");
         state.mat_mat_f16_pipeline = pipeline_for("q2_0_mat_mat_f16");
         state.residual_add_pipeline = pipeline_for("residual_add");
@@ -3283,14 +3324,31 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
         b.act_q8 == nil || b.act_scales == nil || b.out == nil) {
         return false;
     }
+    // The input's RMSNorm and Hadamard can run here instead of on the host: the
+    // host transform was 13.5 ms of the forward's 41 ms of inter-block idle
+    // (log 177), and the GPU sat idle through it.
+    const bool device_prep = first.residual != nullptr && first.post_norm != nullptr && first.input_signs != nullptr &&
+                             s.rms_norm_batch_pipeline != nil && s.hadamard_multi_pipeline != nil;
+    if (device_prep) {
+        s.prep_norm = ensure_buffer(s.device, s.prep_norm, s.prep_norm_capacity,
+                                    static_cast<std::size_t>(columns) * sizeof(float));
+        s.prep_signs = ensure_buffer(s.device, s.prep_signs, s.prep_signs_capacity,
+                                     static_cast<std::size_t>(columns) * sizeof(std::int32_t));
+        if (s.prep_norm == nil || s.prep_signs == nil) {
+            return false;
+        }
+        std::memcpy(s.prep_norm.contents, first.post_norm, static_cast<std::size_t>(columns) * sizeof(float));
+        std::memcpy(s.prep_signs.contents, first.input_signs, static_cast<std::size_t>(columns) * sizeof(std::int32_t));
+    }
     // Quantise the batch's activations on the device: upload the fp32 inputs and
     // let one dispatch produce the codes, instead of 0.144 ms of host work per
     // layer (log 152/166).
     const bool device_q8 = s.q8_quantize_pipeline != nil;
-    if (device_q8) {
+    if (device_prep || device_q8) {
         auto* staging = static_cast<float*>(b.wide.contents);
         for (std::size_t t = 0; t < count; ++t) {
-            std::memcpy(staging + t * columns, entries[t].input, static_cast<std::size_t>(columns) * sizeof(float));
+            const float* source = device_prep ? entries[t].residual : entries[t].input;
+            std::memcpy(staging + t * columns, source, static_cast<std::size_t>(columns) * sizeof(float));
         }
     } else {
         auto* q8_destination = static_cast<std::uint8_t*>(b.q8.contents);
@@ -3315,7 +3373,31 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
 
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-    if (device_q8) {
+    if (device_prep) {
+        // One threadgroup per token for the norm, then the Hadamard and the Q8_0
+        // requantisation over the whole batch.
+        const std::uint32_t size32 = static_cast<std::uint32_t>(columns);
+        const float prep_eps = first.eps;
+        [encoder setComputePipelineState:s.rms_norm_batch_pipeline];
+        [encoder setBuffer:b.wide offset:0 atIndex:0];
+        [encoder setBuffer:s.prep_norm offset:0 atIndex:1];
+        [encoder setBuffer:b.wide offset:0 atIndex:2];
+        [encoder setBytes:&size32 length:sizeof(size32) atIndex:3];
+        [encoder setBytes:&prep_eps length:sizeof(prep_eps) atIndex:4];
+        [encoder setThreadgroupMemoryLength:256U * sizeof(float) atIndex:0];
+        [encoder dispatchThreadgroups:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        const std::uint32_t prep_block = block_size;
+        const std::uint32_t prep_sign_blocks = static_cast<std::uint32_t>(columns / block_size);
+        [encoder setComputePipelineState:s.hadamard_multi_pipeline];
+        [encoder setBuffer:b.wide offset:0 atIndex:0];
+        [encoder setBuffer:s.prep_signs offset:0 atIndex:1];
+        [encoder setBuffer:b.q8 offset:0 atIndex:2];
+        [encoder setBuffer:b.scales offset:0 atIndex:3];
+        [encoder setBytes:&prep_block length:sizeof(prep_block) atIndex:4];
+        [encoder setBytes:&prep_sign_blocks length:sizeof(prep_sign_blocks) atIndex:5];
+        [encoder dispatchThreadgroups:MTLSizeMake((columns / block_size) * count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
+    } else if (device_q8) {
         const std::uint32_t q8_blocks = static_cast<std::uint32_t>(columns / 32U);
         const std::uint32_t q8_tokens = static_cast<std::uint32_t>(count);
         [encoder setComputePipelineState:s.q8_quantize_pipeline];

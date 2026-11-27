@@ -119,6 +119,10 @@ public:
     struct FfnEntry {
         const float* input = nullptr;  // n_embd, already Hadamard'ed
         float* output = nullptr;       // n_embd
+        // Optional: the raw layer output. When set together with the prep
+        // arguments of the overload below, the device normalises and rotates it
+        // instead of reading `input`.
+        const float* residual = nullptr;  // n_embd
     };
 
     // Fused FFN for several tokens at once (one submission), so the matvecs of
@@ -126,6 +130,14 @@ public:
     [[nodiscard]] static bool ffn_swiglu_batch(const Quantized& gate, const Quantized& up, const Quantized& down,
                                                const FfnEntry* entries, std::size_t count, const std::int32_t* signs,
                                                std::uint32_t block_size);
+
+    // Same, with the input's RMSNorm and Hadamard moved onto the device: entries
+    // must then carry `residual`, and post_norm/eps/input_signs describe the
+    // preparation. Falls back to the host-prepped form when the device cannot.
+    [[nodiscard]] static bool ffn_swiglu_batch(const Quantized& gate, const Quantized& up, const Quantized& down,
+                                               const FfnEntry* entries, std::size_t count, const std::int32_t* signs,
+                                               std::uint32_t block_size, const float* post_norm, float eps,
+                                               const std::int32_t* input_signs);
 
     // Geometry and side inputs of the fused attention block; the weights come
     // as q/k/v/out matrices. rope_cos/rope_sin hold rope_dims/2 rotations for
