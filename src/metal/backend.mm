@@ -1756,14 +1756,13 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
     const std::uint32_t block32 = block_size;
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-    // Widen every token's activation once.
-    for (std::size_t t = 0; t < count; ++t) {
-        [encoder setComputePipelineState:s.dequant_pipeline];
-        [encoder setBuffer:b.q8 offset:static_cast<NSUInteger>(t * columns) atIndex:0];
-        [encoder setBuffer:b.scales offset:static_cast<NSUInteger>(t * (columns / 32U) * sizeof(float)) atIndex:1];
-        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * columns * sizeof(float)) atIndex:2];
-        [encoder dispatchThreads:MTLSizeMake(columns, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-    }
+    // Widen every token's activation once: the slabs are contiguous, so this is
+    // a single dispatch over all tokens.
+    [encoder setComputePipelineState:s.dequant_pipeline];
+    [encoder setBuffer:b.q8 offset:0 atIndex:0];
+    [encoder setBuffer:b.scales offset:0 atIndex:1];
+    [encoder setBuffer:b.wide offset:0 atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(columns * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     // Every gate, then every up matvec.
     for (std::size_t pass = 0; pass < 2U; ++pass) {
         for (std::size_t t = 0; t < count; ++t) {
@@ -2015,21 +2014,32 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     const float eps = job.eps;
     const float inv_dim = 1.0F / std::sqrt(static_cast<float>(head_dim));
 
+    // MNET_SSM_SKIP=<phase> drops one phase for timing; results are garbage.
+    static const std::string skip =
+        std::getenv("MNET_SSM_SKIP") != nullptr ? std::string(std::getenv("MNET_SSM_SKIP")) : std::string();
+    const bool skip_all = skip == "all";
+    const bool skip_matvec = skip_all || skip == "matvec";
+    const bool skip_gate = skip_all || skip == "gate";
+    const bool skip_conv = skip_all || skip == "conv";
+    const bool skip_scan = skip_all || skip == "scan";
+    const bool skip_norm = skip_all || skip == "norm";
+
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     // Widen every token's activation once, then run all qkv and all gate
     // matvecs.
-    for (std::size_t t = 0; t < count; ++t) {
-        [encoder setComputePipelineState:s.dequant_pipeline];
-        [encoder setBuffer:b.q8 offset:static_cast<NSUInteger>(t * job.columns) atIndex:0];
-        [encoder setBuffer:b.scales offset:static_cast<NSUInteger>(t * (job.columns / 32U) * sizeof(float)) atIndex:1];
-        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:2];
-        [encoder dispatchThreads:MTLSizeMake(job.columns, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-    }
+    [encoder setComputePipelineState:s.dequant_pipeline];
+    [encoder setBuffer:b.q8 offset:0 atIndex:0];
+    [encoder setBuffer:b.scales offset:0 atIndex:1];
+    [encoder setBuffer:b.wide offset:0 atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(job.columns * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     for (std::size_t pass = 0; pass < 2U; ++pass) {
         const std::uint64_t rows = pass == 0U ? conv_dim : hidden;
         const std::uint32_t blocks32 = static_cast<std::uint32_t>(
             (pass == 0U ? job.columns : job.columns) / 64U);
+        if (skip_matvec) {
+            continue;
+        }
         for (std::size_t t = 0; t < count; ++t) {
             [encoder setComputePipelineState:s.fast_f32_pipeline];
             [encoder setBuffer:(pass == 0U ? qkv_weights.buffer : gate_weights.buffer)
@@ -2055,6 +2065,10 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     }
     // Head gates and the convolution for every token.
     for (std::size_t t = 0; t < count; ++t) {
+        if (skip_gate && skip_conv) {
+            continue;
+        }
+        if (!skip_gate) {
         [encoder setComputePipelineState:s.ssm_rows_pipeline];
         [encoder setBuffer:layer.side offset:0 atIndex:0];
         [encoder setBuffer:b.activation offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:1];
@@ -2073,7 +2087,10 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
                     atIndex:4];
         [encoder setBytes:&value_heads32 length:sizeof(value_heads32) atIndex:5];
         [encoder dispatchThreads:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-
+        }
+        if (skip_conv) {
+            continue;
+        }
         // Linear window: token t's four taps are rows t .. t + kernel - 1.
         const std::uint32_t ring32 = static_cast<std::uint32_t>(t);
         [encoder setComputePipelineState:s.ssm_conv_norm_pipeline];
@@ -2095,6 +2112,9 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     const std::uint32_t k_offset = static_cast<std::uint32_t>(key_heads * head_dim);
     const std::uint32_t v_offset = static_cast<std::uint32_t>(2U * key_heads * head_dim);
     for (std::size_t t = 0; t < count; ++t) {
+        if (skip_scan) {
+            continue;
+        }
         [encoder setComputePipelineState:s.ssm_scan_pipeline];
         [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(t * conv_dim * sizeof(float)) + q_offset * sizeof(float)
                     atIndex:0];
@@ -2114,6 +2134,11 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
         [encoder setBytes:&inv_dim length:sizeof(inv_dim) atIndex:9];
         [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
 
+    }
+    for (std::size_t t = 0; t < count; ++t) {
+        if (skip_norm) {
+            continue;
+        }
         [encoder setComputePipelineState:s.ssm_gate_norm_pipeline];
         [encoder setBuffer:b.delta offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
         [encoder setBuffer:b.z offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
@@ -2133,13 +2158,19 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
         [encoder setBytes:&block32 length:sizeof(block32) atIndex:4];
         [encoder dispatchThreadgroups:MTLSizeMake(hidden / job.block_size, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(job.block_size, 1, 1)];
-
-        [encoder setComputePipelineState:s.dequant_pipeline];
-        [encoder setBuffer:b.act_q8 offset:static_cast<NSUInteger>(t * hidden) atIndex:0];
-        [encoder setBuffer:b.act_scales offset:static_cast<NSUInteger>(t * (hidden / 32U) * sizeof(float)) atIndex:1];
-        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:2];
-        [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-
+    }
+    // The output projections are independent across tokens; running them after
+    // the whole norm/requantisation chain lets them overlap instead of each one
+    // waiting behind the next token's scan.
+    [encoder setComputePipelineState:s.dequant_pipeline];
+    [encoder setBuffer:b.act_q8 offset:0 atIndex:0];
+    [encoder setBuffer:b.act_scales offset:0 atIndex:1];
+    [encoder setBuffer:b.wide offset:0 atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    for (std::size_t t = 0; t < count; ++t) {
+        if (skip_norm) {
+            continue;
+        }
         [encoder setComputePipelineState:s.fast_f32_pipeline];
         [encoder setBuffer:out_weights.buffer offset:static_cast<NSUInteger>(out_weights.offset) atIndex:0];
         [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
@@ -2299,13 +2330,11 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     // Widen every token's activation once, then all q, all k and all v matvecs.
-    for (std::size_t t = 0; t < count; ++t) {
-        [encoder setComputePipelineState:s.dequant_pipeline];
-        [encoder setBuffer:b.q8 offset:static_cast<NSUInteger>(t * job.columns) atIndex:0];
-        [encoder setBuffer:b.scales offset:static_cast<NSUInteger>(t * (job.columns / 32U) * sizeof(float)) atIndex:1];
-        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:2];
-        [encoder dispatchThreads:MTLSizeMake(job.columns, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-    }
+    [encoder setComputePipelineState:s.dequant_pipeline];
+    [encoder setBuffer:b.q8 offset:0 atIndex:0];
+    [encoder setBuffer:b.scales offset:0 atIndex:1];
+    [encoder setBuffer:b.wide offset:0 atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(job.columns * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     for (std::size_t pass = 0; pass < 3U; ++pass) {
         const WeightBinding& weights = pass == 0U ? q_weights : (pass == 1U ? k_weights : v_weights);
         id<MTLBuffer> target = pass == 0U ? b.qfull : (pass == 1U ? b.k_new : b.v_new);
@@ -2395,7 +2424,8 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
         [encoder setBytes:&attn_scale length:sizeof(attn_scale) atIndex:9];
         [encoder dispatchThreadgroups:MTLSizeMake(heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     }
-    // Hadamard, requantisation and the output projection per token.
+    // Hadamard and requantisation per token, then the widened activations for
+    // every token in one dispatch, then the projections.
     for (std::size_t t = 0; t < count; ++t) {
         [encoder setComputePipelineState:s.hadamard_quantize_pipeline];
         [encoder setBuffer:b.attn offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
@@ -2405,13 +2435,13 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
         [encoder setBytes:&block32 length:sizeof(block32) atIndex:4];
         [encoder dispatchThreadgroups:MTLSizeMake(hidden / job.block_size, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(job.block_size, 1, 1)];
-
-        [encoder setComputePipelineState:s.dequant_pipeline];
-        [encoder setBuffer:b.act_q8 offset:static_cast<NSUInteger>(t * hidden) atIndex:0];
-        [encoder setBuffer:b.act_scales offset:static_cast<NSUInteger>(t * (hidden / 32U) * sizeof(float)) atIndex:1];
-        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:2];
-        [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-
+    }
+    [encoder setComputePipelineState:s.dequant_pipeline];
+    [encoder setBuffer:b.act_q8 offset:0 atIndex:0];
+    [encoder setBuffer:b.act_scales offset:0 atIndex:1];
+    [encoder setBuffer:b.wide offset:0 atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    for (std::size_t t = 0; t < count; ++t) {
         [encoder setComputePipelineState:s.fast_f32_pipeline];
         [encoder setBuffer:out_weights.buffer offset:static_cast<NSUInteger>(out_weights.offset) atIndex:0];
         [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
