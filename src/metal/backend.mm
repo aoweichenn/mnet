@@ -107,6 +107,53 @@ kernel void q2_0_matvec_fast(device const uchar* w        [[buffer(0)]],
     }
 }
 
+// Dequantise the Q8_0 activation to fp32 once per dispatch: q8_0_dequantize
+// runs before every fast matvec and turns the per-weight activation byte load
+// plus per-block scale multiply into a plain fma.
+kernel void q8_0_dequantize(device const char* q8    [[buffer(0)]],
+                            device const float* qd   [[buffer(1)]],
+                            device float* out        [[buffer(2)]],
+                            uint gid                 [[thread_position_in_grid]]) {
+    out[gid] = float(q8[gid]) * qd[gid / 32u];
+}
+
+// Fast matvec against an fp32 activation. Same 18-byte record and the same
+// integer decode of the 2-bit codes, but no activation load per weight and the
+// per-block scale is folded once: measured 92 GB/s versus 55 GB/s for the
+// integer form on the fused-FFN shape (benchmarks/metal/q2_0_kernel_bench.mm).
+kernel void q2_0_matvec_f32(device const uchar* w        [[buffer(0)]],
+                            device const float* x        [[buffer(1)]],
+                            device float* out            [[buffer(3)]],
+                            constant uint& row_bytes     [[buffer(4)]],
+                            constant uint& blocks        [[buffer(5)]],
+                            constant float& scale        [[buffer(6)]],
+                            uint tgid                    [[threadgroup_position_in_grid]],
+                            uint lane                    [[thread_position_in_threadgroup]]) {
+    device const uchar* row = w + (ulong)tgid * row_bytes;
+    float acc = 0.0f;
+    for (uint i = lane; i < blocks; i += 32u) {
+        device const uchar* block = row + (ulong)i * 18u;
+        const float dx = float(as_type<half>(ushort(block[0] | (ushort(block[1]) << 8))));
+        for (uint k = 0; k < 2u; ++k) {
+            device const float* xy = x + (ulong)(2u * i + k) * 32u;
+            device const uchar* q = block + 2u + k * 8u;
+            float sum = 0.0f;
+            for (uint j = 0; j < 8u; ++j) {
+                const uchar byte = q[j];
+                sum += float(int((byte >> 0) & 3u) - 1) * xy[j * 4u + 0u];
+                sum += float(int((byte >> 2) & 3u) - 1) * xy[j * 4u + 1u];
+                sum += float(int((byte >> 4) & 3u) - 1) * xy[j * 4u + 2u];
+                sum += float(int((byte >> 6) & 3u) - 1) * xy[j * 4u + 3u];
+            }
+            acc = fma(dx, sum, acc);
+        }
+    }
+    const float total = simd_sum(acc);
+    if (lane == 0u) {
+        out[tgid] = scale * total;
+    }
+}
+
 
 // SwiGLU: out = silu(gate) * up, one thread per element.
 kernel void swiglu_f32(device const float* gate [[buffer(0)]],
@@ -535,6 +582,8 @@ struct MetalState {
     id<MTLCommandQueue> queue = nil;
     id<MTLComputePipelineState> pipeline = nil;
     id<MTLComputePipelineState> fast_pipeline = nil;
+    id<MTLComputePipelineState> fast_f32_pipeline = nil;
+    id<MTLComputePipelineState> dequant_pipeline = nil;
     id<MTLComputePipelineState> swiglu_pipeline = nil;
     id<MTLComputePipelineState> quantize_pipeline = nil;
     id<MTLBuffer> act_buffer = nil;
@@ -567,6 +616,8 @@ struct MetalState {
     std::unordered_map<std::uint64_t, id<MTLBuffer>> weight_buffers;
     id<MTLBuffer> q8_buffer = nil;
     id<MTLBuffer> scale_buffer = nil;
+    id<MTLBuffer> act_f32_buffer = nil;
+    std::size_t act_f32_capacity = 0;
     id<MTLBuffer> out_buffer = nil;
     std::size_t q8_capacity = 0;
     std::size_t scale_capacity = 0;
@@ -618,6 +669,13 @@ void initialise(MetalState& state) {
             std::fprintf(stderr, "mnet: metal fast pipeline failed: %s\n", [[error description] UTF8String]);
         }
     }
+    id<MTLFunction> f32_function = library != nil ? [library newFunctionWithName:@"q2_0_matvec_f32"] : nil;
+    if (f32_function != nil) {
+        state.fast_f32_pipeline = [state.device newComputePipelineStateWithFunction:f32_function error:&error];
+        if (state.fast_f32_pipeline == nil && std::getenv("MNET_METAL_DEBUG") != nullptr) {
+            std::fprintf(stderr, "mnet: metal f32 matvec pipeline failed: %s\n", [[error description] UTF8String]);
+        }
+    }
     if (library != nil) {
         const auto pipeline_for = [&](const char* name) -> id<MTLComputePipelineState> {
             id<MTLFunction> function = [library newFunctionWithName:[NSString stringWithUTF8String:name]];
@@ -633,6 +691,7 @@ void initialise(MetalState& state) {
         state.ssm_l2norm_pipeline = pipeline_for("ssm_l2norm");
         state.ssm_scan_pipeline = pipeline_for("ssm_scan");
         state.ssm_gate_norm_pipeline = pipeline_for("ssm_gate_norm");
+        state.dequant_pipeline = pipeline_for("q8_0_dequantize");
         if (state.attn_flash_pipeline == nil && std::getenv("MNET_METAL_DEBUG") != nullptr) {
             std::fprintf(stderr, "mnet: metal attention pipeline failed: %s\n", [[error description] UTF8String]);
         }
@@ -701,6 +760,25 @@ void encode_dispatch(MetalState& s, id<MTLComputeCommandEncoder> encoder, id<MTL
     [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
     [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
     static const bool use_fast = std::getenv("MNET_METAL_FAST") != nullptr && s.fast_pipeline != nil;
+    static const bool use_f32 = use_fast && s.fast_f32_pipeline != nil && s.dequant_pipeline != nil;
+    if (use_f32) {
+        // Widen the activation once, then read fp32 in the inner loop.
+        id<MTLBuffer> wide =
+            ensure_buffer(s.device, s.act_f32_buffer, s.act_f32_capacity, static_cast<std::size_t>(columns) * sizeof(float));
+        if (wide != nil) {
+            [encoder setComputePipelineState:s.dequant_pipeline];
+            [encoder setBuffer:activations offset:0 atIndex:0];
+            [encoder setBuffer:activation_scales offset:0 atIndex:1];
+            [encoder setBuffer:wide offset:0 atIndex:2];
+            [encoder dispatchThreads:MTLSizeMake(columns, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            [encoder setComputePipelineState:s.fast_f32_pipeline];
+            [encoder setBuffer:weight_buffer offset:0 atIndex:0];
+            [encoder setBuffer:wide offset:0 atIndex:1];
+            [encoder setBuffer:output_buffer offset:static_cast<NSUInteger>(out_offset_floats * sizeof(float)) atIndex:3];
+            [encoder dispatchThreadgroups:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            return;
+        }
+    }
     if (use_fast) {
         [encoder setComputePipelineState:s.fast_pipeline];
         [encoder dispatchThreadgroups:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
