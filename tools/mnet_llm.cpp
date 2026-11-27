@@ -4,21 +4,26 @@
 // Minimal generic LLM runner: reads model.json, tokenizes a prompt, runs the
 // decoder with KV cache reuse and greedily decodes tokens.
 
-#include <mnet/net.hpp>
-#include <mnet/tokenizer.hpp>
-
-#include <algorithm>
-#include <chrono>
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <regex>
 #include <sstream>
 #include <string>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <sys/resource.h>
+#endif
+
+#include <mnet/net.hpp>
+#include <mnet/tokenizer.hpp>
 
 namespace {
 
@@ -37,7 +42,21 @@ struct ModelConfig {
     float rope_theta = 10000.0F;
 };
 
+#if defined(__APPLE__)
+// ru_maxrss is in bytes on macOS; /proc does not exist there.
+std::int64_t peak_rss_kb() {
+    struct rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0) {
+        return 0;
+    }
+    return static_cast<std::int64_t>(usage.ru_maxrss) / 1024;
+}
+#endif
+
 std::int64_t read_vmhwm_kb() {
+#if defined(__APPLE__)
+    return peak_rss_kb();
+#endif
     std::ifstream status("/proc/self/status");
     std::string key;
     std::int64_t value = 0;
@@ -168,8 +187,144 @@ std::int32_t argmax(const mnet::Net& proj_net, const mnet::Mat& hidden_row) {
 
 }  // namespace
 
+// Half-precision embedding table read straight from the ncnn .bin blob. The
+// Embed layer asks ModelBin for "auto" weights, which expands a float16 payload
+// into float32: for the 0.6B models here that is +311 MiB of resident memory.
+// Gathering rows on demand keeps the peak well under 1 GiB; the 0x01306B47 tag
+// is checked when opening, so anything else falls back to the Net path.
+namespace {
+
+constexpr std::uint32_t kFp16BlobTag = 0x01306B47U;
+constexpr std::uint32_t kBf16BlobTag = 0x01348B83U;
+constexpr std::int32_t kFp16TagBytes = 4;
+
+[[nodiscard]] float fp16_to_float(std::uint16_t value) {
+    const std::uint32_t sign = (value & 0x8000U) << 16U;
+    std::int32_t exponent = static_cast<std::int32_t>((value >> 10U) & 0x1FU);
+    std::uint32_t mantissa = value & 0x3FFU;
+    std::uint32_t bits = 0;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            while ((mantissa & 0x400U) == 0U) {
+                mantissa <<= 1U;
+                --exponent;
+            }
+            ++exponent;
+            mantissa &= 0x3FFU;
+            bits = sign | (static_cast<std::uint32_t>(exponent + 112) << 23U) | (mantissa << 13U);
+        }
+    } else if (exponent == 31) {
+        bits = sign | 0x7F800000U | (mantissa << 13U);
+    } else {
+        bits = sign | (static_cast<std::uint32_t>(exponent + 112) << 23U) | (mantissa << 13U);
+    }
+    float result = 0.0F;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+[[nodiscard]] float bf16_to_float(std::uint16_t value) {
+    const std::uint32_t bits = static_cast<std::uint32_t>(value) << 16U;
+    float result = 0.0F;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+class Fp16Embedding {
+public:
+    [[nodiscard]] bool open(const std::string& path, std::int32_t width, std::int32_t rows) {
+        this->width_ = width;
+        this->rows_ = rows;
+        this->file_.open(path, std::ios::binary);
+        if (!this->file_) {
+            return false;
+        }
+        std::uint32_t tag = 0;
+        this->file_.read(reinterpret_cast<char*>(&tag), sizeof(tag));
+        if (!this->file_) {
+            return false;
+        }
+        if (tag != kFp16BlobTag && tag != kBf16BlobTag) {
+            return false;
+        }
+        this->bfloat16_ = tag == kBf16BlobTag;
+        return true;
+    }
+
+    [[nodiscard]] bool gather(const std::int32_t* ids, std::int32_t count, mnet::Mat& out) const {
+        if (!this->file_) {
+            return false;
+        }
+        out = mnet::Mat(this->width_, count);
+        if (out.empty()) {
+            return false;
+        }
+        std::vector<std::uint16_t> row(static_cast<std::size_t>(this->width_));
+        const auto row_bytes = static_cast<std::streamsize>(this->width_) * 2;
+        for (std::int32_t q = 0; q < count; ++q) {
+            std::int32_t id = ids[q];
+            if (id < 0) {
+                id = 0;
+            }
+            if (id >= this->rows_) {
+                id = this->rows_ - 1;
+            }
+            const auto offset = static_cast<std::streamoff>(kFp16TagBytes) +
+                                static_cast<std::streamoff>(id) * static_cast<std::streamoff>(row_bytes);
+            this->file_.seekg(offset);
+            this->file_.read(reinterpret_cast<char*>(row.data()), row_bytes);
+            if (!this->file_) {
+                return false;
+            }
+            float* dst = out.row(q);
+            for (std::int32_t p = 0; p < this->width_; ++p) {
+                const auto half = row[static_cast<std::size_t>(p)];
+                dst[p] = this->bfloat16_ ? bf16_to_float(half) : fp16_to_float(half);
+            }
+        }
+        return true;
+    }
+
+private:
+    mutable std::ifstream file_;
+    std::int32_t width_ = 0;
+    std::int32_t rows_ = 0;
+    bool bfloat16_ = false;
+};
+
+// Reads "0=<width> 1=<rows>" from the Embed line of the ncnn .param file.
+[[nodiscard]] bool find_embed_shape(const std::string& param_path, std::int32_t& width, std::int32_t& rows) {
+    const std::string text = read_text(param_path);
+    const std::size_t line_begin = text.find("\nEmbed");
+    if (line_begin == std::string::npos) {
+        return false;
+    }
+    const std::size_t line_end = text.find('\n', line_begin + 1);
+    const std::string line = text.substr(line_begin, line_end - line_begin);
+    const auto field = [&line](const char* key, std::int32_t& out) -> bool {
+        const std::size_t at = line.find(key);
+        if (at == std::string::npos) {
+            return false;
+        }
+        out = std::atoi(line.c_str() + at + std::strlen(key));
+        return out > 0;
+    };
+    return field(" 0=", width) && field(" 1=", rows);
+}
+
+}  // namespace
+
 #if !defined(_WIN32)
 static std::int64_t read_status_kb(const char* key) {
+#if defined(__APPLE__)
+    // VmPeak has no macOS equivalent; peak RSS is available from getrusage.
+    if (std::strcmp(key, "VmHWM:") == 0) {
+        return peak_rss_kb();
+    }
+    return 0;
+#endif
     std::ifstream status("/proc/self/status");
     std::string name;
     std::int64_t value = 0;
@@ -255,24 +410,44 @@ int main(int argc, char** argv) {
         return f ? static_cast<std::size_t>(f.tellg()) : 0;
     };
 
+    // The embedding table is a gather-only weight: when it is stored as float16
+    // read the rows on demand instead of letting the Embed layer expand the
+    // whole table to float32 (see Fp16Embedding).
+    Fp16Embedding direct_embed;
+    std::int32_t embed_width = 0;
+    std::int32_t embed_rows = 0;
+    bool direct_embed_ok = false;
+    const bool embed_net_requested = std::getenv("MNET_LLM_EMBED_NET") != nullptr;
+    if (!embed_net_requested && find_embed_shape(model_dir + "/" + cfg.embed_param, embed_width, embed_rows)) {
+        direct_embed_ok = direct_embed.open(model_dir + "/" + cfg.embed_bin, embed_width, embed_rows);
+    }
+    if (direct_embed_ok) {
+        std::fprintf(stderr, "embed=half-direct width=%d rows=%d\n", embed_width, embed_rows);
+    }
+
     mnet::Net embed_net;
-    embed_net.opt().num_threads = threads;
-    if (embed_net.load((model_dir + "/" + cfg.embed_param).c_str(), (model_dir + "/" + cfg.embed_bin).c_str()) != 0) {
-        std::fprintf(stderr, "embed load failed\n");
-        return 1;
+    if (!direct_embed_ok) {
+        embed_net.opt().num_threads = threads;
+        if (embed_net.load((model_dir + "/" + cfg.embed_param).c_str(), (model_dir + "/" + cfg.embed_bin).c_str()) !=
+            0) {
+            std::fprintf(stderr, "embed load failed\n");
+            return 1;
+        }
     }
     mnet::Net decoder_net;
     decoder_net.opt().num_threads = threads;
     decoder_net.opt().use_fast_int4_gemm = fast_int4;
     decoder_net.opt().use_int8_kv_cache = int8_kv;
     decoder_net.opt().kvcache_max_seqlen_hint = kv_capacity;
-    if (decoder_net.load((model_dir + "/" + cfg.decoder_param).c_str(),
-                         (model_dir + "/" + cfg.decoder_bin).c_str()) != 0) {
+    if (decoder_net.load((model_dir + "/" + cfg.decoder_param).c_str(), (model_dir + "/" + cfg.decoder_bin).c_str()) !=
+        0) {
         std::fprintf(stderr, "decoder load failed\n");
         return 1;
     }
     if (mem_budget != 0) {
-        const std::size_t embed_bytes = file_bytes(model_dir + "/" + cfg.embed_bin);
+        // A directly gathered float16 table is not resident, so only the LM
+        // head has to be subtracted from the shared budget in that case.
+        const std::size_t embed_bytes = direct_embed_ok ? 0 : file_bytes(model_dir + "/" + cfg.embed_bin);
         const std::size_t proj_bytes = file_bytes(model_dir + "/" + cfg.proj_bin);
         const std::size_t others = embed_bytes + proj_bytes;
         const std::size_t decoder_budget = mem_budget > others ? mem_budget - others : 1;
@@ -337,16 +512,22 @@ int main(int argc, char** argv) {
         return hidden_out;
     };
 
-    mnet::Mat ids(static_cast<std::int32_t>(prompt_ids.size()), 1);
-    std::memcpy(ids.data, prompt_ids.data(), prompt_ids.size() * sizeof(std::int32_t));
-    mnet::Net::Extractor embed_ex = embed_net.create_extractor();
-    if (embed_ex.input("in0", ids) != 0) {
-        std::fprintf(stderr, "embed input failed\n");
-        return 1;
-    }
+    const auto extract_embedding = [&](const std::int32_t* ids, std::int32_t count, mnet::Mat& out) -> bool {
+        if (direct_embed_ok) {
+            return direct_embed.gather(ids, count, out);
+        }
+        mnet::Mat id_mat(count, 1);
+        std::memcpy(id_mat.data, ids, static_cast<std::size_t>(count) * sizeof(std::int32_t));
+        mnet::Net::Extractor embed_ex = embed_net.create_extractor();
+        if (embed_ex.input("in0", id_mat) != 0) {
+            return false;
+        }
+        return embed_ex.extract("out0", out) == 0;
+    };
+
     mnet::Mat embedding;
-    if (embed_ex.extract("out0", embedding) != 0) {
-        std::fprintf(stderr, "embed extract failed\n");
+    if (!extract_embedding(prompt_ids.data(), prompt_len, embedding)) {
+        std::fprintf(stderr, "embed failed\n");
         return 1;
     }
 
@@ -401,12 +582,8 @@ int main(int argc, char** argv) {
     std::vector<std::int32_t> generated = {token};
     std::int32_t position = prompt_len;
     for (std::int32_t step = 0; step < max_new_tokens; ++step) {
-        mnet::Mat one_id(1, 1);
-        *reinterpret_cast<std::int32_t*>(static_cast<void*>(one_id.data)) = token;
-        mnet::Net::Extractor eex = embed_net.create_extractor();
-        eex.input("in0", one_id);
         mnet::Mat one_embed;
-        if (eex.extract("out0", one_embed) != 0) {
+        if (!extract_embedding(&token, 1, one_embed)) {
             break;
         }
 
@@ -439,12 +616,13 @@ int main(int argc, char** argv) {
     const double peak_rss_mb = 0.0;
     const double peak_vm_mb = 0.0;
 #endif
-    std::printf("model=%s threads=%d prompt_tokens=%d tokens=%zu prefill=%.1fms decode=%.2fms/tok peak_rss_mb=%.1f "
-                "peak_vm_mb=%.1f mem_peak_mb=%.1f mem_budget_mb=%zu budget_hit=%d text=%s\n",
-                model_dir.c_str(), threads, prompt_len, generated.size(), prefill_ms,
-                decode_steps > 0 ? decode_ms / static_cast<double>(decode_steps) : 0.0, peak_rss_mb, peak_vm_mb,
-                static_cast<double>(decoder_net.memory_peak_bytes()) / (1024.0 * 1024.0),
-                decoder_net.memory_budget_bytes() / (1024U * 1024U), decoder_net.memory_budget_exhausted() ? 1 : 0,
-                tokenizer.decode(generated).c_str());
+    std::printf(
+        "model=%s threads=%d prompt_tokens=%d tokens=%zu prefill=%.1fms decode=%.2fms/tok peak_rss_mb=%.1f "
+        "peak_vm_mb=%.1f mem_peak_mb=%.1f mem_budget_mb=%zu budget_hit=%d text=%s\n",
+        model_dir.c_str(), threads, prompt_len, generated.size(), prefill_ms,
+        decode_steps > 0 ? decode_ms / static_cast<double>(decode_steps) : 0.0, peak_rss_mb, peak_vm_mb,
+        static_cast<double>(decoder_net.memory_peak_bytes()) / (1024.0 * 1024.0),
+        decoder_net.memory_budget_bytes() / (1024U * 1024U), decoder_net.memory_budget_exhausted() ? 1 : 0,
+        tokenizer.decode(generated).c_str());
     return 0;
 }

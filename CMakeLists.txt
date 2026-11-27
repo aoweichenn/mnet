@@ -203,6 +203,45 @@ if(PROJECT_IS_TOP_LEVEL)
     target_link_libraries(mnet_probe PRIVATE mnet::mnet)
     target_compile_options(mnet_probe PRIVATE ${MNET_WARNINGS})
 
+    add_executable(mnet_gguf tools/mnet_gguf.cpp)
+    target_link_libraries(mnet_gguf PRIVATE mnet::mnet)
+    target_compile_options(mnet_gguf PRIVATE ${MNET_WARNINGS})
+
+    add_executable(mnet_bonsai_block tools/mnet_bonsai_block.cpp)
+    target_link_libraries(mnet_bonsai_block PRIVATE mnet::mnet)
+    target_compile_options(mnet_bonsai_block PRIVATE ${MNET_WARNINGS})
+
+    # The bit-exactness runners replicate AVX2 kernels instruction for
+    # instruction, so they only build on x86_64 hosts.
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+        add_executable(mnet_bonsai tools/mnet_bonsai.cpp)
+        target_link_libraries(mnet_bonsai PRIVATE mnet::mnet)
+        target_compile_options(mnet_bonsai PRIVATE ${MNET_WARNINGS})
+
+        add_executable(mnet_inkling2 tools/mnet_inkling2.cpp)
+        target_link_libraries(mnet_inkling2 PRIVATE mnet::mnet)
+        target_compile_options(mnet_inkling2 PRIVATE ${MNET_WARNINGS})
+    endif()
+
+    add_executable(mnet_inkling2_attn tools/mnet_inkling2_attn.cpp)
+    target_link_libraries(mnet_inkling2_attn PRIVATE mnet::mnet)
+    target_compile_options(mnet_inkling2_attn PRIVATE ${MNET_WARNINGS})
+
+    add_executable(mnet_tokenize tools/mnet_tokenize.cpp)
+    target_link_libraries(mnet_tokenize PRIVATE mnet::mnet)
+    target_compile_options(mnet_tokenize PRIVATE ${MNET_WARNINGS})
+
+    add_executable(mnet_tts tools/mnet_tts.cpp tools/mnet_tts_piper.cpp tools/mnet_tts_kokoro.cpp)
+    target_link_libraries(mnet_tts PRIVATE mnet::mnet)
+    target_include_directories(mnet_tts PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+    target_compile_options(mnet_tts PRIVATE ${MNET_WARNINGS})
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        # The Kokoro harmonic STFT reproduces ONNX Runtime's float32 Bluestein
+        # DFT; contraction into FMA changes the last bits of its silent-bin
+        # phases, so keep the arithmetic unfused.
+        target_compile_options(mnet_tts PRIVATE -ffp-contract=off)
+    endif()
+
     add_executable(mnet_llm tools/mnet_llm.cpp)
     target_link_libraries(mnet_llm PRIVATE mnet::mnet)
     target_compile_options(mnet_llm PRIVATE ${MNET_WARNINGS})

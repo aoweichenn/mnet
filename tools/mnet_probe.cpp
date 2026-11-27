@@ -230,20 +230,24 @@ int main(int argc, char** argv) {
         std::ofstream dump(dump_out, std::ios::binary);
         // Rows are written one at a time: ncnn aligns each channel to 16 bytes,
         // so a flat copy of `data` would include the padding.
+        const std::int32_t depth = last_out.d > 0 ? last_out.d : 1;
         const std::size_t count = static_cast<std::size_t>(last_out.w) * static_cast<std::size_t>(last_out.h) *
-                                  static_cast<std::size_t>(last_out.c);
+                                  static_cast<std::size_t>(depth) * static_cast<std::size_t>(last_out.c);
         for (std::int32_t q = 0; q < last_out.c; ++q) {
             const mnet::Mat plane = last_out.channel(q);
-            for (std::int32_t y = 0; y < last_out.h; ++y) {
-                dump.write(reinterpret_cast<const char*>(plane.row(y)),
-                           static_cast<std::streamsize>(static_cast<std::size_t>(last_out.w) * sizeof(float)));
+            for (std::int32_t z = 0; z < depth; ++z) {
+                const mnet::Mat slice = plane.depth(z);
+                for (std::int32_t y = 0; y < last_out.h; ++y) {
+                    dump.write(reinterpret_cast<const char*>(slice.row(y)),
+                               static_cast<std::streamsize>(static_cast<std::size_t>(last_out.w) * sizeof(float)));
+                }
             }
         }
         // A released or uninitialised blob can carry garbage dimensions; a
         // 14 GiB dump from a bogus w once filled the disk, so refuse them.
         constexpr std::int64_t kMaxDumpFloats = 1LL << 28;   // 1 GiB of floats
         if (last_out.w <= 0 || last_out.h < 0 || last_out.c <= 0 ||
-            static_cast<std::int64_t>(last_out.w) * last_out.h * last_out.c > kMaxDumpFloats) {
+            static_cast<std::int64_t>(last_out.w) * last_out.h * (last_out.d > 0 ? last_out.d : 1) * last_out.c > kMaxDumpFloats) {
             std::fprintf(stderr, "refusing to dump implausible blob %s w=%d h=%d c=%d\n", last_out_name.c_str(),
                          last_out.w, last_out.h, last_out.c);
             return 1;

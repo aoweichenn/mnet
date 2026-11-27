@@ -173,22 +173,15 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
             const Mat& bottom = blob_mats[bottom_index];
             Mat& top = blob_mats[top_index];
             if (layer->support_inplace) {
-                const bool exclusive = bottom.refcount != nullptr && *bottom.refcount == 1;
-                const auto layer_it = this->layer_index.find(layer);
-                const bool last_consumer = layer_it != this->layer_index.end() &&
-                                           static_cast<std::size_t>(bottom_index) < this->blob_last_use.size() &&
-                                           this->blob_last_use[static_cast<std::size_t>(bottom_index)] == layer_it->second;
                 if (top_index != bottom_index) {
                     // Mat refcount only tracks Mat object aliases, not other
-                    // graph consumers. Aliasing a shared bottom here silently
-                    // corrupts every later reader (e.g. GELU's x + x^3 path).
-                    if (exclusive && last_consumer) {
-                        top = bottom;
-                    } else {
-                        top = bottom.clone(opt.blob_allocator);
-                        if (top.empty()) {
-                            return -100;
-                        }
+                    // graph consumers, and lazy DFS execution does not follow
+                    // param order, so a static "last use" is not a valid
+                    // aliasing proof. Clone the bottom: aliasing a shared
+                    // bottom here silently corrupts every later reader.
+                    top = bottom.clone(opt.blob_allocator);
+                    if (top.empty()) {
+                        return -100;
                     }
                 }
                 const std::int32_t ret = layer->forward_inplace(blob_mats[top_index], opt);
@@ -457,6 +450,7 @@ std::int32_t Net::load_param_bytes(const std::uint8_t* data, std::size_t size, b
         }
         layer->bottoms = spec.bottoms;
         layer->tops = spec.tops;
+        layer->name = spec.name;
         layer->typeindex = spec.type_index;
         this->d->layer_index[layer] = static_cast<std::int32_t>(layers.size());
         // Only real Input layers are user-feedable. MemoryData and other

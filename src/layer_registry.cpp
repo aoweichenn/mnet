@@ -20,6 +20,7 @@
 #include <mlayer/clip.hpp>
 #include <mlayer/compare.hpp>
 #include <mlayer/concat.hpp>
+#include <mlayer/constantofshape.hpp>
 #include <mlayer/convolution.hpp>
 #include <mlayer/convolution1d.hpp>
 #include <mlayer/convolution3d.hpp>
@@ -44,6 +45,7 @@
 #include <mlayer/erf.hpp>
 #include <mlayer/exp.hpp>
 #include <mlayer/expanddims.hpp>
+#include <mlayer/expanddynamic.hpp>
 #include <mlayer/flatten.hpp>
 #include <mlayer/flip.hpp>
 #include <mlayer/gateddeltarule.hpp>
@@ -72,6 +74,8 @@
 #include <mlayer/mvn.hpp>
 #include <mlayer/noop.hpp>
 #include <mlayer/nonzero.hpp>
+#include <mlayer/onnxpad.hpp>
+#include <mlayer/onnxslice.hpp>
 #include <mlayer/normalize.hpp>
 #include <mlayer/packing.hpp>
 #include <mlayer/padding.hpp>
@@ -93,6 +97,7 @@
 #include <mlayer/relu.hpp>
 #include <mlayer/reorg.hpp>
 #include <mlayer/reshape.hpp>
+#include <mlayer/reshapedynamic.hpp>
 #include <mlayer/rmsnorm.hpp>
 #include <mlayer/rnn.hpp>
 #include <mlayer/roialign.hpp>
@@ -102,6 +107,7 @@
 #include <mlayer/scatternd.hpp>
 #include <mlayer/sdpa.hpp>
 #include <mlayer/selu.hpp>
+#include <mlayer/shape.hpp>
 #include <mlayer/shortconv.hpp>
 #include <mlayer/situ.hpp>
 #include <mlayer/stft.hpp>
@@ -115,12 +121,14 @@
 #include <mlayer/split.hpp>
 #include <mlayer/spp.hpp>
 #include <mlayer/squeeze.hpp>
+#include <mlayer/squeezeonnx.hpp>
 #include <mlayer/statisticspooling.hpp>
 #include <mlayer/swish.hpp>
 #include <mlayer/tanh.hpp>
 #include <mlayer/threshold.hpp>
 #include <mlayer/tile.hpp>
 #include <mlayer/unaryop.hpp>
+#include <mlayer/unsqueezeonnx.hpp>
 #include <mlayer/where.hpp>
 #include <mlayer/unfold.hpp>
 #include <mlayer/yolodetectionoutput.hpp>
@@ -206,6 +214,8 @@ void register_builtins() {
     add("BatchNorm", &make_layer<mlayer::BatchNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("ShuffleChannel", &make_layer<mlayer::ShuffleChannel<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Slice", &make_layer<mlayer::Slice<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("OnnxPad", &make_layer<mlayer::OnnxPad<Layer, MatT, OptionT, ParamDictT>>);
+    add("OnnxSlice", &make_layer<mlayer::OnnxSlice<Layer, MatT, OptionT, ParamDictT>>);
     add("RMSNorm", &make_layer<mlayer::RMSNorm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("AbsVal", &make_layer<mlayer::AbsVal<Layer, MatT, OptionT>>);
     add("BNLL", &make_layer<mlayer::BNLL<Layer, MatT, OptionT>>);
@@ -256,6 +266,7 @@ void register_builtins() {
     add("YoloDetectionOutput", &make_layer<mlayer::YoloDetectionOutput<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Yolov3DetectionOutput", &make_layer<mlayer::Yolov3DetectionOutput<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Squeeze", &make_layer<mlayer::Squeeze<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("SqueezeOnnx", &make_layer<mlayer::SqueezeOnnx<Layer, MatT, OptionT, ParamDictT>>);
     add("Padding", &make_layer<mlayer::Padding<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
     add("Tile", &make_layer<mlayer::Tile<Layer, MatT, OptionT, ParamDictT>>);
     add("Unfold", &make_layer<mlayer::Unfold<Layer, MatT, OptionT, ParamDictT>>);
@@ -291,6 +302,7 @@ void register_builtins() {
     add("Softplus", &make_layer<mlayer::Softplus<Layer, MatT, OptionT>>);
     add("PixelShuffle", &make_layer<mlayer::PixelShuffle<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Reorg", &make_layer<mlayer::Reorg<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("Shape", &make_layer<mlayer::Shape<Layer, MatT, OptionT, ParamDictT>>);
     add("Convolution1D",
         &make_layer<mlayer::Convolution1D<Layer, MatT, OptionT, ParamDictT, ModelBinT, false, mnet::activation_ss,
                                           mnet::copy_make_border, mnet::flatten>>);
@@ -300,17 +312,21 @@ void register_builtins() {
         &make_layer<mlayer::MultiHeadAttention<Layer, MatT, OptionT, ParamDictT, ModelBinT, false>>);
     add("YoloV5Focus", &make_layer<mlayer::YoloV5Focus<Layer, MatT, OptionT>>);
     add("MemoryData", &make_layer<mlayer::MemoryData<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
+    add("ConstantOfShape", &make_layer<mlayer::ConstantOfShape<Layer, MatT, OptionT, ParamDictT>>);
     add("PriorBox", &make_layer<mlayer::PriorBox<Layer, MatT, OptionT, ParamDictT, false>>);
     add("DetectionOutput", &make_layer<mlayer::DetectionOutput<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Eltwise", &make_layer<mlayer::Eltwise<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Noop", &make_layer<mlayer::Noop<Layer, MatT, OptionT>>);
     add("UnaryOp", &make_layer<mlayer::UnaryOp<Layer, MatT, OptionT, ParamDictT, false>>);
     add("ExpandDims", &make_layer<mlayer::ExpandDims<Layer, MatT, OptionT, ParamDictT, false>>);
+    add("UnsqueezeOnnx", &make_layer<mlayer::UnsqueezeOnnx<Layer, MatT, OptionT, ParamDictT>>);
+    add("ExpandDynamic", &make_layer<mlayer::ExpandDynamic<Layer, MatT, OptionT, ParamDictT>>);
     add("Reduction", &make_layer<mlayer::Reduction<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Einsum", &make_layer<mlayer::Einsum<Layer, MatT, OptionT, ParamDictT, false>>);
     add("BinaryOp", &make_layer<mlayer::BinaryOp<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Permute", &make_layer<mlayer::Permute<Layer, MatT, OptionT, ParamDictT, false>>);
     add("Reshape", &make_layer<mlayer::Reshape<Layer, MatT, OptionT, ParamDictT>>);
+    add("ReshapeDynamic", &make_layer<mlayer::ReshapeDynamic<Layer, MatT, OptionT, ParamDictT>>);
     add("MatMul", &make_layer<mlayer::MatMul<Layer, MatT, OptionT, ParamDictT>>);
     add("Interp", &make_layer<mlayer::Interp<Layer, MatT, OptionT, ParamDictT>>);
     add("Gemm", &make_layer<mlayer::Gemm<Layer, MatT, OptionT, ParamDictT, ModelBinT>>);
