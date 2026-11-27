@@ -211,17 +211,17 @@ if(PROJECT_IS_TOP_LEVEL)
     target_link_libraries(mnet_bonsai_block PRIVATE mnet::mnet)
     target_compile_options(mnet_bonsai_block PRIVATE ${MNET_WARNINGS})
 
-    # The bit-exactness runners replicate AVX2 kernels instruction for
-    # instruction, so they only build on x86_64 hosts.
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-        add_executable(mnet_bonsai tools/mnet_bonsai.cpp)
-        target_link_libraries(mnet_bonsai PRIVATE mnet::mnet)
-        target_compile_options(mnet_bonsai PRIVATE ${MNET_WARNINGS})
+    # The bit-exactness runners replicate llama.cpp's 8-lane kernels. On x86_64
+    # they use the AVX2/FMA intrinsics directly; elsewhere the same lane layout
+    # and reduction order is evaluated scalar (mnet/detail/ggml_vec_exact.hpp),
+    # so the binaries build and produce the same numbers on arm64 as well.
+    add_executable(mnet_bonsai tools/mnet_bonsai.cpp)
+    target_link_libraries(mnet_bonsai PRIVATE mnet::mnet)
+    target_compile_options(mnet_bonsai PRIVATE ${MNET_WARNINGS})
 
-        add_executable(mnet_inkling2 tools/mnet_inkling2.cpp)
-        target_link_libraries(mnet_inkling2 PRIVATE mnet::mnet)
-        target_compile_options(mnet_inkling2 PRIVATE ${MNET_WARNINGS})
-    endif()
+    add_executable(mnet_inkling2 tools/mnet_inkling2.cpp)
+    target_link_libraries(mnet_inkling2 PRIVATE mnet::mnet)
+    target_compile_options(mnet_inkling2 PRIVATE ${MNET_WARNINGS})
 
     add_executable(mnet_inkling2_attn tools/mnet_inkling2_attn.cpp)
     target_link_libraries(mnet_inkling2_attn PRIVATE mnet::mnet)

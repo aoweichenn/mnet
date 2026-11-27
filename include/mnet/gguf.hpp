@@ -444,6 +444,11 @@ struct Q8_0Blocks {
     res = _mm_add_ss(res, _mm_movehdup_ps(res));
     return _mm_cvtss_f32(res);
 }
+#endif
+
+// The tinyBLAS kernels below are plain float code (no intrinsics): they describe
+// llamafile's eight-lane accumulation order and must stay available on every
+// architecture so the runners reproduce the same products off x86.
 
 // llama.cpp enables llamafile sgemm (tinyBLAS) only for batches with two or
 // more tokens (`llamafile_sgemm`: if (n < 2) return false). tinyBLAS computes
@@ -492,6 +497,7 @@ inline bool& ggml_tinyblas_batch() {
     return ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]));
 }
 
+#if defined(__AVX2__) && defined(__FMA__)
 [[nodiscard]] inline float dot_f32_reference_avx2(const float* x, const float* y, std::uint64_t size) {
     const std::uint64_t aligned = size & ~static_cast<std::uint64_t>(31);
     __m256 sums[4] = {_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps()};

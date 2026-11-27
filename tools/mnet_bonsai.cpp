@@ -23,6 +23,7 @@
 #include <vector>
 
 #include <mnet/bpe.hpp>
+#include <mnet/detail/ggml_vec_exact.hpp>
 #include <mnet/gguf.hpp>
 
 namespace {
@@ -87,6 +88,7 @@ void rotate_block(const float* matrix, const float* input, float* output, std::u
 #endif
     for (std::int64_t row = 0; row < static_cast<std::int64_t>(block_size); ++row) {
         const float* weights = matrix + static_cast<std::size_t>(row) * block_size;
+#if defined(__AVX2__) && defined(__FMA__)
         __m256 sums[4] = {_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps()};
         for (std::uint32_t i = 0; i < aligned; i += 32) {
             for (std::uint32_t j = 0; j < 4; ++j) {
@@ -100,6 +102,9 @@ void rotate_block(const float* matrix, const float* input, float* output, std::u
         const __m128 t0 = _mm_add_ps(_mm256_castps256_ps128(sums[0]), _mm256_extractf128_ps(sums[0], 1));
         const __m128 t1 = _mm_hadd_ps(t0, t0);
         float total = _mm_cvtss_f32(_mm_hadd_ps(t1, t1));
+#else
+        float total = mnet::detail::ggml_dot_f32_row(weights, input, block_size);
+#endif
         for (std::uint32_t i = aligned; i < block_size; ++i) {
             total += weights[i] * input[i];
         }
@@ -128,11 +133,7 @@ void rotate_block(const float* matrix, const float* input, float* output, std::u
     }
     return total;
 #else
-    float total = 0.0F;
-    for (std::size_t i = 0; i < size; ++i) {
-        total += x[i] * y[i];
-    }
-    return total;
+    return mnet::detail::ggml_dot_f32(x, y, size);
 #endif
 }
 
@@ -165,11 +166,7 @@ void rotate_block(const float* matrix, const float* input, float* output, std::u
     }
     return static_cast<float>(total);
 #else
-    double total = 0.0;
-    for (std::size_t i = 0; i < size; ++i) {
-        total += static_cast<double>(x[i] * y[i]);
-    }
-    return static_cast<float>(total);
+    return mnet::detail::ggml_dot_f16_f32(x, y, size);
 #endif
 }
 
@@ -326,6 +323,12 @@ void silu_inplace(float* data, std::size_t size) {
 #if defined(__AVX2__) && defined(__FMA__)
     for (; i + 7 < size; i += 8) {
         _mm256_storeu_ps(data + i, ggml_v_silu(_mm256_loadu_ps(data + i)));
+    }
+#else
+    for (; i + 7 < size; i += 8) {
+        for (std::size_t j = 0; j < 8; ++j) {
+            data[i + j] = mnet::detail::ggml_silu(data[i + j]);
+        }
     }
 #endif
     for (; i < size; ++i) {

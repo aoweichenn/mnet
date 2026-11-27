@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <mnet/bpe.hpp>
+#include <mnet/detail/ggml_vec_exact.hpp>
 #include <mnet/gguf.hpp>
 
 namespace {
@@ -170,11 +171,7 @@ void clip_rows(std::vector<float>& values, const std::vector<float>& scale, std:
     }
     return total;
 #else
-    float total = 0.0F;
-    for (std::size_t i = 0; i < size; ++i) {
-        total += x[i] * y[i];
-    }
-    return total;
+    return mnet::detail::ggml_dot_f32(x, y, size);
 #endif
 }
 
@@ -190,6 +187,15 @@ void clip_rows(std::vector<float>& values, const std::vector<float>& scale, std:
         reduced = _mm_add_ps(reduced, _mm_movehl_ps(reduced, reduced));
         reduced = _mm_add_ss(reduced, _mm_movehdup_ps(reduced));
         sum += static_cast<double>(_mm_cvtss_f32(reduced));
+    }
+#else
+    for (; i + 7 < size; i += 8) {
+        float lanes[8];
+        for (std::size_t j = 0; j < 8; ++j) {
+            lanes[j] = mnet::detail::ggml_expf(input[i + j] - max);
+            output[i + j] = lanes[j];
+        }
+        sum += static_cast<double>(mnet::detail::ggml_hsum8(lanes));
     }
 #endif
     for (; i < size; ++i) {
