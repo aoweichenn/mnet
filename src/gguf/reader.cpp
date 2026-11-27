@@ -622,6 +622,71 @@ bool Reader::attention(const Quantized& q, const Quantized& k, const Quantized& 
     return mnet::detail::compute::attention_q2_0(job);
 }
 
+bool Reader::ssm_block(const Quantized& qkv, const Quantized& gate, const Quantized& out, const SsmParams& params,
+                       float* result) {
+    if (qkv.type != kGgmlQ2_0 || gate.type != kGgmlQ2_0 || out.type != kGgmlQ2_0) {
+        return false;
+    }
+    if (params.block_size < 64U || params.block_size > 1024U || (params.block_size & (params.block_size - 1U)) != 0U) {
+        return false;
+    }
+    const std::uint64_t key_heads = params.key_heads;
+    const std::uint64_t value_heads = params.value_heads;
+    const std::uint64_t head_dim = params.head_dim;
+    if (key_heads == 0U || value_heads == 0U || head_dim == 0U || (value_heads % key_heads) != 0U) {
+        return false;
+    }
+    if (params.conv_kernel < 2U || params.conv_kernel > 8U) {
+        return false;
+    }
+    const std::uint64_t conv_dim = key_heads * head_dim * 2U + value_heads * head_dim;
+    if (qkv.rows != conv_dim || gate.rows != value_heads * head_dim || out.columns != value_heads * head_dim) {
+        return false;
+    }
+    if (qkv.columns != gate.columns || out.rows != qkv.columns) {
+        return false;
+    }
+    const auto info = type_info(qkv.type);
+    if (qkv.columns % info.block_elements != 0 || out.columns % info.block_elements != 0 ||
+        (value_heads * head_dim) % params.block_size != 0U) {
+        return false;
+    }
+    if (params.input == nullptr || params.raw_input == nullptr || params.beta_w == nullptr ||
+        params.alpha_w == nullptr || params.dt == nullptr || params.ssm_a == nullptr || params.conv_w == nullptr ||
+        params.ssm_norm == nullptr || params.signs == nullptr || params.conv_state == nullptr ||
+        params.ssm_state == nullptr || result == nullptr) {
+        return false;
+    }
+    const std::uint64_t row_bytes = qkv.columns / info.block_elements * info.block_bytes;
+    const std::uint64_t out_bytes = out.columns / info.block_elements * info.block_bytes;
+    mnet::detail::compute::SsmQ2_0Job job;
+    job.qkv = {qkv.type, qkv.blocks.data(), qkv.rows, row_bytes, qkv.scale, nullptr, qkv.identity};
+    job.gate = {gate.type, gate.blocks.data(), gate.rows, row_bytes, gate.scale, nullptr, gate.identity};
+    job.out = {out.type, out.blocks.data(), out.rows, out_bytes, out.scale, result, out.identity};
+    job.input = params.input;
+    job.raw_input = params.raw_input;
+    job.beta_w = params.beta_w;
+    job.alpha_w = params.alpha_w;
+    job.dt = params.dt;
+    job.ssm_a = params.ssm_a;
+    job.conv_w = params.conv_w;
+    job.ssm_norm = params.ssm_norm;
+    job.signs = params.signs;
+    job.conv_state = params.conv_state;
+    job.ssm_state = params.ssm_state;
+    job.result = result;
+    job.columns = qkv.columns;
+    job.conv_dim = static_cast<std::uint32_t>(conv_dim);
+    job.key_heads = params.key_heads;
+    job.value_heads = params.value_heads;
+    job.head_dim = params.head_dim;
+    job.conv_kernel = params.conv_kernel;
+    job.block_size = params.block_size;
+    job.eps = params.eps;
+    job.identity = qkv.identity;
+    return mnet::detail::compute::ssm_q2_0(job);
+}
+
 void Reader::matmul(const Quantized& matrix, const float* input, float* output, std::size_t tokens,
                     std::size_t input_stride, std::size_t output_stride) {
     for (std::size_t t = 0; t < tokens; ++t) {

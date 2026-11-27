@@ -113,6 +113,47 @@ void set_attention_backend(AttentionQ2_0Fn backend);
 // the step-by-step path (which is also the bit-exact reference).
 [[nodiscard]] bool attention_q2_0(const AttentionQ2_0Job& job);
 
+// Fused gated-delta (SSM) block: qkv and gate matvecs, the beta/alpha head
+// projections, the causal depthwise convolution, the per-head delta rule over
+// the persistent state, the gated RMS norm with the grouped-head permute, the
+// signed Hadamard, on-device Q8_0 requantisation and the ssm_out projection.
+//
+// The state is large (value_heads * head_dim^2 floats per layer), so the device
+// keeps it resident and keyed by `identity`; conv_state/ssm_state seed it on
+// first use and are not written back. Callers that need the state on the host
+// (state dumps, save/load) must use the step-by-step path.
+struct SsmQ2_0Job {
+    MatvecQ8_0Job qkv;                    // rows = conv_dim, columns = n_embd
+    MatvecQ8_0Job gate;                   // rows = value_heads * head_dim, columns = n_embd
+    MatvecQ8_0Job out;                    // rows = n_embd, columns = value_heads * head_dim
+    const float* input = nullptr;         // n_embd, already Hadamard'ed (qkv/gate)
+    const float* raw_input = nullptr;     // n_embd, before the Hadamard (beta/alpha)
+    const float* beta_w = nullptr;        // value_heads * n_embd
+    const float* alpha_w = nullptr;       // value_heads * n_embd
+    const float* dt = nullptr;            // value_heads
+    const float* ssm_a = nullptr;         // value_heads
+    const float* conv_w = nullptr;        // conv_dim * conv_kernel
+    const float* ssm_norm = nullptr;      // head_dim
+    const std::int32_t* signs = nullptr;  // value_heads * head_dim
+    const float* conv_state = nullptr;    // (conv_kernel - 1) * conv_dim, seed only
+    const float* ssm_state = nullptr;     // value_heads * head_dim * head_dim, seed only
+    float* result = nullptr;              // n_embd
+    std::uint64_t columns = 0;            // n_embd
+    std::uint32_t conv_dim = 0;
+    std::uint32_t key_heads = 0;
+    std::uint32_t value_heads = 0;
+    std::uint32_t head_dim = 0;
+    std::uint32_t conv_kernel = 0;
+    std::uint32_t block_size = 0;
+    float eps = 0.0F;
+    std::uint64_t identity = 0;  // per-layer key for the resident state
+};
+
+using SsmQ2_0Fn = bool (*)(const SsmQ2_0Job& job);
+void set_ssm_backend(SsmQ2_0Fn backend);
+
+[[nodiscard]] bool ssm_q2_0(const SsmQ2_0Job& job);
+
 // True when the caller may use the tolerance-level fast paths.
 [[nodiscard]] bool fast_path_enabled();
 
@@ -122,6 +163,9 @@ void set_attention_backend(AttentionQ2_0Fn backend);
 
 // Same A/B switch for the fused attention block (MNET_NO_FUSED_ATTN).
 [[nodiscard]] bool fused_attention_enabled();
+
+// Same A/B switch for the fused gated-delta block (MNET_NO_FUSED_SSM).
+[[nodiscard]] bool fused_ssm_enabled();
 
 }  // namespace mnet::detail::compute
 

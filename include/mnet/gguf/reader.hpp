@@ -118,6 +118,35 @@ public:
                                         const Quantized& out, const AttentionParams& params, float* k_cache,
                                         float* v_cache, float* result);
 
+    // Geometry and side data of the fused gated-delta block. The head
+    // projections, convolution taps and norm weights are fp32 (llama keeps
+    // them unquantized); conv_state/ssm_state seed the device-resident state.
+    struct SsmParams {
+        const float* input = nullptr;      // n_embd, Hadamard'ed
+        const float* raw_input = nullptr;  // n_embd, before the Hadamard
+        const float* beta_w = nullptr;     // value_heads * n_embd
+        const float* alpha_w = nullptr;    // value_heads * n_embd
+        const float* dt = nullptr;
+        const float* ssm_a = nullptr;
+        const float* conv_w = nullptr;
+        const float* ssm_norm = nullptr;
+        const std::int32_t* signs = nullptr;  // value_heads * head_dim
+        const float* conv_state = nullptr;
+        const float* ssm_state = nullptr;
+        std::uint32_t key_heads = 0;
+        std::uint32_t value_heads = 0;
+        std::uint32_t head_dim = 0;
+        std::uint32_t conv_kernel = 0;
+        std::uint32_t block_size = 0;
+        float eps = 0.0F;
+    };
+
+    // Fused gated-delta block: qkv/gate matvec, head gates, causal depthwise
+    // convolution, the delta-rule scan, the gated RMS norm with the grouped
+    // permute, signed Hadamard and the ssm_out projection in one submission.
+    [[nodiscard]] static bool ssm_block(const Quantized& qkv, const Quantized& gate, const Quantized& out,
+                                        const SsmParams& params, float* result);
+
     static void matmul(const Quantized& matrix, const float* input, float* output, std::size_t tokens,
                        std::size_t input_stride, std::size_t output_stride);
 

@@ -254,11 +254,56 @@ struct LayerState {
     std::vector<float> ssm_state;   // [value_heads * head_dim * head_dim]
 };
 
+// TEMP profiling: MNET_PROFILE=1 prints the CPU split accumulated per section.
+namespace {
+struct TimeTable {
+    static constexpr std::size_t kSlots = 24;
+    const char* names[kSlots] = {};
+    double seconds[kSlots] = {};
+    std::size_t count = 0;
+    ~TimeTable() {
+        if (std::getenv("MNET_PROFILE") == nullptr) {
+            return;
+        }
+        for (std::size_t i = 0; i < this->count; ++i) {
+            std::fprintf(stderr, "mnet: profile %-14s %8.3f s\n", this->names[i], this->seconds[i]);
+        }
+    }
+};
+TimeTable& time_table() {
+    static TimeTable table;
+    return table;
+}
+}  // namespace
+
+void add_time(const char* name, double seconds) {
+    TimeTable& table = time_table();
+    for (std::size_t i = 0; i < table.count; ++i) {
+        if (std::string_view(table.names[i]) == name) {
+            table.seconds[i] += seconds;
+            return;
+        }
+    }
+    if (table.count < TimeTable::kSlots) {
+        table.names[table.count] = name;
+        table.seconds[table.count] = seconds;
+        ++table.count;
+    }
+}
+
+[[nodiscard]] inline double since(std::chrono::steady_clock::time_point begin) {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+}
+
 class Model {
 public:
     Model(std::string path) : reader_(std::move(path)) { this->load_config(); }
 
     [[nodiscard]] const Config& config() const { return this->config_; }
+
+    // Set when the run saves or loads the recurrent state: the device keeps
+    // that state resident, so the step-by-step path must own it instead.
+    void set_state_io(bool enabled) { this->state_io_ = enabled; }
     [[nodiscard]] const Reader& reader() const { return this->reader_; }
 
     [[nodiscard]] bool is_recurrent(std::size_t layer) const {
@@ -453,17 +498,22 @@ private:
     void layer_forward(std::size_t layer, const LayerWeights& w, LayerState& state, float* x, std::size_t position,
                        const std::string* dump_dir, std::size_t token) {
         const auto signs_embd = this->reader_.signs_for_width(static_cast<std::uint32_t>(this->config_.n_embd));
+        const auto t_norm = std::chrono::steady_clock::now();
         auto xn = rms_norm(x, this->config_.n_embd, w.attn_norm, this->config_.eps);
+        add_time("rms_norm_in", since(t_norm));
         if (dump_dir != nullptr) {
             this->dump_tensor(*dump_dir, "attn_norm", layer, xn, token);
         }
 
+        const auto t_branch = std::chrono::steady_clock::now();
         std::vector<float> branch;
         if (this->is_recurrent(layer)) {
             branch = this->recurrent_branch(w, state, xn, dump_dir, layer, token);
         } else {
             branch = this->attention_branch(w, state, xn, position, dump_dir, layer, token);
         }
+        add_time("branch", since(t_branch));
+        const auto t_tail = std::chrono::steady_clock::now();
         for (std::size_t i = 0; i < this->config_.n_embd; ++i) {
             x[i] += branch[i];
         }
@@ -502,6 +552,7 @@ private:
         for (std::size_t i = 0; i < this->config_.n_embd; ++i) {
             x[i] += down[i];
         }
+        add_time("layer_tail", since(t_tail));
         if (dump_dir != nullptr) {
             this->dump_tensor(*dump_dir, "ffn_out", layer, down, token);
             this->dump_tensor(*dump_dir, "l_out", layer, std::vector<float>(x, x + this->config_.n_embd), token);
@@ -515,6 +566,38 @@ private:
         auto xh = xn;
         hadamard_forward(xh, signs_embd, this->config_.hadamard_block);
 
+        // One submission for the whole block. --dump and the state save/load
+        // tools keep the step-by-step path: the device keeps the recurrent
+        // state resident and does not hand it back.
+        if (dump_dir == nullptr && !this->state_io_ && mnet::detail::compute::fast_path_enabled() &&
+            mnet::detail::compute::fused_ssm_enabled()) {
+            const auto signs_value =
+                this->reader_.signs_for_width(static_cast<std::uint32_t>(kSsmValueHeads * kSsmHeadDim));
+            std::vector<float> projected(this->config_.n_embd);
+            Reader::SsmParams params;
+            params.input = xh.data();
+            params.raw_input = xn.data();
+            params.beta_w = w.beta_w.data();
+            params.alpha_w = w.alpha_w.data();
+            params.dt = w.dt.data();
+            params.ssm_a = w.ssm_a.data();
+            params.conv_w = w.conv_w.data();
+            params.ssm_norm = w.ssm_norm.data();
+            params.signs = signs_value.data();
+            params.conv_state = state.conv_state.data();
+            params.ssm_state = state.ssm_state.data();
+            params.key_heads = static_cast<std::uint32_t>(kSsmKeyHeads);
+            params.value_heads = static_cast<std::uint32_t>(kSsmValueHeads);
+            params.head_dim = static_cast<std::uint32_t>(kSsmHeadDim);
+            params.conv_kernel = static_cast<std::uint32_t>(kSsmConvKernel);
+            params.block_size = this->config_.hadamard_block;
+            params.eps = this->config_.eps;
+            if (Reader::ssm_block(w.qkv, w.gate, w.ssm_out, params, projected.data())) {
+                return projected;
+            }
+        }
+
+        const auto t_matvec = std::chrono::steady_clock::now();
         std::vector<float> qkv(w.qkv.rows);
         std::vector<float> z(w.gate.rows);
         Reader::matvec(w.qkv, xh.data(), qkv.data());
@@ -524,6 +607,8 @@ private:
             this->dump_tensor(*dump_dir, "z", layer, z, token);
         }
 
+        add_time("ssm_matvec", since(t_matvec));
+        const auto t_gates = std::chrono::steady_clock::now();
         std::vector<float> beta_raw(kSsmValueHeads);
         std::vector<float> alpha_raw(kSsmValueHeads);
         linear_f32(w.beta_w, kSsmValueHeads, this->config_.n_embd, xn.data(), beta_raw.data());
@@ -539,6 +624,8 @@ private:
             this->dump_tensor(*dump_dir, "gate", layer, gate, token);
         }
 
+        add_time("ssm_gates", since(t_gates));
+        const auto t_conv = std::chrono::steady_clock::now();
         // Causal depthwise convolution over the last kernel rows of qkv.
         std::vector<float> window((kSsmConvKernel - 1) * 10240 + 10240);
         std::copy(state.conv_state.begin(), state.conv_state.end(), window.begin());
@@ -559,6 +646,8 @@ private:
                   window.begin() + static_cast<std::ptrdiff_t>((kSsmConvKernel - 1) * 10240 + 10240),
                   state.conv_state.begin());
 
+        add_time("ssm_conv", since(t_conv));
+        const auto t_scan = std::chrono::steady_clock::now();
         float* q = conv.data();
         float* k = conv.data() + 2048;
         float* v = conv.data() + 4096;
@@ -605,6 +694,8 @@ private:
             this->dump_tensor(*dump_dir, "attn_output", layer, delta, token);
         }
 
+        add_time("ssm_scan", since(t_scan));
+        const auto t_post = std::chrono::steady_clock::now();
         // Gated RMS norm per value head, then the tiled -> grouped head permute
         // that the folded ssm_out weight was built with.
         std::vector<float> normed(6144);
@@ -639,6 +730,7 @@ private:
         hadamard_forward(grouped, signs_value, this->config_.hadamard_block);
         std::vector<float> projected(this->config_.n_embd);
         Reader::matvec(w.ssm_out, grouped.data(), projected.data());
+        add_time("ssm_post", since(t_post));
         if (dump_dir != nullptr) {
             this->dump_tensor(*dump_dir, "linear_attn_out", layer, projected, token);
         }
@@ -818,6 +910,7 @@ private:
 
     Reader reader_;
     Config config_;
+    bool state_io_ = false;
     std::vector<LayerState> state_;
     std::vector<float> output_norm_;
     Reader::Quantized output_;
@@ -901,6 +994,7 @@ int main(std::int32_t argc, char** argv) {
             return 2;
         }
         model.load_shared();
+        model.set_state_io(!load_state_path.empty() || !save_state_path.empty());
         model.init_state(model.config().n_layer);
         if (!load_state_path.empty()) {
             model.load_state(load_state_path);
