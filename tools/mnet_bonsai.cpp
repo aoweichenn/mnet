@@ -343,6 +343,12 @@ void swiglu(float* out, const float* gate, const float* up, std::size_t size) {
     for (; i + 7 < size; i += 8) {
         _mm256_storeu_ps(out + i, _mm256_mul_ps(ggml_v_silu(_mm256_loadu_ps(gate + i)), _mm256_loadu_ps(up + i)));
     }
+#else
+    for (; i + 7 < size; i += 8) {
+        for (std::size_t j = 0; j < 8; ++j) {
+            out[i + j] = mnet::detail::ggml_silu(gate[i + j]) * up[i + j];
+        }
+    }
 #endif
     for (; i < size; ++i) {
         out[i] = silu(gate[i]) * up[i];

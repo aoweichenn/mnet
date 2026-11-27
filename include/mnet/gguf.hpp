@@ -436,6 +436,12 @@ struct Q8_0Blocks {
     return value;
 }
 
+// hsum of an 8-lane accumulator: ((l0+l4)+(l2+l6)) + ((l1+l5)+(l3+l7)),
+// the same reduction the AVX2 kernels use, available on every architecture.
+[[nodiscard]] inline float hsum_float_8(const float* lanes) {
+    return ((lanes[0] + lanes[4]) + (lanes[2] + lanes[6])) + ((lanes[1] + lanes[5]) + (lanes[3] + lanes[7]));
+}
+
 #if defined(__AVX2__) && defined(__FMA__)
 [[nodiscard]] inline float hsum_float_8_avx2(__m256 value) {
     __m128 res = _mm256_extractf128_ps(value, 1);
@@ -495,6 +501,75 @@ inline bool& ggml_tinyblas_batch() {
         acc[j] = std::fma(bf16_bits_to_float(bits), bf16_bits_to_float(input[i + j]), acc[j]);
     }
     return ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]));
+}
+
+// Portable lane-faithful replicas of the AVX2 row dots used by dot_row, so the
+// non-AVX2 builds reproduce ggml_vec_dot_f32 / ggml_vec_dot_bf16 exactly
+// (four 8-lane accumulators, (s0+s2)+(s1+s3), hsum, and the same tails).
+[[nodiscard]] inline float dot_f32_reference(const float* x, const float* y, std::uint64_t size) {
+    const std::uint64_t aligned = size & ~static_cast<std::uint64_t>(31);
+    float sums[4][8] = {};
+    for (std::uint64_t i = 0; i < aligned; i += 32) {
+        for (std::uint64_t j = 0; j < 4; ++j) {
+            for (std::uint64_t l = 0; l < 8; ++l) {
+                sums[j][l] = std::fma(x[i + j * 8 + l], y[i + j * 8 + l], sums[j][l]);
+            }
+        }
+    }
+    // _mm_hadd_ps twice: ((l0+l4)+(l1+l5)) + ((l2+l6)+(l3+l7)), which is a
+    // different tree from hsum_float_8_avx2 used by the other quantised dots.
+    float lanes[8];
+    for (std::uint64_t l = 0; l < 8; ++l) {
+        lanes[l] = (sums[0][l] + sums[2][l]) + (sums[1][l] + sums[3][l]);
+    }
+    float total = ((lanes[0] + lanes[4]) + (lanes[1] + lanes[5])) + ((lanes[2] + lanes[6]) + (lanes[3] + lanes[7]));
+    const std::uint64_t tail = size - aligned;
+    const std::uint64_t rounded = tail - tail % 4;
+    std::uint64_t i = aligned;
+    for (std::uint64_t k = 0; k < rounded; ++k, ++i) {
+        volatile float product = x[i] * y[i];
+        total += product;
+    }
+    for (; i < size; ++i) {
+        total = std::fma(x[i], y[i], total);
+    }
+    return total;
+}
+
+// ggml_vec_dot_bf16: four 8-lane mul/add accumulators (no fma), combined
+// (c1+c3)+(c2+c4), hsum, then a double accumulator for the leftovers.
+[[nodiscard]] inline float dot_bf16_bf16_reference(const std::uint8_t* data, const std::uint16_t* input,
+                                                   std::uint64_t columns) {
+    const auto load8 = [](const std::uint8_t* bytes, float* out) {
+        for (std::size_t l = 0; l < 8; ++l) {
+            const std::uint16_t bits = static_cast<std::uint16_t>(bytes[l * 2] | (bytes[l * 2 + 1] << 8U));
+            out[l] = bf16_bits_to_float(bits);
+        }
+    };
+    float acc[4][8] = {};
+    std::uint64_t i = 0;
+    const auto* input_bytes = reinterpret_cast<const std::uint8_t*>(input);
+    for (; i + 32 <= columns; i += 32) {
+        for (std::uint64_t j = 0; j < 4; ++j) {
+            float w[8];
+            float a[8];
+            load8(data + (i + j * 8) * 2, w);
+            load8(input_bytes + (i + j * 8) * 2, a);
+            for (std::uint64_t l = 0; l < 8; ++l) {
+                acc[j][l] = acc[j][l] + w[l] * a[l];
+            }
+        }
+    }
+    float lanes[8];
+    for (std::uint64_t l = 0; l < 8; ++l) {
+        lanes[l] = (acc[0][l] + acc[2][l]) + (acc[1][l] + acc[3][l]);
+    }
+    double sumf = static_cast<double>(hsum_float_8(lanes));
+    for (; i < columns; ++i) {
+        const float weight = bf16_bits_to_float(static_cast<std::uint16_t>(data[i * 2] | (data[i * 2 + 1] << 8U)));
+        sumf += static_cast<double>(weight * bf16_bits_to_float(input[i]));
+    }
+    return static_cast<float>(sumf);
 }
 
 #if defined(__AVX2__) && defined(__FMA__)
@@ -1148,30 +1223,39 @@ inline bool& ggml_tinyblas_batch() {
 #if defined(__AVX2__) && defined(__FMA__)
     return dot_q2_0_q8_0_avx2(data, q8, blocks);
 #else
-    float sumf = 0.0F;
-    for (std::uint64_t b = 0; b < blocks; ++b) {
-        const std::uint8_t* block = data + b * 18U;
-        const float d0 =
+    // Lane-faithful replica of q2_0_acc_block_avx2 / dot_q2_0_q8_0_avx2: eight
+    // byte-group lanes, one fma per Q8_0 sub-block, two accumulators alternating
+    // blocks, then the AVX2 hsum. Integer products are exact, so the only
+    // rounding left is the same float sequence the vector kernel uses.
+    const auto accumulate = [&](float (&acc)[8], const std::uint8_t* block, std::uint64_t sub) {
+        const float dx =
             half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U)));
-        const std::uint8_t* qs = block + 2;
-        float sumi = 0.0F;
-        for (int k = 0; k < 2; ++k) {
-            const float d1 = q8.d[b * 2U + static_cast<std::uint64_t>(k)];
-            const std::int8_t* qy = q8.qs.data() + (b * 2U + static_cast<std::uint64_t>(k)) * 32U;
-            const std::uint8_t* q = qs + static_cast<std::uint64_t>(k) * 8U;
-            int sumi_block = 0;
-            for (int bb = 0; bb < 8; ++bb) {
-                const std::uint8_t byte = q[bb];
-                sumi_block += (((byte >> 0) & 3) - 1) * qy[static_cast<std::size_t>(bb) * 4U + 0U];
-                sumi_block += (((byte >> 2) & 3) - 1) * qy[static_cast<std::size_t>(bb) * 4U + 1U];
-                sumi_block += (((byte >> 4) & 3) - 1) * qy[static_cast<std::size_t>(bb) * 4U + 2U];
-                sumi_block += (((byte >> 6) & 3) - 1) * qy[static_cast<std::size_t>(bb) * 4U + 3U];
+        for (std::uint64_t k = 0; k < 2; ++k) {
+            const float d = dx * q8.d[sub + k];
+            const std::int8_t* qy = q8.qs.data() + (sub + k) * 32U;
+            const std::uint8_t* q = block + 2 + k * 8U;
+            for (std::size_t j = 0; j < 8; ++j) {
+                const std::uint8_t byte = q[j];
+                const int lane = (((byte >> 0) & 3) - 1) * qy[j * 4U + 0U] + (((byte >> 2) & 3) - 1) * qy[j * 4U + 1U] +
+                                 (((byte >> 4) & 3) - 1) * qy[j * 4U + 2U] + (((byte >> 6) & 3) - 1) * qy[j * 4U + 3U];
+                acc[j] = std::fma(d, static_cast<float>(lane), acc[j]);
             }
-            sumi += d1 * static_cast<float>(sumi_block);
         }
-        sumf += d0 * sumi;
+    };
+    float acc0[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+    float acc1[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+    std::uint64_t i = 0;
+    for (; i + 1 < blocks; i += 2) {
+        accumulate(acc0, data + i * 18U, 2U * i);
+        accumulate(acc1, data + (i + 1U) * 18U, 2U * i + 2U);
     }
-    return sumf;
+    if (i < blocks) {
+        accumulate(acc0, data + i * 18U, 2U * i);
+    }
+    for (std::size_t j = 0; j < 8; ++j) {
+        acc0[j] += acc1[j];
+    }
+    return hsum_float_8(acc0);
 #endif
 }
 
@@ -1179,20 +1263,30 @@ inline bool& ggml_tinyblas_batch() {
 #if defined(__AVX2__) && defined(__FMA__)
     return dot_q8_0_q8_0_avx2(data, q8, blocks);
 #else
-    float sumf = 0.0F;
+    // Lane-faithful replica of dot_q8_0_q8_0_avx2: one eight-lane accumulator,
+    // lane j = sum of the four int8 products at 4j..4j+3, one fma per block.
+    float acc[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
     for (std::uint64_t b = 0; b < blocks; ++b) {
-        const std::uint8_t* block = data + b * 34;
+        const std::uint8_t* block = data + b * 34U;
         const float d =
             half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U))) *
             q8.d[b];
-        int sumi = 0;
-        for (int j = 0; j < 32; ++j) {
-            sumi += static_cast<int>(static_cast<std::int8_t>(block[2 + j])) *
-                    q8.qs[b * 32U + static_cast<std::uint64_t>(j)];
+        const std::int8_t* qy = q8.qs.data() + b * 32U;
+        for (std::size_t j = 0; j < 8; ++j) {
+            // maddubs saturates each int16 pair before madd_epi16 adds the two
+            // pairs; real Q8_0 codes stay in [-127, 127] so this only matters
+            // for synthetic data containing -128.
+            const auto pair = [&](std::size_t k0) {
+                const int sum = static_cast<int>(static_cast<std::int8_t>(block[2U + j * 4U + k0])) * qy[j * 4U + k0] +
+                                static_cast<int>(static_cast<std::int8_t>(block[2U + j * 4U + k0 + 1U])) *
+                                    qy[j * 4U + k0 + 1U];
+                return std::min(32767, std::max(-32768, sum));
+            };
+            const int lane = pair(0) + pair(2);
+            acc[j] = std::fma(d, static_cast<float>(lane), acc[j]);
         }
-        sumf += d * static_cast<float>(sumi);
     }
-    return sumf;
+    return hsum_float_8(acc);
 #endif
 }
 
@@ -2306,11 +2400,7 @@ inline float Reader::dot_row(std::uint32_t type, const std::uint8_t* data, const
 #if defined(__AVX2__) && defined(__FMA__)
             return dot_f32_reference_avx2(values, input, columns);
 #else
-            float sum = 0.0F;
-            for (std::uint64_t i = 0; i < columns; ++i) {
-                sum += values[i] * input[i];
-            }
-            return sum;
+            return dot_f32_reference(values, input, columns);
 #endif
         }
         case kGgmlF16: {
@@ -2335,13 +2425,7 @@ inline float Reader::dot_row(std::uint32_t type, const std::uint8_t* data, const
 #if defined(__AVX2__) && defined(__FMA__)
             return dot_bf16_bf16_avx2(data, converted.data(), columns);
 #else
-            double sumf = 0.0;
-            for (std::uint64_t i = 0; i < columns; ++i) {
-                const float value =
-                    bf16_bits_to_float(static_cast<std::uint16_t>(data[i * 2] | (data[i * 2 + 1] << 8U)));
-                sumf += static_cast<double>(value * bf16_bits_to_float(converted[i]));
-            }
-            return static_cast<float>(sumf);
+            return dot_bf16_bf16_reference(data, converted.data(), columns);
 #endif
         }
         case kGgmlQ8_0: {
