@@ -1007,9 +1007,17 @@ kernel void rms_norm_f32_batch(device const float* x        [[buffer(0)]],
                                uint group_size              [[threads_per_threadgroup]]) {
     device const float* xb = x + (ulong)tgid * size;
     device float* ob = out + (ulong)tgid * size;
+    // The reference accumulates the sum of squares in double. fp64 is 460x
+    // slower here (measured), so compensate in fp32 instead: Q8 requantisation is
+    // a threshold function and a scale that drifts by 1e-6 flips codes (log 179).
     float sum = 0.0f;
+    float compensation = 0.0f;
     for (uint i = tid; i < size; i += group_size) {
-        sum = fma(xb[i], xb[i], sum);
+        const float square = xb[i] * xb[i];
+        const float y = square - compensation;
+        const float next = sum + y;
+        compensation = (next - sum) - y;
+        sum = next;
     }
     partial[tid] = sum;
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -3748,15 +3756,37 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
         return false;
     }
     auto* activation_destination = static_cast<float*>(b.activation.contents);
-    // The prepped inputs go up as fp32 and are quantised on the device, the same
-    // way the FFN block does it (log 167): b.grouped is free until the norm
+    // Like the FFN block, this one can take the raw layer output and do the
+    // RMSNorm and Hadamard itself (log 179): b.grouped is free until the norm
     // writes it, and count * hidden floats covers count * columns.
+    const bool device_prep = entries[0].residual != nullptr && entries[0].input_norm != nullptr &&
+                             entries[0].input_signs != nullptr && s.rms_norm_batch_pipeline != nil &&
+                             s.hadamard_multi_pipeline != nil;
+    if (device_prep) {
+        s.prep_norm = ensure_buffer(s.device, s.prep_norm, s.prep_norm_capacity,
+                                    static_cast<std::size_t>(job.columns) * sizeof(float));
+        s.prep_signs = ensure_buffer(s.device, s.prep_signs, s.prep_signs_capacity,
+                                     static_cast<std::size_t>(job.columns) * sizeof(std::int32_t));
+        if (s.prep_norm == nil || s.prep_signs == nil) {
+            return false;
+        }
+        std::memcpy(s.prep_norm.contents, entries[0].input_norm, static_cast<std::size_t>(job.columns) * sizeof(float));
+        std::memcpy(s.prep_signs.contents, entries[0].input_signs,
+                    static_cast<std::size_t>(job.columns) * sizeof(std::int32_t));
+    }
     auto* staging = static_cast<float*>(b.grouped.contents);
     for (std::size_t t = 0; t < count; ++t) {
-        std::memcpy(staging + t * job.columns, entries[t].input,
-                    static_cast<std::size_t>(job.columns) * sizeof(float));
-        std::memcpy(activation_destination + t * job.columns, entries[t].raw_input,
-                    static_cast<std::size_t>(job.columns) * sizeof(float));
+        if (device_prep) {
+            std::memcpy(staging + t * job.columns, entries[t].residual,
+                        static_cast<std::size_t>(job.columns) * sizeof(float));
+        } else {
+            std::memcpy(staging + t * job.columns, entries[t].input,
+                        static_cast<std::size_t>(job.columns) * sizeof(float));
+        }
+        if (!device_prep) {
+            std::memcpy(activation_destination + t * job.columns, entries[t].raw_input,
+                        static_cast<std::size_t>(job.columns) * sizeof(float));
+        }
     }
 
     const std::uint32_t head_dim32 = static_cast<std::uint32_t>(head_dim);
@@ -3788,7 +3818,29 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
 
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-    if (s.q8_quantize_pipeline != nil) {
+    if (device_prep) {
+        const std::uint32_t prep_size = static_cast<std::uint32_t>(job.columns);
+        const float prep_eps = job.eps;
+        [encoder setComputePipelineState:s.rms_norm_batch_pipeline];
+        [encoder setBuffer:b.grouped offset:0 atIndex:0];
+        [encoder setBuffer:s.prep_norm offset:0 atIndex:1];
+        [encoder setBuffer:b.activation offset:0 atIndex:2];
+        [encoder setBytes:&prep_size length:sizeof(prep_size) atIndex:3];
+        [encoder setBytes:&prep_eps length:sizeof(prep_eps) atIndex:4];
+        [encoder setThreadgroupMemoryLength:256U * sizeof(float) atIndex:0];
+        [encoder dispatchThreadgroups:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        const std::uint32_t prep_block = job.block_size;
+        const std::uint32_t prep_sign_blocks = static_cast<std::uint32_t>(job.columns / job.block_size);
+        [encoder setComputePipelineState:s.hadamard_multi_pipeline];
+        [encoder setBuffer:b.activation offset:0 atIndex:0];
+        [encoder setBuffer:s.prep_signs offset:0 atIndex:1];
+        [encoder setBuffer:b.q8 offset:0 atIndex:2];
+        [encoder setBuffer:b.scales offset:0 atIndex:3];
+        [encoder setBytes:&prep_block length:sizeof(prep_block) atIndex:4];
+        [encoder setBytes:&prep_sign_blocks length:sizeof(prep_sign_blocks) atIndex:5];
+        [encoder dispatchThreadgroups:MTLSizeMake((job.columns / job.block_size) * count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(job.block_size, 1, 1)];
+    } else if (s.q8_quantize_pipeline != nil) {
         const std::uint32_t q8_blocks = static_cast<std::uint32_t>(job.columns / 32U);
         const std::uint32_t q8_tokens = static_cast<std::uint32_t>(count);
         [encoder setComputePipelineState:s.q8_quantize_pipeline];

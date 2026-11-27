@@ -599,6 +599,13 @@ private:
         std::vector<float>& xh = this->buffer_for(this->scratch_.xh, tokens * n_embd);
         std::vector<float>& projected = this->buffer_for(this->scratch_.projected, tokens * n_embd);
         std::vector<float>& normed = this->buffer_for(this->scratch_.normed, n_embd);
+        // The fused block normalises and rotates its input on the device; the host
+        // copy is only for the dump path and the per-token fallback (log 179).
+        const bool device_prep = dump_dir == nullptr && mnet::detail::compute::fast_path_enabled() &&
+                                 mnet::detail::compute::fused_ssm_enabled() &&
+                                 std::getenv("MNET_NO_BATCHED_SSM") == nullptr &&
+                                 std::getenv("MNET_HOST_PREP") == nullptr;
+        const auto prepare_host = [&]() {
         for (std::size_t t = 0; t < tokens; ++t) {
             rms_norm_into(hidden.data() + t * n_embd, n_embd, w.attn_norm, this->config_.eps, normed.data());
             if (dump_dir != nullptr) {
@@ -607,6 +614,10 @@ private:
             std::copy(normed.begin(), normed.end(), xn.begin() + static_cast<std::ptrdiff_t>(t * n_embd));
             hadamard_forward(normed, this->signs_embd_, this->config_.hadamard_block);
             std::copy(normed.begin(), normed.end(), xh.begin() + static_cast<std::ptrdiff_t>(t * n_embd));
+        }
+        };
+        if (!device_prep) {
+            prepare_host();
         }
         std::vector<Reader::SsmBatchEntry> entries(tokens);
         Reader::SsmParams params;
@@ -628,13 +639,18 @@ private:
         bool handled = mnet::detail::compute::fast_path_enabled() && mnet::detail::compute::fused_ssm_enabled();
         if (handled) {
             for (std::size_t t = 0; t < tokens; ++t) {
-                entries[t].input = xh.data() + t * n_embd;
-                entries[t].raw_input = xn.data() + t * n_embd;
+                entries[t].input = device_prep ? nullptr : xh.data() + t * n_embd;
+                entries[t].raw_input = device_prep ? nullptr : xn.data() + t * n_embd;
+                entries[t].residual = device_prep ? hidden.data() + t * n_embd : nullptr;
                 entries[t].output = projected.data() + t * n_embd;
             }
-            handled = Reader::ssm_block_batch(w.qkv, w.gate, w.ssm_out, params, entries.data(), tokens);
+            handled = Reader::ssm_block_batch(w.qkv, w.gate, w.ssm_out, params, entries.data(), tokens,
+                                             w.attn_norm.data(), this->signs_embd_.data());
         }
         if (!handled) {
+            if (device_prep) {
+                prepare_host();
+            }
             for (std::size_t t = 0; t < tokens; ++t) {
                 this->layer_branch(layer, w, state, hidden.data() + t * n_embd, 0U, dump_dir, t);
             }

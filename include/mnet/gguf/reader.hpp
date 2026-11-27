@@ -218,10 +218,17 @@ public:
         const float* input = nullptr;      // n_embd, Hadamard'ed
         const float* raw_input = nullptr;  // n_embd, before the Hadamard
         float* output = nullptr;           // n_embd
+        const float* residual = nullptr;   // n_embd, raw: prepped on the device
     };
 
     [[nodiscard]] static bool ssm_block_batch(const Quantized& qkv, const Quantized& gate, const Quantized& out,
                                               const SsmParams& params, const SsmBatchEntry* entries, std::size_t count);
+
+    // Same, with each token's RMSNorm and Hadamard moved onto the device: entries
+    // carry `residual`, and input_norm/input_signs describe the preparation.
+    [[nodiscard]] static bool ssm_block_batch(const Quantized& qkv, const Quantized& gate, const Quantized& out,
+                                              const SsmParams& params, const SsmBatchEntry* entries, std::size_t count,
+                                              const float* input_norm, const std::int32_t* input_signs);
 
     static void matmul(const Quantized& matrix, const float* input, float* output, std::size_t tokens,
                        std::size_t input_stride, std::size_t output_stride);

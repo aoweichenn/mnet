@@ -208,6 +208,11 @@ struct SsmBatchEntry {
     const float* input = nullptr;      // n_embd, already Hadamard'ed
     const float* raw_input = nullptr;  // n_embd, before the Hadamard
     float* output = nullptr;           // n_embd
+    // Optional device preparation, as for FfnSwigluEntry: with residual set the
+    // block normalises it and rotates it itself instead of reading host work.
+    const float* residual = nullptr;            // n_embd
+    const float* input_norm = nullptr;          // n_embd
+    const std::int32_t* input_signs = nullptr;  // n_embd, block_size blocks
 };
 
 using SsmQ2_0BatchFn = bool (*)(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::size_t count);

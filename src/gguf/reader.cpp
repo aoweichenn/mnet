@@ -830,6 +830,12 @@ bool Reader::attention(const Quantized& q, const Quantized& k, const Quantized& 
 
 bool Reader::ssm_block_batch(const Quantized& qkv, const Quantized& gate, const Quantized& out, const SsmParams& params,
                              const SsmBatchEntry* entries, std::size_t count) {
+    return Reader::ssm_block_batch(qkv, gate, out, params, entries, count, nullptr, nullptr);
+}
+
+bool Reader::ssm_block_batch(const Quantized& qkv, const Quantized& gate, const Quantized& out, const SsmParams& params,
+                             const SsmBatchEntry* entries, std::size_t count, const float* input_norm,
+                             const std::int32_t* input_signs) {
     if (entries == nullptr || count == 0U) {
         return false;
     }
@@ -885,12 +891,19 @@ bool Reader::ssm_block_batch(const Quantized& qkv, const Quantized& gate, const 
     }
     std::vector<mnet::detail::compute::SsmBatchEntry> batch(count);
     for (std::size_t t = 0; t < count; ++t) {
-        if (entries[t].input == nullptr || entries[t].raw_input == nullptr || entries[t].output == nullptr) {
+        // With the device preparation only the residual is supplied: the block
+        // derives both the normalised and the Hadamard'ed forms itself.
+        const bool prepared = entries[t].residual != nullptr && input_norm != nullptr && input_signs != nullptr;
+        if ((entries[t].input == nullptr && !prepared) || (entries[t].raw_input == nullptr && !prepared) ||
+            entries[t].output == nullptr) {
             return false;
         }
         batch[t].input = entries[t].input;
         batch[t].raw_input = entries[t].raw_input;
         batch[t].output = entries[t].output;
+        batch[t].residual = entries[t].residual;
+        batch[t].input_norm = input_norm;
+        batch[t].input_signs = input_signs;
     }
     return mnet::detail::compute::ssm_q2_0_batch(job, batch.data(), count);
 }
