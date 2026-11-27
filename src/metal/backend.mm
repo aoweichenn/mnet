@@ -33,12 +33,9 @@ namespace {
 // It compiles into a separate library because it brings its own common.h helpers
 // and macros, which would collide with the kernels above.
 //
-// Used for the FFN down projection by default: on that shape it measures 4.84
-// TFLOP/s against the fp16-tile kernel's 4.24, and its fp32 weight tile leaves
-// the final logits closer to the CPU reference (3.96e-3 against 4.70e-3). Using
-// it for all three projections is 2% faster again but takes the deviation to
-// 5.30e-3, past the fast path's 4.754e-3 bound, so it stays opt-in
-// (MNET_MAT_MAT_LLAMA=1; 0 disables it, 3 restricts it to gate/up).
+// Used for all three FFN projections by default: it measures 4.99 TFLOP/s on
+// gate/up and 4.84 on down against the fp16-tile kernel's 4.87 and 4.24, worth
+// 8 ms of the forward.
 constexpr const char* kLlamaMatMatSource = R"MSL(
 #include <metal_stdlib>
 #include <metal_simdgroup>
@@ -2182,13 +2179,18 @@ struct LlamaMatMatArgs {
     std::int16_t r3;
 };
 
-// MNET_MAT_MAT_LLAMA: 1 both FFN projections, 2 the down projection only (the
-// default), 3 gate/up only, 0 the tiled kernel everywhere. Compiled on first use
-// so the exact path never pays for it.
+// MNET_MAT_MAT_LLAMA: 1 both FFN projections (the default), 2 the down shape
+// only, 3 gate/up only, 0 our tiled kernel everywhere. Compiled on first use so
+// the exact path never pays for it.
+//
+// Both projections leave the logits at 4.128e-3 normalised against the CPU,
+// inside the fast path's 4.754e-3 bound; with the scalar attention projection
+// this mask measured 5.301e-3, and tiling that projection (ba628a0) is what
+// brought it back inside.
 int llama_mat_mat_mask() {
     static const int mask = [] {
         const char* value = std::getenv("MNET_MAT_MAT_LLAMA");
-        return value != nullptr ? std::atoi(value) : 2;
+        return value != nullptr ? std::atoi(value) : 1;
     }();
     return mask;
 }

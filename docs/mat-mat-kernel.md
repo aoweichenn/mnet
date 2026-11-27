@@ -38,15 +38,21 @@ shape - the shape where our kernel loses the most.
 
 ## What was adopted
 
-The down projection now runs llama's kernel (separate Metal library, compiled on
-first use, `MNET_MAT_MAT_LLAMA=0` to disable):
+All three FFN projections now run llama's kernel (separate Metal library,
+compiled on first use, `MNET_MAT_MAT_LLAMA=0` to disable):
 
-    warm 32-token forward, --repeat 3       425.5 ms -> 416.0 ms   (-2.2%)
-    normalised logit deviation from CPU     4.704e-3 -> 3.959e-3
+    warm 32-token forward, --repeat 3       425.5 ms -> 381.7 ms
+    normalised logit deviation from CPU     4.704e-3 -> 4.128e-3
 
-Using it for all three projections is faster again (408.8 ms) but takes the
-deviation to 5.301e-3, past the fast path's bound of 4.754e-3, so that stays
-opt-in (`MNET_MAT_MAT_LLAMA=1`). The exact path never reaches this code: it uses
+That total covers two changes: the kernel itself (425.5 -> 389.9), and tiling the
+attention output projection (389.9 -> 381.7, see `ba628a0`), which was still
+re-reading every weight row per token. The tiled projection also lowered the
+fast path's deviation enough that using llama's kernel for gate/up as well as
+down stayed inside the 4.754e-3 bound; before that it measured 5.301e-3, so only
+the down shape could use it.
+
+`MNET_MAT_MAT_LLAMA=2` restricts it to the down shape (390.4 ms, 3.973e-3), `=3`
+to gate/up (390.6 ms, 4.095e-3). The exact path never reaches this code: it uses
 `q2_0_matvec`, and is still 0 of 248320 elements different from the CPU.
 
 ## Why fp32 tiles are not the explanation
