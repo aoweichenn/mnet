@@ -862,6 +862,58 @@ kernel void ssm_conv_norm(device const float* window     [[buffer(0)]],
     }
     out[index] = value;
 }
+kernel void ssm_conv_norm_batch(device const float* window     [[buffer(0)]],
+                          device const float* conv_w     [[buffer(1)]],
+                          device float* out              [[buffer(2)]],
+                          constant uint& conv_dim        [[buffer(3)]],
+                          constant uint& kernel_size     [[buffer(4)]],
+                          constant uint& ring            [[buffer(5)]],
+                          constant uint& norm_blocks     [[buffer(6)]],
+                          constant float& eps            [[buffer(7)]],
+                          constant uint& head_dim        [[buffer(8)]],
+                          constant uint& wrap            [[buffer(9)]],
+                          constant uint& blocks_per_token [[buffer(10)]],
+                          uint tgid                      [[threadgroup_position_in_grid]],
+                          uint tid                       [[thread_position_in_threadgroup]]) {
+    threadgroup float squares[8];
+    const uint token = tgid / blocks_per_token;
+    const uint block = tgid % blocks_per_token;
+    const uint index = block * head_dim + tid;
+    float sum = 0.0f;
+    for (uint k = 0; k < kernel_size; ++k) {
+        // `wrap` is the ring size; zero means the window is a straight run of
+        // rows with `ring` the oldest one (the batched path keeps the whole
+        // layer's sequence).
+        // Linear window: token t's taps are rows t .. t+kernel-1.
+        const uint row = token + k;
+        const volatile float product = window[row * conv_dim + index] * conv_w[index * kernel_size + k];
+        sum += product;
+    }
+    float value = sum / (1.0f + exp(-sum));
+    if (block < norm_blocks) {
+        // llama's build_gdn_l2_norm: scale(x, 1/sqrt(mean + eps/n)) then
+        // scale(., 1/sqrt(n)), as two separate multiplies.
+        const float partial = simd_sum(value * value);
+        if ((tid & 31u) == 0u) {
+            squares[tid >> 5u] = partial;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0u) {
+            float total = 0.0f;
+            const uint groups = (head_dim + 31u) / 32u;
+            for (uint i = 0; i < groups; ++i) {
+                total += squares[i];
+            }
+            squares[0] = total / float(head_dim);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const float n = float(head_dim);
+        const float rms = 1.0f / sqrt(squares[0] + eps / n);
+        const float extra = 1.0f / sqrt(n);
+        value = (value * rms) * extra;
+    }
+    out[token * conv_dim + index] = value;
+}
 
 // One delta-rule step per value head: decay the state, compute the delta from
 // the key, rank-1 update, then read the query out. One threadgroup per head,
@@ -1285,6 +1337,7 @@ struct MetalState {
     id<MTLComputePipelineState> ssm_rows_pipeline = nil;
     id<MTLComputePipelineState> ssm_act_pipeline = nil;
     id<MTLComputePipelineState> ssm_conv_norm_pipeline = nil;
+    id<MTLComputePipelineState> ssm_conv_norm_batch_pipeline = nil;
     id<MTLComputePipelineState> ssm_scan_pipeline = nil;
     id<MTLComputePipelineState> ssm_scan_batch_pipeline = nil;
     id<MTLComputePipelineState> ssm_scan_tiled_pipeline = nil;
@@ -1374,6 +1427,7 @@ void initialise(MetalState& state) {
         state.ssm_rows_pipeline = pipeline_for("ssm_rows_dot");
         state.ssm_act_pipeline = pipeline_for("ssm_activation");
         state.ssm_conv_norm_pipeline = pipeline_for("ssm_conv_norm");
+        state.ssm_conv_norm_batch_pipeline = pipeline_for("ssm_conv_norm_batch");
         state.ssm_scan_pipeline = pipeline_for("ssm_scan");
         state.ssm_scan_batch_pipeline = pipeline_for("ssm_scan_batch");
         state.ssm_scan_tiled_pipeline = pipeline_for("ssm_scan_tiled");
@@ -2887,19 +2941,13 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
                 threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     }
     // Head gates and the convolution for every token.
-    for (std::size_t t = 0; !skip_conv && t < count; ++t) {
-        if (skip_conv) {
-            continue;
-        }
-        if (skip_conv) {
-            continue;
-        }
-        // Linear window: token t's four taps are rows t .. t + kernel - 1.
-        const std::uint32_t ring32 = static_cast<std::uint32_t>(t);
-        [encoder setComputePipelineState:s.ssm_conv_norm_pipeline];
+    if (!skip_conv && s.ssm_conv_norm_batch_pipeline != nil) {
+        const std::uint32_t ring32 = 0U;
+        const std::uint32_t blocks_per_token = static_cast<std::uint32_t>(conv_dim / head_dim);
+        [encoder setComputePipelineState:s.ssm_conv_norm_batch_pipeline];
         [encoder setBuffer:layer.window offset:0 atIndex:0];
         [encoder setBuffer:layer.side offset:conv_w_offset * sizeof(float) atIndex:1];
-        [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(t * conv_dim * sizeof(float)) atIndex:2];
+        [encoder setBuffer:b.conv offset:0 atIndex:2];
         [encoder setBytes:&conv_dim32 length:sizeof(conv_dim32) atIndex:3];
         [encoder setBytes:&kernel32 length:sizeof(kernel32) atIndex:4];
         [encoder setBytes:&ring32 length:sizeof(ring32) atIndex:5];
@@ -2907,8 +2955,26 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
         [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
         [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:8];
         [encoder setBytes:&wrap_linear length:sizeof(wrap_linear) atIndex:9];
-        [encoder dispatchThreadgroups:MTLSizeMake(conv_dim / head_dim, 1, 1)
+        [encoder setBytes:&blocks_per_token length:sizeof(blocks_per_token) atIndex:10];
+        [encoder dispatchThreadgroups:MTLSizeMake(blocks_per_token * count, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+    } else if (!skip_conv) {
+        for (std::size_t t = 0; t < count; ++t) {
+            const std::uint32_t ring32 = static_cast<std::uint32_t>(t);
+            [encoder setComputePipelineState:s.ssm_conv_norm_pipeline];
+            [encoder setBuffer:layer.window offset:0 atIndex:0];
+            [encoder setBuffer:layer.side offset:conv_w_offset * sizeof(float) atIndex:1];
+            [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(t * conv_dim * sizeof(float)) atIndex:2];
+            [encoder setBytes:&conv_dim32 length:sizeof(conv_dim32) atIndex:3];
+            [encoder setBytes:&kernel32 length:sizeof(kernel32) atIndex:4];
+            [encoder setBytes:&ring32 length:sizeof(ring32) atIndex:5];
+            [encoder setBytes:&norm_blocks32 length:sizeof(norm_blocks32) atIndex:6];
+            [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
+            [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:8];
+            [encoder setBytes:&wrap_linear length:sizeof(wrap_linear) atIndex:9];
+            [encoder dispatchThreadgroups:MTLSizeMake(conv_dim / head_dim, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+        }
     }
     // Token order from here: the scan carries state and the rest reads it.
     const std::uint32_t q_offset = 0U;
