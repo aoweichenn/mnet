@@ -9,15 +9,16 @@
 
 #include <mnet/detail/compute.hpp>
 
+#include <mnet/detail/txn_log.hpp>
 #include <mnet/gguf/format.hpp>
 
 #import <Metal/Metal.h>
 
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -857,6 +858,49 @@ bool matvec_batch(const MatvecQ8_0Job* jobs, std::size_t count, std::uint64_t co
     return true;
 }
 
+// MNET_PROFILE splits the fused FFN call into host prep, submission and
+// readback so the per-call overhead can be compared with the GPU work.
+struct FfnProfile {
+    std::uint64_t q8_ns = 0;
+    std::uint64_t copy_ns = 0;
+    std::uint64_t prep_ns = 0;
+    std::uint64_t submit_ns = 0;
+    std::uint64_t wait_ns = 0;
+    std::uint64_t tail_ns = 0;
+    std::uint64_t calls = 0;
+    std::uint64_t misses = 0;
+    ~FfnProfile() {
+        if (std::getenv("MNET_PROFILE") == nullptr || this->calls == 0U) {
+            return;
+        }
+        const auto per_call = [&](std::uint64_t ns) {
+            return static_cast<double>(ns) * 1.0e-6 / static_cast<double>(this->calls);
+        };
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "mnet: ffn per call  q8 %.3f  buffers %.3f  weights %.3f  encode %.3f  wait %.3f  tail %.3f ms\n",
+                      per_call(this->q8_ns), per_call(this->copy_ns), per_call(this->prep_ns),
+                      per_call(this->submit_ns), per_call(this->wait_ns), per_call(this->tail_ns));
+        mnet::detail::write_diagnostic(std::string(line));
+        char second[192];
+        const auto& map = state().weight_buffers;
+        std::snprintf(second, sizeof(second), "mnet: weight cache %zu entries, %zu buckets, %zu ffn misses\n",
+                      map.size(), map.bucket_count(), static_cast<std::size_t>(this->misses));
+        mnet::detail::write_diagnostic(std::string(second));
+    }
+};
+
+FfnProfile& ffn_profile() {
+    static FfnProfile profile;
+    return profile;
+}
+
+std::uint64_t now_ns() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
 // gate/up matvec -> SwiGLU -> on-device Q8_0 -> down matvec, one submission.
 bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const MatvecQ8_0Job& down, std::uint64_t columns,
                 std::uint64_t hidden, const float* input, const std::int32_t* signs, std::uint32_t block_size) {
@@ -875,7 +919,9 @@ bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const Matvec
         return false;
     }
 
+    const std::uint64_t profile_start = now_ns();
     const auto q80 = mnet::gguf::make_q8_0_blocks(input, columns);
+    const std::uint64_t profile_q8 = now_ns();
     id<MTLBuffer> q8_buffer = ensure_buffer(s.device, s.q8_buffer, s.q8_capacity, static_cast<std::size_t>(columns));
     id<MTLBuffer> scale_buffer = ensure_buffer(s.device, s.scale_buffer, s.scale_capacity,
                                                static_cast<std::size_t>(columns / 32U) * sizeof(float));
@@ -901,6 +947,8 @@ bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const Matvec
     std::memcpy(q8_buffer.contents, q80.qs.data(), static_cast<std::size_t>(columns));
     std::memcpy(scale_buffer.contents, q80.d.data(), static_cast<std::size_t>(columns / 32U) * sizeof(float));
 
+    const std::uint64_t profile_copy = now_ns();
+    const std::size_t cache_before = s.weight_buffers.size();
     id<MTLBuffer> gate_weights = weight_buffer_for(s, gate.identity, gate.data, gate.rows, gate.row_bytes);
     id<MTLBuffer> up_weights = weight_buffer_for(s, up.identity, up.data, up.rows, up.row_bytes);
     id<MTLBuffer> down_weights = weight_buffer_for(s, down.identity, down.data, down.rows, down.row_bytes);
@@ -908,6 +956,13 @@ bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const Matvec
         return false;
     }
 
+    const std::uint64_t profile_prep = now_ns();
+    {
+        FfnProfile& profile = ffn_profile();
+        profile.misses += s.weight_buffers.size() - cache_before;
+        profile.q8_ns += profile_q8 - profile_start;
+        profile.copy_ns += profile_copy - profile_q8;
+    }
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     encode_dispatch(s, encoder, gate_weights, gate.rows, columns, gate.row_bytes, gate.scale, 0, q8_buffer,
@@ -953,11 +1008,21 @@ bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const Matvec
                     act_scale_buffer, out_buffer);
     [encoder endEncoding];
     [command commit];
+    const std::uint64_t profile_submit = now_ns();
     [command waitUntilCompleted];
+    const std::uint64_t profile_wait = now_ns();
     if (command.status != MTLCommandBufferStatusCompleted) {
         return false;
     }
     std::memcpy(down.out, out_buffer.contents, static_cast<std::size_t>(down.rows) * sizeof(float));
+    {
+        FfnProfile& profile = ffn_profile();
+        profile.prep_ns += profile_prep - profile_q8;
+        profile.submit_ns += profile_submit - profile_prep;
+        profile.wait_ns += profile_wait - profile_submit;
+        profile.tail_ns += now_ns() - profile_wait;
+        ++profile.calls;
+    }
     if (const char* dir = std::getenv("MNET_FFN_DEBUG_DIR"); dir != nullptr) {
         const std::string prefix(dir);
         const auto write = [&](const char* name, const void* data, std::size_t bytes) {
@@ -1040,6 +1105,7 @@ bool attention(const AttentionQ2_0Job& job) {
         act_scales == nil || out_buffer == nil) {
         return false;
     }
+    std::memcpy(b.signs.contents, job.signs, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
 
     id<MTLBuffer> q_weights = weight_buffer_for(s, job.q.identity, job.q.data, job.q.rows, job.q.row_bytes);
     id<MTLBuffer> k_weights = weight_buffer_for(s, job.k.identity, job.k.data, job.k.rows, job.k.row_bytes);
@@ -1053,7 +1119,6 @@ bool attention(const AttentionQ2_0Job& job) {
     const auto q80 = mnet::gguf::make_q8_0_blocks(job.input, job.columns);
     std::memcpy(b.q8.contents, q80.qs.data(), static_cast<std::size_t>(job.columns));
     std::memcpy(b.scales.contents, q80.d.data(), static_cast<std::size_t>(job.columns / 32U) * sizeof(float));
-    std::memcpy(b.signs.contents, job.signs, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
 
     const std::uint64_t half_rope = job.rope_dims / 2U;
     auto* tables = static_cast<float*>(b.tables.contents);
@@ -1264,10 +1329,12 @@ bool ssm_block(const SsmQ2_0Job& job) {
                                              static_cast<std::size_t>(hidden / 32U) * sizeof(float));
     id<MTLBuffer> out_buffer = ensure_buffer(s.device, s.out_buffer, s.out_capacity,
                                              static_cast<std::size_t>(job.out.rows) * sizeof(float));
-    if (b.activation == nil || b.raw == nil || b.gates == nil || b.conv == nil || b.z == nil || b.delta == nil || b.grouped == nil ||
-        b.q8 == nil || b.scales == nil || b.signs == nil || act_q8 == nil || act_scales == nil || out_buffer == nil) {
+    if (b.activation == nil || b.raw == nil || b.gates == nil || b.conv == nil || b.z == nil || b.delta == nil ||
+        b.grouped == nil || b.q8 == nil || b.scales == nil || b.signs == nil || act_q8 == nil || act_scales == nil ||
+        out_buffer == nil) {
         return false;
     }
+    std::memcpy(b.signs.contents, job.signs, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
 
     id<MTLBuffer> qkv_weights = weight_buffer_for(s, job.qkv.identity, job.qkv.data, job.qkv.rows, job.qkv.row_bytes);
     id<MTLBuffer> gate_weights = weight_buffer_for(s, job.gate.identity, job.gate.data, job.gate.rows, job.gate.row_bytes);
@@ -1336,7 +1403,6 @@ bool ssm_block(const SsmQ2_0Job& job) {
     std::memcpy(b.q8.contents, q80.qs.data(), static_cast<std::size_t>(job.columns));
     std::memcpy(b.scales.contents, q80.d.data(), static_cast<std::size_t>(job.columns / 32U) * sizeof(float));
     std::memcpy(b.activation.contents, job.raw_input, static_cast<std::size_t>(job.columns) * sizeof(float));
-    std::memcpy(b.signs.contents, job.signs, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
 
     const std::uint32_t head_dim32 = static_cast<std::uint32_t>(head_dim);
     const std::uint32_t key_heads32 = static_cast<std::uint32_t>(key_heads);

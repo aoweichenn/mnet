@@ -123,6 +123,121 @@ kernel void mv_f32act(device const uchar* w         [[buffer(0)]],
         out[row_base + tgid] = scale * total;
     }
 }
+
+// The activation chain between the up matvec and the down matvec, copied from
+// the backend: swiglu -> sign*scale -> block FWHT -> Q8_0 requantise.
+kernel void swiglu_f32(device const float* gate [[buffer(0)]],
+                       device const float* up   [[buffer(1)]],
+                       device float* out        [[buffer(2)]],
+                       constant uint& count     [[buffer(3)]],
+                       uint gid                 [[thread_position_in_grid]]) {
+    if (gid >= count) {
+        return;
+    }
+    const float x = gate[gid];
+    out[gid] = (x / (1.0f + exp(-x))) * up[gid];
+}
+
+kernel void sign_scale(device const float* in  [[buffer(0)]],
+                       device const int* signs  [[buffer(1)]],
+                       device float* out        [[buffer(2)]],
+                       constant float& scale    [[buffer(3)]],
+                       constant uint& count     [[buffer(4)]],
+                       uint gid                 [[thread_position_in_grid]]) {
+    if (gid >= count) {
+        return;
+    }
+    out[gid] = (in[gid] * float(signs[gid])) * scale;
+}
+
+kernel void fwht_block(device float* data       [[buffer(0)]],
+                       constant uint& block_size [[buffer(1)]],
+                       uint tgid                 [[threadgroup_position_in_grid]],
+                       uint lane                 [[thread_position_in_threadgroup]]) {
+    threadgroup float v[1024];
+    const uint base = tgid * block_size;
+    v[lane] = data[base + lane];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint len = 1u; len < block_size; len <<= 1u) {
+        if ((lane & len) == 0u) {
+            const float a = v[lane];
+            const float b = v[lane + len];
+            v[lane] = a + b;
+            v[lane + len] = a - b;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    data[base + lane] = v[lane];
+}
+
+kernel void q8_0_quantize(device const float* x    [[buffer(0)]],
+                          device char* qs          [[buffer(1)]],
+                          device float* scales     [[buffer(2)]],
+                          uint gid                 [[thread_position_in_grid]]) {
+    const uint base = gid * 32u;
+    float amax = 0.0f;
+    for (uint j = 0; j < 32u; ++j) {
+        amax = fmax(amax, fabs(x[base + j]));
+    }
+    const float id = amax != 0.0f ? 127.0f / amax : 0.0f;
+    for (uint j = 0; j < 32u; ++j) {
+        qs[base + j] = char(rint(x[base + j] * id));
+    }
+    scales[gid] = float(half(amax / 127.0f));
+}
+
+// Widen the activation and, in the same pass, sum each 32-value block: the
+// matvec then extracts the 2-bit code unsigned and subtracts the block sum
+// once, which removes the per-weight bias subtraction.
+kernel void widen_q8(device const char* q8      [[buffer(0)]],
+                     device const float* qd     [[buffer(1)]],
+                     device float* out          [[buffer(2)]],
+                     device float* block_sum    [[buffer(3)]],
+                     uint tgid                  [[threadgroup_position_in_grid]],
+                     uint lane                  [[thread_position_in_threadgroup]]) {
+    const uint index = tgid * 32u + lane;
+    const float value = float(q8[index]) * qd[tgid];
+    out[index] = value;
+    float total = simd_sum(value);
+    if (lane == 0u) {
+        block_sum[tgid] = total;
+    }
+}
+
+// Same as mv_f32act but with the bias folded per block: one op less per weight.
+kernel void mv_f32sum(device const uchar* w         [[buffer(0)]],
+                      device const float* x         [[buffer(1)]],
+                      device const float* block_sum [[buffer(2)]],
+                      device float* out             [[buffer(3)]],
+                      constant uint& blocks         [[buffer(4)]],
+                      constant float& scale         [[buffer(5)]],
+                      constant uint& row_base       [[buffer(6)]],
+                      uint tgid                     [[threadgroup_position_in_grid]],
+                      uint lane                     [[thread_position_in_threadgroup]]) {
+    device const uchar* row = w + (ulong)tgid * blocks * 18u;
+    float acc = 0.0f;
+    for (uint i = lane; i < blocks; i += 32u) {
+        device const uchar* block = row + (ulong)i * 18u;
+        const float dx = float(as_type<half>(ushort(block[0] | (ushort(block[1]) << 8))));
+        for (uint k = 0; k < 2u; ++k) {
+            device const float* xy = x + (ulong)(2u * i + k) * 32u;
+            device const uchar* q = block + 2u + k * 8u;
+            float sum = 0.0f;
+            for (uint j = 0; j < 8u; ++j) {
+                const uchar byte = q[j];
+                sum += float(int(byte & 3u)) * xy[j * 4u + 0u];
+                sum += float(int((byte >> 2u) & 3u)) * xy[j * 4u + 1u];
+                sum += float(int((byte >> 4u) & 3u)) * xy[j * 4u + 2u];
+                sum += float(int((byte >> 6u) & 3u)) * xy[j * 4u + 3u];
+            }
+            acc = fma(dx, sum - block_sum[2u * i + k], acc);
+        }
+    }
+    const float total = simd_sum(acc);
+    if (lane == 0u) {
+        out[row_base + tgid] = scale * total;
+    }
+}
 )MSL";
 
 }  // namespace
@@ -153,6 +268,12 @@ int main() {
     id<MTLComputePipelineState> mv_int = pipeline_for("mv_int");
     id<MTLComputePipelineState> mv_f32 = pipeline_for("mv_f32act");
     id<MTLComputePipelineState> dequant = pipeline_for("dequant_q8");
+    id<MTLComputePipelineState> swiglu = pipeline_for("swiglu_f32");
+    id<MTLComputePipelineState> sign_scale = pipeline_for("sign_scale");
+    id<MTLComputePipelineState> fwht = pipeline_for("fwht_block");
+    id<MTLComputePipelineState> quantize = pipeline_for("q8_0_quantize");
+    id<MTLComputePipelineState> widen = pipeline_for("widen_q8");
+    id<MTLComputePipelineState> mv_sum = pipeline_for("mv_f32sum");
 
     const std::uint64_t columns = gate.columns;
     const std::uint64_t blocks = columns / 64U;
@@ -223,27 +344,51 @@ int main() {
         activations.push_back(std::move(blocks_here));
         activation_f32.push_back(std::move(widened));
     }
+    std::vector<id<MTLBuffer>> sum_buffers;
+    for (const auto& job : jobs) {
+        sum_buffers.push_back([device newBufferWithLength:(job.columns / 32U) * sizeof(float)
+                                                  options:MTLResourceStorageModeShared]);
+    }
     id<MTLBuffer> out_buffer = [device newBufferWithLength:total_rows * sizeof(float)
                                                    options:MTLResourceStorageModeShared];
 
-    const auto run = [&](id<MTLComputePipelineState> pipeline, bool float_activation) {
+    // Extra buffers for the activation chain between the up and down matvecs.
+    const std::uint64_t hidden = up.rows;
+    id<MTLBuffer> act_f32 = [device newBufferWithLength:hidden * sizeof(float)
+                                                options:MTLResourceStorageModeShared];
+    id<MTLBuffer> act_signs = [device newBufferWithLength:hidden * sizeof(std::int32_t)
+                                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> act_q8 = [device newBufferWithLength:hidden options:MTLResourceStorageModeShared];
+    id<MTLBuffer> act_scales = [device newBufferWithLength:(hidden / 32U) * sizeof(float)
+                                                   options:MTLResourceStorageModeShared];
+    id<MTLBuffer> act_sums = [device newBufferWithLength:(hidden / 32U) * sizeof(float)
+                                                 options:MTLResourceStorageModeShared];
+    {
+        auto* signs = static_cast<std::int32_t*>(act_signs.contents);
+        for (std::uint64_t i = 0; i < hidden; ++i) {
+            signs[i] = ((i * 2654435761U) >> 7U) & 1U ? 1 : -1;
+        }
+    }
+    const std::uint32_t hidden32 = static_cast<std::uint32_t>(hidden);
+    const std::uint32_t block_size = 1024;
+    const float hadamard_scale = 1.0F / std::sqrt(static_cast<float>(block_size));
+
+    // phase 0: gate+up matvecs; 1: + activation chain; 2: + down matvec.
+    // mode 0 = integer activation kernel, 1 = fp32 activation, 2 = fp32 with the
+    // per-block bias folded out.
+    const auto run = [&](int phase, int mode, const std::vector<id<MTLBuffer>>& weights) {
+        const bool float_activation = mode != 0;
         id<MTLCommandBuffer> command = [queue commandBuffer];
         id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-        for (std::size_t i = 0; i < jobs.size(); ++i) {
-            if (float_activation) {
-                [encoder setComputePipelineState:dequant];
-                [encoder setBuffer:q8_buffers[i] offset:0 atIndex:0];
-                [encoder setBuffer:qd_buffers[i] offset:0 atIndex:1];
-                [encoder setBuffer:act_buffers[i] offset:0 atIndex:2];
-                [encoder dispatchThreads:MTLSizeMake(jobs[i].columns, 1, 1)
-                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        const auto encode_matvec = [&](std::size_t i, id<MTLBuffer> activation_buffer, id<MTLBuffer> scale_buffer) {
+            if (mode == 2) {
+                [encoder setComputePipelineState:mv_sum];
+            } else {
+                [encoder setComputePipelineState:float_activation ? mv_f32 : mv_int];
             }
-            [encoder setComputePipelineState:pipeline];
-            [encoder setBuffer:weight_buffers[i] offset:0 atIndex:0];
-            [encoder setBuffer:float_activation ? act_buffers[i] : q8_buffers[i] offset:0 atIndex:1];
-            if (!float_activation) {
-                [encoder setBuffer:qd_buffers[i] offset:0 atIndex:2];
-            }
+            [encoder setBuffer:weights[i] offset:0 atIndex:0];
+            [encoder setBuffer:activation_buffer offset:0 atIndex:1];
+            [encoder setBuffer:mode == 2 ? sum_buffers[i] : scale_buffer offset:0 atIndex:2];
             [encoder setBuffer:out_buffer offset:0 atIndex:3];
             const std::uint32_t blocks32 = static_cast<std::uint32_t>(jobs[i].blocks);
             [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:4];
@@ -253,35 +398,103 @@ int main() {
             [encoder setBytes:&row_base length:sizeof(row_base) atIndex:6];
             [encoder dispatchThreadgroups:MTLSizeMake(jobs[i].rows, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(kLanes, 1, 1)];
+        };
+        const auto encode_dequant = [&](std::size_t i, id<MTLBuffer> destination) {
+            if (mode == 2) {
+                [encoder setComputePipelineState:widen];
+                [encoder setBuffer:q8_buffers[i] offset:0 atIndex:0];
+                [encoder setBuffer:qd_buffers[i] offset:0 atIndex:1];
+                [encoder setBuffer:destination offset:0 atIndex:2];
+                [encoder setBuffer:sum_buffers[i] offset:0 atIndex:3];
+                [encoder dispatchThreadgroups:MTLSizeMake(jobs[i].columns / 32U, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                return;
+            }
+            [encoder setComputePipelineState:dequant];
+            [encoder setBuffer:q8_buffers[i] offset:0 atIndex:0];
+            [encoder setBuffer:qd_buffers[i] offset:0 atIndex:1];
+            [encoder setBuffer:destination offset:0 atIndex:2];
+            [encoder dispatchThreads:MTLSizeMake(jobs[i].columns, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        };
+
+        for (std::size_t i = 0; i < 2; ++i) {
+            if (float_activation) {
+                encode_dequant(i, act_buffers[i]);
+            }
+            encode_matvec(i, float_activation ? act_buffers[i] : q8_buffers[i], qd_buffers[i]);
+        }
+        if (phase >= 1) {
+            [encoder setComputePipelineState:swiglu];
+            [encoder setBuffer:out_buffer offset:0 atIndex:0];
+            [encoder setBuffer:out_buffer offset:static_cast<NSUInteger>(gate.rows) * sizeof(float) atIndex:1];
+            [encoder setBuffer:act_f32 offset:0 atIndex:2];
+            [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:3];
+            [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+
+            [encoder setComputePipelineState:sign_scale];
+            [encoder setBuffer:act_f32 offset:0 atIndex:0];
+            [encoder setBuffer:act_signs offset:0 atIndex:1];
+            [encoder setBuffer:act_f32 offset:0 atIndex:2];
+            [encoder setBytes:&hadamard_scale length:sizeof(hadamard_scale) atIndex:3];
+            [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:4];
+            [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+
+            [encoder setComputePipelineState:fwht];
+            [encoder setBuffer:act_f32 offset:0 atIndex:0];
+            [encoder setBytes:&block_size length:sizeof(block_size) atIndex:1];
+            [encoder dispatchThreadgroups:MTLSizeMake(hidden / block_size, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
+
+            [encoder setComputePipelineState:quantize];
+            [encoder setBuffer:act_f32 offset:0 atIndex:0];
+            [encoder setBuffer:act_q8 offset:0 atIndex:1];
+            [encoder setBuffer:act_scales offset:0 atIndex:2];
+            [encoder dispatchThreads:MTLSizeMake(hidden / 32U, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        }
+        if (phase >= 2) {
+            if (mode == 2) {
+                [encoder setComputePipelineState:widen];
+                [encoder setBuffer:act_q8 offset:0 atIndex:0];
+                [encoder setBuffer:act_scales offset:0 atIndex:1];
+                [encoder setBuffer:act_f32 offset:0 atIndex:2];
+                [encoder setBuffer:act_sums offset:0 atIndex:3];
+                [encoder dispatchThreadgroups:MTLSizeMake(hidden / 32U, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            } else if (float_activation) {
+                [encoder setComputePipelineState:dequant];
+                [encoder setBuffer:act_q8 offset:0 atIndex:0];
+                [encoder setBuffer:act_scales offset:0 atIndex:1];
+                [encoder setBuffer:act_f32 offset:0 atIndex:2];
+                [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            }
+            encode_matvec(2, float_activation ? act_f32 : act_q8, act_scales);
         }
         [encoder endEncoding];
         [command commit];
         [command waitUntilCompleted];
     };
 
-    const auto measure = [&](const char* label, id<MTLComputePipelineState> pipeline, bool float_activation) {
+    const auto measure = [&](const char* label, int phase, int mode) {
         for (int i = 0; i < 3; ++i) {
-            run(pipeline, float_activation);
+            run(phase, mode, weight_buffers);
         }
         const int reps = 10;
         const auto begin = std::chrono::steady_clock::now();
         for (int i = 0; i < reps; ++i) {
-            run(pipeline, float_activation);
+            run(phase, mode, weight_buffers);
         }
         const double seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count() / static_cast<double>(reps);
-        std::printf("%-10s %6.3f ms  %6.2f GB/s  (%llu rows, %.1f MB per submission)\n", label, seconds * 1e3,
-                    static_cast<double>(total_bytes) / seconds / 1e9,
-                    static_cast<unsigned long long>(total_rows),
-                    static_cast<double>(total_bytes) / 1e6);
+        std::printf("%-22s %6.3f ms  %6.2f GB/s\n", label, seconds * 1e3,
+                    static_cast<double>(total_bytes) / seconds / 1e9);
+        return seconds * 1e3;
     };
 
-    // Sanity: the two kernels must agree with the CPU dot to within tolerance.
-    const auto check = [&](id<MTLComputePipelineState> pipeline, bool float_activation) {
-        run(pipeline, float_activation);
+    const auto check = [&](int mode) {
+        run(2, mode, weight_buffers);
         const auto* output = static_cast<const float*>(out_buffer.contents);
         double worst = 0.0;
-        for (std::size_t j = 0; j < jobs.size(); ++j) {
+        for (std::size_t j = 0; j < 2; ++j) {  // the down matvec reads the chain's output
             const auto& job = jobs[j];
             const std::uint64_t matrix_blocks = job.columns / 64U;
             for (std::uint64_t r = 0; r < job.rows; r += 977) {
@@ -293,17 +506,87 @@ int main() {
                                             std::max(1e-30, std::abs(static_cast<double>(cpu))));
             }
         }
-        std::printf("  worst relative difference vs the CPU dot: %.3e\n", worst);
+        std::printf("  matvec-only stages vs the CPU dot: %.3e\n", worst);
     };
 
-    std::printf("Q2_0 block: gate %llu x %llu, up %llu, down %llu x %llu\n",
+    std::printf("Q2_0 block: gate %llu x %llu, up %llu, down %llu x %llu (%.1f MB)\n",
                 static_cast<unsigned long long>(gate.rows), static_cast<unsigned long long>(gate.columns),
                 static_cast<unsigned long long>(up.rows), static_cast<unsigned long long>(down.rows),
-                static_cast<unsigned long long>(down.columns));
-    measure("mv_int", mv_int, false);
-    measure("mv_f32act", mv_f32, true);
-    check(mv_int, false);
-    check(mv_f32, true);
+                static_cast<unsigned long long>(down.columns), static_cast<double>(total_bytes) / 1e6);
+    measure("mv_int   full", 2, 0);
+    const double full = measure("mv_f32   full", 2, 1);
+    const double no_down = measure("mv_f32   gate+up+act", 1, 1);
+    const double up_only = measure("mv_f32   gate+up", 0, 1);
+    std::printf("  activation chain %.3f ms, down matvec %.3f ms (of %.3f ms)\n", no_down - up_only, full - no_down, full);
+    const double sum_full = measure("mv_f32sum full", 2, 2);
+    std::printf("  per-block bias folded: %.3f ms vs %.3f ms (%.2fx)\n", sum_full, full, full / sum_full);
+
+    // Sustained load: is the in-model 0.94 ms/call (versus 0.76 here) a clock
+    // effect rather than a bubble? Run the block for ~2 s and compare the
+    // first and the last window.
+    {
+        const int reps = 2600;
+        std::vector<double> samples;
+        samples.reserve(static_cast<std::size_t>(reps));
+        for (int i = 0; i < reps; ++i) {
+            const auto begin = std::chrono::steady_clock::now();
+            run(2, 1, weight_buffers);
+            samples.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
+        }
+        const auto average = [&](std::size_t from, std::size_t to) {
+            double total = 0.0;
+            for (std::size_t i = from; i < to; ++i) {
+                total += samples[i];
+            }
+            return total / static_cast<double>(to - from);
+        };
+        const double first = average(20, 220);
+        const double last = average(samples.size() - 200, samples.size());
+        std::printf("  sustained: first 200 reps %.3f ms, last 200 reps %.3f ms (%.2fx slower, %.1f GB/s)\n",
+                    first * 1e3, last * 1e3, last / first, static_cast<double>(total_bytes) / last / 1e9);
+    }
+    check(1);
+    check(2);
+
+    // The model streams 64 different layers' weights (6.7 GB) instead of the
+    // same 75 MB; reproduce that by allocating N copies and cycling through
+    // them, one submission per copy (like one layer-token).
+    {
+        const char* cycle_env = std::getenv("MNET_BENCH_CYCLE");
+        const int copies = cycle_env != nullptr ? std::atoi(cycle_env) : 0;
+        if (copies > 1) {
+            std::vector<std::vector<id<MTLBuffer>>> sets;
+            sets.reserve(static_cast<std::size_t>(copies));
+            for (int c = 0; c < copies; ++c) {
+                std::vector<id<MTLBuffer>> set;
+                for (std::size_t i = 0; i < jobs.size(); ++i) {
+                    const std::size_t bytes = static_cast<std::size_t>(jobs[i].rows * jobs[i].columns / 64U * 18U);
+                    set.push_back([device newBufferWithBytes:weight_buffers[i].contents
+                                                       length:bytes
+                                                      options:MTLResourceStorageModeShared]);
+                }
+                sets.push_back(std::move(set));
+            }
+            const double per_cycle = static_cast<double>(copies) * static_cast<double>(total_bytes);
+            const auto cycle = [&] {
+                for (const auto& set : sets) {
+                    run(2, 1, set);
+                }
+            };
+            for (int i = 0; i < 2; ++i) {
+                cycle();
+            }
+            const int reps = 6;
+            const auto begin = std::chrono::steady_clock::now();
+            for (int i = 0; i < reps; ++i) {
+                cycle();
+            }
+            const double seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count() / static_cast<double>(reps);
+            std::printf("%-22s %6.3f ms/layer  %6.2f GB/s  (%d layers, %.1f GB)\n", "cycle (64 layers)", seconds * 1e3,
+                        per_cycle / seconds / 1e9, copies, per_cycle / 1e9);
+        }
+    }
     (void)row_bytes;
     return 0;
 }
