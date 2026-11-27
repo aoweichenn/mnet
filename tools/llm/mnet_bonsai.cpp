@@ -396,7 +396,7 @@ public:
         const auto raw = this->reader_.read_raw(info, static_cast<std::uint64_t>(token) * row_bytes, row_bytes);
         std::vector<float> row = Reader::dequantize_block(info.type, raw, this->config_.n_embd);
         hadamard_raw(row, this->config_.hadamard_block);
-        const auto signs = this->reader_.signs_for_width(static_cast<std::uint32_t>(this->config_.n_embd));
+        const auto& signs = this->signs_embd_;
         if (signs.size() != row.size()) {
             throw std::runtime_error("embedding sign width mismatch");
         }
@@ -411,8 +411,11 @@ public:
     std::vector<float> forward(std::vector<float> hidden, const std::vector<std::int32_t>& positions,
                                const std::string& dump_dir, bool dump) {
         const std::size_t tokens = positions.size();
+        const auto t_load = std::chrono::steady_clock::now();
+        this->ensure_weights();
+        add_time("load_weights", since(t_load));
         for (std::size_t layer = 0; layer < this->config_.n_layer; ++layer) {
-            LayerWeights weights = this->load_layer(layer);
+            const LayerWeights& weights = this->weights_[layer];
             LayerState& state = this->state_[layer];
             for (std::size_t t = 0; t < tokens; ++t) {
                 float* x = hidden.data() + t * this->config_.n_embd;
@@ -425,8 +428,7 @@ public:
 
     [[nodiscard]] std::vector<float> logits(const float* hidden) const {
         auto normed = rms_norm(hidden, this->config_.n_embd, this->output_norm_, this->config_.eps);
-        const auto signs = this->reader_.signs_for_width(static_cast<std::uint32_t>(this->config_.n_embd));
-        hadamard_forward(normed, signs, this->config_.hadamard_block);
+        hadamard_forward(normed, this->signs_embd_, this->config_.hadamard_block);
         std::vector<float> out(this->config_.n_vocab);
         Reader::matvec(this->output_, normed.data(), out.data());
         return out;
@@ -435,6 +437,13 @@ public:
     void load_shared() {
         this->output_norm_ = this->reader_.dequantize(this->reader_.tensor("output_norm.weight"));
         this->output_ = this->reader_.quantized(this->reader_.tensor("output.weight"));
+        // The sign tables only depend on the width; looking them up rebuilt a
+        // 5120/6144/17408-element vector on every block call.
+        this->signs_embd_ = this->reader_.signs_for_width(static_cast<std::uint32_t>(this->config_.n_embd));
+        this->signs_hidden_ = this->reader_.signs_for_width(static_cast<std::uint32_t>(this->config_.n_ff));
+        this->signs_attn_ =
+            this->reader_.signs_for_width(static_cast<std::uint32_t>(kHeadDim * this->config_.n_head));
+        this->signs_ssm_ = this->reader_.signs_for_width(static_cast<std::uint32_t>(kSsmValueHeads * kSsmHeadDim));
     }
 
 private:
@@ -497,7 +506,7 @@ private:
 
     void layer_forward(std::size_t layer, const LayerWeights& w, LayerState& state, float* x, std::size_t position,
                        const std::string* dump_dir, std::size_t token) {
-        const auto signs_embd = this->reader_.signs_for_width(static_cast<std::uint32_t>(this->config_.n_embd));
+        const auto& signs_embd = this->signs_embd_;
         const auto t_norm = std::chrono::steady_clock::now();
         auto xn = rms_norm(x, this->config_.n_embd, w.attn_norm, this->config_.eps);
         add_time("rms_norm_in", since(t_norm));
@@ -528,7 +537,7 @@ private:
         }
         auto ph = pn;
         hadamard_forward(ph, signs_embd, this->config_.hadamard_block);
-        const auto signs_hidden = this->reader_.signs_for_width(static_cast<std::uint32_t>(this->config_.n_ff));
+        const auto& signs_hidden = this->signs_hidden_;
         std::vector<float> down(this->config_.n_embd);
         bool fused = false;
         if (mnet::detail::compute::fast_path_enabled() && mnet::detail::compute::fused_ffn_enabled()) {
@@ -562,7 +571,7 @@ private:
     [[nodiscard]] std::vector<float> recurrent_branch(const LayerWeights& w, LayerState& state,
                                                       const std::vector<float>& xn, const std::string* dump_dir,
                                                       std::size_t layer, std::size_t token) {
-        const auto signs_embd = this->reader_.signs_for_width(static_cast<std::uint32_t>(this->config_.n_embd));
+        const auto& signs_embd = this->signs_embd_;
         auto xh = xn;
         hadamard_forward(xh, signs_embd, this->config_.hadamard_block);
 
@@ -571,8 +580,7 @@ private:
         // state resident and does not hand it back.
         if (dump_dir == nullptr && !this->state_io_ && mnet::detail::compute::fast_path_enabled() &&
             mnet::detail::compute::fused_ssm_enabled()) {
-            const auto signs_value =
-                this->reader_.signs_for_width(static_cast<std::uint32_t>(kSsmValueHeads * kSsmHeadDim));
+            const auto& signs_value = this->signs_ssm_;
             std::vector<float> projected(this->config_.n_embd);
             Reader::SsmParams params;
             params.input = xh.data();
@@ -726,8 +734,7 @@ private:
                       normed.begin() + static_cast<std::ptrdiff_t>((h + 1) * kSsmHeadDim),
                       grouped.begin() + static_cast<std::ptrdiff_t>((rep + 3 * key_head) * kSsmHeadDim));
         }
-        const auto signs_value = this->reader_.signs_for_width(static_cast<std::uint32_t>(6144));
-        hadamard_forward(grouped, signs_value, this->config_.hadamard_block);
+        hadamard_forward(grouped, this->signs_ssm_, this->config_.hadamard_block);
         std::vector<float> projected(this->config_.n_embd);
         Reader::matvec(w.ssm_out, grouped.data(), projected.data());
         add_time("ssm_post", since(t_post));
@@ -741,7 +748,7 @@ private:
                                                       const std::vector<float>& xn, std::size_t position,
                                                       const std::string* dump_dir, std::size_t layer,
                                                       std::size_t token) {
-        const auto signs_embd = this->reader_.signs_for_width(static_cast<std::uint32_t>(this->config_.n_embd));
+        const auto& signs_embd = this->signs_embd_;
         auto xh = xn;
         hadamard_forward(xh, signs_embd, this->config_.hadamard_block);
 
@@ -750,8 +757,7 @@ private:
         // MNET_NO_FUSED_ATTN selects for A/B runs.
         if (dump_dir == nullptr && mnet::detail::compute::fast_path_enabled() &&
             mnet::detail::compute::fused_attention_enabled()) {
-            const auto signs_value = this->reader_.signs_for_width(
-                static_cast<std::uint32_t>(kHeadDim * this->config_.n_head));
+            const auto& signs_value = this->signs_attn_;
             this->rope_table(position);
             const std::size_t kv_elems = (state.cache_tokens + 1) * this->config_.n_head_kv * kHeadDim;
             state.k_cache.resize(kv_elems);
@@ -897,9 +903,7 @@ private:
         if (dump_dir != nullptr) {
             this->dump_tensor(*dump_dir, "attn_gated", layer, attn, token);
         }
-        const auto signs_value =
-            this->reader_.signs_for_width(static_cast<std::uint32_t>(kHeadDim * this->config_.n_head));
-        hadamard_forward(attn, signs_value, this->config_.hadamard_block);
+        hadamard_forward(attn, this->signs_attn_, this->config_.hadamard_block);
         std::vector<float> projected(this->config_.n_embd);
         Reader::matvec(w.output, attn.data(), projected.data());
         if (dump_dir != nullptr) {
@@ -908,9 +912,30 @@ private:
         return projected;
     }
 
+    // The quantized blocks and the fp32 side weights are the bulk of the
+    // model. They used to be re-read from the file on every forward() call,
+    // which cost 1.2 s per call and, in a generation loop, re-read 6.7 GB per
+    // token; keep them for the lifetime of the model instead. Loading them in
+    // parallel measured slower (1.47 s vs 1.20 s: one copy per tensor from the
+    // page cache is already the memory-bandwidth limit), so this stays serial.
+    void ensure_weights() {
+        if (!this->weights_.empty()) {
+            return;
+        }
+        this->weights_.resize(this->config_.n_layer);
+        for (std::size_t layer = 0; layer < this->config_.n_layer; ++layer) {
+            this->weights_[layer] = this->load_layer(layer);
+        }
+    }
+
     Reader reader_;
     Config config_;
     bool state_io_ = false;
+    std::vector<LayerWeights> weights_;
+    std::vector<std::int32_t> signs_embd_;
+    std::vector<std::int32_t> signs_hidden_;
+    std::vector<std::int32_t> signs_attn_;
+    std::vector<std::int32_t> signs_ssm_;
     std::vector<LayerState> state_;
     std::vector<float> output_norm_;
     Reader::Quantized output_;
