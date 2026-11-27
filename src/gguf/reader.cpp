@@ -274,6 +274,32 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
                 const auto page = static_cast<std::uint64_t>(::sysconf(_SC_PAGESIZE));
                 this->mapping_ = static_cast<const std::uint8_t*>(base);
                 this->mapping_size_ = (size + page - 1U) / page * page;
+                // MNET_PREFAULT=madvise asks the kernel to read the file ahead
+                // asynchronously; =touch walks the mapping on the CPU first.
+                // The model is read through this mapping only, so the first
+                // touch of each page is a fault on whichever code path gets
+                // there first.
+                const char* prefault = std::getenv("MNET_PREFAULT");
+                if (prefault != nullptr && std::strcmp(prefault, "madvise") == 0) {
+                    ::madvise(base, static_cast<std::size_t>(size), MADV_WILLNEED);
+                } else if (prefault != nullptr && std::strcmp(prefault, "touch") == 0) {
+                    // Independent accumulators: a single running sum would make
+                    // this a ~2 us-per-page dependency chain.
+                    std::uint64_t sums[8] = {};
+                    for (std::uint64_t offset = 0; offset < size; offset += page * 8U) {
+                        for (std::size_t lane = 0; lane < 8U; ++lane) {
+                            const std::uint64_t at = offset + lane * page;
+                            if (at < size) {
+                                sums[lane] += this->mapping_[at];
+                            }
+                        }
+                    }
+                    std::uint64_t sink = 0;
+                    for (const auto value : sums) {
+                        sink += value;
+                    }
+                    (void)sink;
+                }
             }
         }
         ::close(descriptor);
