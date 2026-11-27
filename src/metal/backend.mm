@@ -735,6 +735,39 @@ struct FfnBatchBuffers {
     std::size_t out_capacity = 0;
 };
 
+// Split of the batched gated-delta call: host preparation (q8 conversion of the
+// layer's activations), weight binding, encoding, the GPU wait and the readback.
+struct SsmBatchProfile {
+    std::uint64_t prep_ns = 0;
+    std::uint64_t bind_ns = 0;
+    std::uint64_t encode_ns = 0;
+    std::uint64_t wait_ns = 0;
+    std::uint64_t tail_ns = 0;
+    std::uint64_t calls = 0;
+    std::uint64_t tokens = 0;
+    ~SsmBatchProfile() {
+        if (std::getenv("MNET_PROFILE") == nullptr || this->calls == 0U) {
+            return;
+        }
+        const auto ms = [&](std::uint64_t ns) {
+            return static_cast<double>(ns) * 1.0e-6 / static_cast<double>(this->calls);
+        };
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "mnet: ssm batch per layer  prep %.3f  bind %.3f  encode %.3f  wait %.3f  tail %.3f ms  "
+                      "(%.1f tokens/layer)\n",
+                      ms(this->prep_ns), ms(this->bind_ns), ms(this->encode_ns), ms(this->wait_ns),
+                      ms(this->tail_ns),
+                      static_cast<double>(this->tokens) / static_cast<double>(this->calls));
+        mnet::detail::write_diagnostic(std::string(line));
+    }
+};
+
+SsmBatchProfile& ssm_batch_profile() {
+    static SsmBatchProfile profile;
+    return profile;
+}
+
 // Per-token scratch for a batched attention block.
 struct AttentionBatchBuffers {
     id<MTLBuffer> q8 = nil;
@@ -1637,6 +1670,7 @@ bool ssm_block(const SsmQ2_0Job& job) {
     // 0.561 ms of GPU wait per call). Copying only this block back was measured
     // worse overall (3.60 s vs 3.41 s) because 1.9 GB of device copies push the
     // FFN's file pages out of the page cache, so everything aliases.
+    const std::uint64_t profile_bind = now_ns();
     const WeightBinding qkv_weights = weight_buffer_for(s, job.qkv, job.qkv.rows, job.qkv.row_bytes, true);
     const WeightBinding gate_weights = weight_buffer_for(s, job.gate, job.gate.rows, job.gate.row_bytes, true);
     const WeightBinding out_weights = weight_buffer_for(s, job.out, job.out.rows, job.out.row_bytes, true);
@@ -2065,6 +2099,7 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     if (job.qkv.type != 42U || job.gate.type != 42U || job.out.type != 42U) {
         return false;
     }
+    const std::uint64_t profile_start = now_ns();
     const std::uint64_t head_dim = job.head_dim;
     const std::uint64_t key_heads = job.key_heads;
     const std::uint64_t value_heads = job.value_heads;
@@ -2378,6 +2413,7 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
                 threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     }
     [encoder endEncoding];
+    const std::uint64_t profile_commit = now_ns();
     // Carry the last tokens' rows to the front for the next batch.
     {
         const std::uint64_t tail_rows = job.conv_kernel - 1U;
@@ -2392,12 +2428,22 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     }
     [command commit];
     [command waitUntilCompleted];
+    const std::uint64_t profile_wait = now_ns();
     if (command.status != MTLCommandBufferStatusCompleted) {
         return false;
     }
     const auto* results = static_cast<const float*>(b.out.contents);
     for (std::size_t t = 0; t < count; ++t) {
         std::memcpy(entries[t].output, results + t * job.columns, static_cast<std::size_t>(job.columns) * sizeof(float));
+    }
+    {
+        SsmBatchProfile& profile = ssm_batch_profile();
+        // Host preparation and encoding together, then the GPU wait.
+        profile.encode_ns += profile_commit - profile_start;
+        profile.wait_ns += profile_wait - profile_commit;
+        profile.tail_ns += now_ns() - profile_wait;
+        ++profile.calls;
+        profile.tokens += count;
     }
     return true;
 }
