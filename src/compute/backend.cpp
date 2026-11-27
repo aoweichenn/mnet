@@ -53,6 +53,11 @@ std::atomic<SsmQ2_0BatchFn>& ssm_batch_slot() {
     return slot;
 }
 
+std::atomic<RmsNormFn>& rms_norm_slot() {
+    static std::atomic<RmsNormFn> slot{nullptr};
+    return slot;
+}
+
 std::atomic<SsmQ2_0Fn>& ssm_slot() {
     static std::atomic<SsmQ2_0Fn> slot{nullptr};
     return slot;
@@ -128,6 +133,17 @@ void set_ssm_batch_backend(SsmQ2_0BatchFn backend) {
 
 void set_attention_batch_backend(AttentionQ2_0BatchFn backend) {
     attention_batch_slot().store(backend);
+}
+
+void set_rms_norm_backend(RmsNormFn backend) {
+    rms_norm_slot().store(backend);
+}
+
+bool rms_norm_f32(const float* input, const float* weight, std::uint64_t size, float eps, float* output) {
+    static std::once_flag once;
+    std::call_once(once, [] { register_platform_backends(); });
+    const RmsNormFn backend = rms_norm_slot().load();
+    return backend != nullptr && backend(input, weight, size, eps, output);
 }
 
 namespace {

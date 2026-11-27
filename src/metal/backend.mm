@@ -226,6 +226,37 @@ kernel void swiglu_f32(device const float* gate [[buffer(0)]],
     out[gid] = (x / (1.0f + exp(-x))) * up[gid];
 }
 
+// RMSNorm on the device: `size` values, one threadgroup, strided loads and a
+// threadgroup-wide reduction. The host reference sums the squares in double
+// (Apple GPUs have no fp64), so this is the one place where the fast path
+// deliberately differs from the host in the last bits.
+kernel void rms_norm_f32(device const float* x        [[buffer(0)]],
+                         device const float* weight   [[buffer(1)]],
+                         device float* out            [[buffer(2)]],
+                         constant uint& size          [[buffer(3)]],
+                         constant float& eps          [[buffer(4)]],
+                         threadgroup float* partial   [[threadgroup(0)]],
+                         uint tid                     [[thread_position_in_threadgroup]],
+                         uint group_size              [[threads_per_threadgroup]]) {
+    float sum = 0.0f;
+    for (uint i = tid; i < size; i += group_size) {
+        sum = fma(x[i], x[i], sum);
+    }
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = group_size / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            partial[tid] += partial[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const float mean = partial[0] / float(size);
+    const float scale = 1.0f / sqrt(mean + eps);
+    for (uint i = tid; i < size; i += group_size) {
+        out[i] = (x[i] * scale) * weight[i];
+    }
+}
+
 // Signed, normalised block Hadamard followed by Q8_0 requantisation, with the
 // block kept in threadgroup memory: one threadgroup per block instead of three
 // separate dispatches (sign*scale, FWHT, quantise).
@@ -881,6 +912,7 @@ struct MetalState {
     id<MTLComputePipelineState> hadamard_multi_pipeline = nil;
     id<MTLComputePipelineState> gate_norm_multi_pipeline = nil;
     id<MTLComputePipelineState> head_gates_pipeline = nil;
+    id<MTLComputePipelineState> rms_norm_pipeline = nil;
     id<MTLComputePipelineState> attn_prep_pipeline = nil;
     id<MTLComputePipelineState> attn_gate_pipeline = nil;
     id<MTLComputePipelineState> attn_flash_pipeline = nil;
@@ -981,6 +1013,7 @@ void initialise(MetalState& state) {
         state.hadamard_multi_pipeline = pipeline_for("hadamard_quantize_multi");
         state.gate_norm_multi_pipeline = pipeline_for("ssm_gate_norm_multi");
         state.head_gates_pipeline = pipeline_for("ssm_head_gates");
+        state.rms_norm_pipeline = pipeline_for("rms_norm_f32");
         if (state.attn_flash_pipeline == nil && std::getenv("MNET_METAL_DEBUG") != nullptr) {
             std::fprintf(stderr, "mnet: metal attention pipeline failed: %s\n", [[error description] UTF8String]);
         }
@@ -2742,6 +2775,48 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
     return true;
 }
 
+// RMSNorm with the input and output in host memory: enough to exercise the
+// kernel and to measure how far an fp32 reduction drifts from the host's fp64
+// reference. The device-resident residual stream will bind these buffers
+// directly and skip both copies.
+bool rms_norm_host(const float* input, const float* weight, std::uint64_t size, float eps, float* output) {
+    MetalState& s = state();
+    if (!s.ready || s.rms_norm_pipeline == nil || size == 0U || size > 65536U) {
+        return false;
+    }
+    id<MTLBuffer> x = [s.device newBufferWithBytes:input
+                                            length:static_cast<NSUInteger>(size * sizeof(float))
+                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> w = [s.device newBufferWithBytes:weight
+                                            length:static_cast<NSUInteger>(size * sizeof(float))
+                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> out = [s.device newBufferWithLength:static_cast<NSUInteger>(size * sizeof(float))
+                                              options:MTLResourceStorageModeShared];
+    if (x == nil || w == nil || out == nil) {
+        return false;
+    }
+    const std::uint32_t size32 = static_cast<std::uint32_t>(size);
+    id<MTLCommandBuffer> command = [s.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:s.rms_norm_pipeline];
+    [encoder setBuffer:x offset:0 atIndex:0];
+    [encoder setBuffer:w offset:0 atIndex:1];
+    [encoder setBuffer:out offset:0 atIndex:2];
+    [encoder setBytes:&size32 length:sizeof(size32) atIndex:3];
+    [encoder setBytes:&eps length:sizeof(eps) atIndex:4];
+    // A threadgroup buffer argument carries no size, it has to be declared.
+    [encoder setThreadgroupMemoryLength:256U * sizeof(float) atIndex:0];
+    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted) {
+        return false;
+    }
+    std::memcpy(output, out.contents, static_cast<std::size_t>(size) * sizeof(float));
+    return true;
+}
+
 bool matvec_q8_0_backend(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
                          std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales,
                          float* out, std::uint64_t identity, const std::uint8_t* region,
@@ -2777,6 +2852,7 @@ void register_platform_backends() {
     set_ffn_swiglu_batch_backend(&ffn_batch_block);
     set_attention_backend(&attention);
     set_attention_batch_backend(&attention_batch_block);
+    set_rms_norm_backend(&rms_norm_host);
     set_ssm_backend(&ssm_block);
     set_ssm_batch_backend(&ssm_batch_block);
 }

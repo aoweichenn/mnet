@@ -684,9 +684,17 @@ private:
         const auto t_cpu = std::chrono::steady_clock::now();
         const std::size_t n_embd = this->config_.n_embd;
         std::vector<float> ph(tokens * n_embd);
+        static const bool gpu_norm = std::getenv("MNET_GPU_NORM") != nullptr;
         for (std::size_t t = 0; t < tokens; ++t) {
             const float* residual = hidden.data() + t * n_embd;
             auto pn = rms_norm(residual, n_embd, w.post_norm, this->config_.eps);
+            if (gpu_norm) {
+                std::vector<float> device_normed(n_embd);
+                if (mnet::detail::compute::rms_norm_f32(residual, w.post_norm.data(), n_embd, this->config_.eps,
+                                                        device_normed.data())) {
+                    pn = std::move(device_normed);
+                }
+            }
             if (dump_dir != nullptr) {
                 this->dump_tensor(*dump_dir, "attn_post_norm", layer, pn, t);
             }

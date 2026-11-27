@@ -210,6 +210,15 @@ void set_ssm_backend(SsmQ2_0Fn backend);
 
 [[nodiscard]] bool ssm_q2_0(const SsmQ2_0Job& job);
 
+// RMSNorm executed on the device with the input and output in host memory. The
+// fp32 reduction cannot match the host's fp64 accumulator, so this belongs to
+// the tolerance-level fast path only; it exists so the layer pipeline can run
+// the norm without returning to the CPU once the residual stream lives on the
+// device.
+using RmsNormFn = bool (*)(const float* input, const float* weight, std::uint64_t size, float eps, float* output);
+void set_rms_norm_backend(RmsNormFn backend);
+[[nodiscard]] bool rms_norm_f32(const float* input, const float* weight, std::uint64_t size, float eps, float* output);
+
 // True when the caller may use the tolerance-level fast paths.
 [[nodiscard]] bool fast_path_enabled();
 
