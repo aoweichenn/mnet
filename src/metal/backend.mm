@@ -9,11 +9,14 @@
 
 #include <mnet/detail/compute.hpp>
 
+#include <mnet/gguf/format.hpp>
+
 #import <Metal/Metal.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -102,6 +105,71 @@ kernel void q2_0_matvec_fast(device const uchar* w        [[buffer(0)]],
     }
 }
 
+
+// SwiGLU: out = silu(gate) * up, one thread per element.
+kernel void swiglu_f32(device const float* gate [[buffer(0)]],
+                       device const float* up   [[buffer(1)]],
+                       device float* out        [[buffer(2)]],
+                       constant uint& count     [[buffer(3)]],
+                       uint gid                 [[thread_position_in_grid]]) {
+    if (gid >= count) {
+        return;
+    }
+    const float x = gate[gid];
+    out[gid] = (x / (1.0f + exp(-x))) * up[gid];
+}
+
+// out = in * sign * scale (the model's signed Hadamard pre-step).
+kernel void sign_scale(device const float* in  [[buffer(0)]],
+                       device const int* signs  [[buffer(1)]],
+                       device float* out        [[buffer(2)]],
+                       constant float& scale    [[buffer(3)]],
+                       constant uint& count     [[buffer(4)]],
+                       uint gid                 [[thread_position_in_grid]]) {
+    if (gid >= count) {
+        return;
+    }
+    out[gid] = (in[gid] * float(signs[gid])) * scale;
+}
+
+// Normalised in-place Hadamard over one 256-value block, same butterfly order
+// as the CPU fwht (a+b, a-b per stage), one threadgroup of 256 threads.
+kernel void fwht256(device float* data          [[buffer(0)]],
+                    uint tgid                   [[threadgroup_position_in_grid]],
+                    uint lane                   [[thread_position_in_threadgroup]]) {
+    threadgroup float v[256];
+    const uint base = tgid * 256u;
+    v[lane] = data[base + lane];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint len = 1u; len < 256u; len <<= 1u) {
+        if ((lane & len) == 0u) {
+            const float a = v[lane];
+            const float b = v[lane + len];
+            v[lane] = a + b;
+            v[lane + len] = a - b;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    data[base + lane] = v[lane];
+}
+
+// Q8_0 activation quantisation, one thread per 32-value block; matches
+// make_q8_0_blocks: round-to-nearest-even codes and a half-rounded scale.
+kernel void q8_0_quantize(device const float* x    [[buffer(0)]],
+                          device char* qs          [[buffer(1)]],
+                          device float* scales     [[buffer(2)]],
+                          uint gid                 [[thread_position_in_grid]]) {
+    const uint base = gid * 32u;
+    float amax = 0.0f;
+    for (uint j = 0; j < 32u; ++j) {
+        amax = fmax(amax, fabs(x[base + j]));
+    }
+    const float id = amax != 0.0f ? 127.0f / amax : 0.0f;
+    for (uint j = 0; j < 32u; ++j) {
+        qs[base + j] = char(rint(x[base + j] * id));
+    }
+    scales[gid] = float(half(amax / 127.0f));
+}
 )MSL";
 
 struct MetalState {
@@ -109,6 +177,22 @@ struct MetalState {
     id<MTLCommandQueue> queue = nil;
     id<MTLComputePipelineState> pipeline = nil;
     id<MTLComputePipelineState> fast_pipeline = nil;
+    id<MTLComputePipelineState> swiglu_pipeline = nil;
+    id<MTLComputePipelineState> quantize_pipeline = nil;
+    id<MTLBuffer> act_buffer = nil;
+    id<MTLBuffer> act_q8_buffer = nil;
+    id<MTLBuffer> act_scale_buffer = nil;
+    id<MTLBuffer> gate_buffer = nil;
+    id<MTLBuffer> up_buffer = nil;
+    id<MTLBuffer> signs_buffer = nil;
+    id<MTLComputePipelineState> sign_scale_pipeline = nil;
+    id<MTLComputePipelineState> fwht_pipeline = nil;
+    std::size_t signs_capacity = 0;
+    std::size_t act_capacity = 0;
+    std::size_t act_q8_capacity = 0;
+    std::size_t act_scale_capacity = 0;
+    std::size_t gate_capacity = 0;
+    std::size_t up_capacity = 0;
     std::unordered_map<std::uint64_t, id<MTLBuffer>> weight_buffers;
     id<MTLBuffer> q8_buffer = nil;
     id<MTLBuffer> scale_buffer = nil;
@@ -139,6 +223,22 @@ void initialise(MetalState& state) {
     id<MTLFunction> function = library != nil ? [library newFunctionWithName:@"q2_0_matvec"] : nil;
     if (function != nil) {
         state.pipeline = [state.device newComputePipelineStateWithFunction:function error:&error];
+    }
+    id<MTLFunction> sign_scale_function = library != nil ? [library newFunctionWithName:@"sign_scale"] : nil;
+    if (sign_scale_function != nil) {
+        state.sign_scale_pipeline = [state.device newComputePipelineStateWithFunction:sign_scale_function error:&error];
+    }
+    id<MTLFunction> fwht_function = library != nil ? [library newFunctionWithName:@"fwht256"] : nil;
+    if (fwht_function != nil) {
+        state.fwht_pipeline = [state.device newComputePipelineStateWithFunction:fwht_function error:&error];
+    }
+    id<MTLFunction> swiglu_function = library != nil ? [library newFunctionWithName:@"swiglu_f32"] : nil;
+    if (swiglu_function != nil) {
+        state.swiglu_pipeline = [state.device newComputePipelineStateWithFunction:swiglu_function error:&error];
+    }
+    id<MTLFunction> quantize_function = library != nil ? [library newFunctionWithName:@"q8_0_quantize"] : nil;
+    if (quantize_function != nil) {
+        state.quantize_pipeline = [state.device newComputePipelineStateWithFunction:quantize_function error:&error];
     }
     id<MTLFunction> fast_function = library != nil ? [library newFunctionWithName:@"q2_0_matvec_fast"] : nil;
     if (fast_function != nil) {
@@ -198,12 +298,13 @@ id<MTLBuffer> weight_buffer_for(MetalState& s, std::uint64_t identity, const std
 
 void encode_dispatch(MetalState& s, id<MTLComputeCommandEncoder> encoder, id<MTLBuffer> weight_buffer,
                      std::uint64_t rows, std::uint64_t columns, std::uint64_t row_bytes, float scale,
-                     std::uint64_t out_offset_floats) {
+                     std::uint64_t out_offset_floats, id<MTLBuffer> activations, id<MTLBuffer> activation_scales,
+                     id<MTLBuffer> output_buffer) {
     const std::uint64_t blocks = columns / 64U;
     [encoder setBuffer:weight_buffer offset:0 atIndex:0];
-    [encoder setBuffer:s.q8_buffer offset:0 atIndex:1];
-    [encoder setBuffer:s.scale_buffer offset:0 atIndex:2];
-    [encoder setBuffer:s.out_buffer offset:static_cast<NSUInteger>(out_offset_floats * sizeof(float)) atIndex:3];
+    [encoder setBuffer:activations offset:0 atIndex:1];
+    [encoder setBuffer:activation_scales offset:0 atIndex:2];
+    [encoder setBuffer:output_buffer offset:static_cast<NSUInteger>(out_offset_floats * sizeof(float)) atIndex:3];
     const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(row_bytes);
     const std::uint32_t blocks32 = static_cast<std::uint32_t>(blocks);
     [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
@@ -268,7 +369,8 @@ bool matvec_batch(const MatvecQ8_0Job* jobs, std::size_t count, std::uint64_t co
             [command waitUntilCompleted];
             return false;
         }
-        encode_dispatch(s, encoder, weight_buffer, jobs[i].rows, columns, jobs[i].row_bytes, jobs[i].scale, offset);
+        encode_dispatch(s, encoder, weight_buffer, jobs[i].rows, columns, jobs[i].row_bytes, jobs[i].scale, offset,
+                        s.q8_buffer, s.scale_buffer, s.out_buffer);
         offset += jobs[i].rows;
     }
     [encoder endEncoding];
@@ -287,6 +389,105 @@ bool matvec_batch(const MatvecQ8_0Job* jobs, std::size_t count, std::uint64_t co
     return true;
 }
 
+// gate/up matvec -> SwiGLU -> on-device Q8_0 -> down matvec, one submission.
+bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const MatvecQ8_0Job& down, std::uint64_t columns,
+                std::uint64_t hidden, const float* input, const std::int32_t* signs, std::uint32_t block_size) {
+    MetalState& s = state();
+    if (!s.ready || s.swiglu_pipeline == nil || s.quantize_pipeline == nil || s.sign_scale_pipeline == nil ||
+        s.fwht_pipeline == nil) {
+        return false;
+    }
+    if (block_size != 256U) {
+        return false;
+    }
+    if (gate.type != 42U || up.type != 42U || down.type != 42U) {
+        return false;
+    }
+    if (up.rows != hidden || down.rows == 0 || (columns % 64U) != 0U || (hidden % block_size) != 0U) {
+        return false;
+    }
+
+    const auto q80 = mnet::gguf::make_q8_0_blocks(input, columns);
+    id<MTLBuffer> q8_buffer = ensure_buffer(s.device, s.q8_buffer, s.q8_capacity, static_cast<std::size_t>(columns));
+    id<MTLBuffer> scale_buffer = ensure_buffer(s.device, s.scale_buffer, s.scale_capacity,
+                                               static_cast<std::size_t>(columns / 32U) * sizeof(float));
+    id<MTLBuffer> gate_buffer =
+        ensure_buffer(s.device, s.gate_buffer, s.gate_capacity, static_cast<std::size_t>(hidden) * sizeof(float));
+    id<MTLBuffer> up_buffer =
+        ensure_buffer(s.device, s.up_buffer, s.up_capacity, static_cast<std::size_t>(hidden) * sizeof(float));
+    id<MTLBuffer> act_buffer =
+        ensure_buffer(s.device, s.act_buffer, s.act_capacity, static_cast<std::size_t>(hidden) * sizeof(float));
+    id<MTLBuffer> act_q8_buffer = ensure_buffer(s.device, s.act_q8_buffer, s.act_q8_capacity,
+                                                static_cast<std::size_t>(hidden));
+    id<MTLBuffer> act_scale_buffer = ensure_buffer(s.device, s.act_scale_buffer, s.act_scale_capacity,
+                                                   static_cast<std::size_t>(hidden / 32U) * sizeof(float));
+    id<MTLBuffer> signs_buffer =
+        ensure_buffer(s.device, s.signs_buffer, s.signs_capacity, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
+    id<MTLBuffer> out_buffer =
+        ensure_buffer(s.device, s.out_buffer, s.out_capacity, static_cast<std::size_t>(down.rows) * sizeof(float));
+    if (q8_buffer == nil || scale_buffer == nil || gate_buffer == nil || up_buffer == nil || act_buffer == nil ||
+        act_q8_buffer == nil || act_scale_buffer == nil || signs_buffer == nil || out_buffer == nil) {
+        return false;
+    }
+    std::memcpy(signs_buffer.contents, signs, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
+    std::memcpy(q8_buffer.contents, q80.qs.data(), static_cast<std::size_t>(columns));
+    std::memcpy(scale_buffer.contents, q80.d.data(), static_cast<std::size_t>(columns / 32U) * sizeof(float));
+
+    id<MTLBuffer> gate_weights = weight_buffer_for(s, gate.identity, gate.data, gate.rows, columns, gate.row_bytes);
+    id<MTLBuffer> up_weights = weight_buffer_for(s, up.identity, up.data, up.rows, columns, up.row_bytes);
+    id<MTLBuffer> down_weights =
+        weight_buffer_for(s, down.identity, down.data, down.rows, hidden, down.row_bytes);
+    if (gate_weights == nil || up_weights == nil || down_weights == nil) {
+        return false;
+    }
+
+    id<MTLCommandBuffer> command = [s.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    encode_dispatch(s, encoder, gate_weights, gate.rows, columns, gate.row_bytes, gate.scale, 0, q8_buffer,
+                    scale_buffer, gate_buffer);
+    encode_dispatch(s, encoder, up_weights, up.rows, columns, up.row_bytes, up.scale, 0, q8_buffer, scale_buffer,
+                    up_buffer);
+
+    [encoder setComputePipelineState:s.swiglu_pipeline];
+    [encoder setBuffer:gate_buffer offset:0 atIndex:0];
+    [encoder setBuffer:up_buffer offset:0 atIndex:1];
+    [encoder setBuffer:act_buffer offset:0 atIndex:2];
+    const std::uint32_t hidden32 = static_cast<std::uint32_t>(hidden);
+    [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:3];
+    [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+
+    [encoder setComputePipelineState:s.sign_scale_pipeline];
+    [encoder setBuffer:act_buffer offset:0 atIndex:0];
+    [encoder setBuffer:signs_buffer offset:0 atIndex:1];
+    [encoder setBuffer:act_buffer offset:0 atIndex:2];
+    const float hadamard_scale = 1.0F / std::sqrt(static_cast<float>(block_size));
+    [encoder setBytes:&hadamard_scale length:sizeof(hadamard_scale) atIndex:3];
+    [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:4];
+    [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+
+    [encoder setComputePipelineState:s.fwht_pipeline];
+    [encoder setBuffer:act_buffer offset:0 atIndex:0];
+    [encoder dispatchThreadgroups:MTLSizeMake(hidden / block_size, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
+
+    [encoder setComputePipelineState:s.quantize_pipeline];
+    [encoder setBuffer:act_buffer offset:0 atIndex:0];
+    [encoder setBuffer:act_q8_buffer offset:0 atIndex:1];
+    [encoder setBuffer:act_scale_buffer offset:0 atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(hidden / 32U, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+
+    encode_dispatch(s, encoder, down_weights, down.rows, hidden, down.row_bytes, down.scale, 0, act_q8_buffer,
+                    act_scale_buffer, out_buffer);
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted) {
+        return false;
+    }
+    std::memcpy(down.out, out_buffer.contents, static_cast<std::size_t>(down.rows) * sizeof(float));
+    return true;
+}
+
 bool matvec_q8_0_backend(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
                          std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales,
                          float* out, std::uint64_t identity) {
@@ -300,11 +501,16 @@ bool matvec_q8_0_backend(std::uint32_t type, const std::uint8_t* data, std::uint
 
 void register_platform_backends() {
     if (std::getenv("MNET_METAL_DEBUG") != nullptr) {
-        std::fprintf(stderr, "mnet: metal backend %s (fast kernel %s)\n",
-                     state().ready ? "ready" : "unavailable", state().fast_pipeline != nil ? "ready" : "unavailable");
+        std::fprintf(stderr, "mnet: metal backend %s (fast %s, ffn %s)\n",
+                     state().ready ? "ready" : "unavailable", state().fast_pipeline != nil ? "ready" : "unavailable",
+                     (state().swiglu_pipeline != nil && state().quantize_pipeline != nil &&
+                      state().sign_scale_pipeline != nil && state().fwht_pipeline != nil)
+                         ? "ready"
+                         : "unavailable");
     }
     set_matvec_q8_0_backend(&matvec_q8_0_backend);
     set_matvec_q8_0_batch_backend(&matvec_batch);
+    set_ffn_swiglu_backend(&ffn_swiglu);
 }
 
 }  // namespace mnet::detail::compute

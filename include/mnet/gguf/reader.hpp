@@ -83,6 +83,13 @@ public:
     // result is identical to calling matvec for each pair.
     static void matvec_batch(std::initializer_list<std::pair<const Quantized*, float*>> jobs, const float* input);
 
+    // Fused FFN: gate/up matvec, SwiGLU, signed normalized Hadamard and the
+    // down matvec in one device submission. Returns false when the backend
+    // cannot take the whole block; the caller then runs the steps itself.
+    [[nodiscard]] static bool ffn_swiglu(const Quantized& gate, const Quantized& up, const Quantized& down,
+                                         const float* input, const std::int32_t* signs, std::uint32_t block_size,
+                                         float* output);
+
     static void matmul(const Quantized& matrix, const float* input, float* output, std::size_t tokens,
                        std::size_t input_stride, std::size_t output_stride);
 

@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include <mnet/detail/compute.hpp>
 #include <mnet/detail/ggml_kernels.hpp>
 #include <mnet/gguf.hpp>
 #include <mnet/tokenizer/bpe.hpp>
@@ -463,20 +464,28 @@ private:
         }
         auto ph = pn;
         hadamard_forward(ph, signs_embd, this->config_.hadamard_block);
-        std::vector<float> gate(w.ffn_gate.rows);
-        std::vector<float> up(w.ffn_up.rows);
-        Reader::matvec_batch({{&w.ffn_gate, gate.data()}, {&w.ffn_up, up.data()}}, ph.data());
-        std::vector<float> act(w.ffn_gate.rows);
-        swiglu(act.data(), gate.data(), up.data(), act.size());
-        if (dump_dir != nullptr) {
-            this->dump_tensor(*dump_dir, "ffn_gate", layer, gate, token);
-            this->dump_tensor(*dump_dir, "ffn_up", layer, up, token);
-            this->dump_tensor(*dump_dir, "ffn_swiglu", layer, act, token);
-        }
         const auto signs_hidden = this->reader_.signs_for_width(static_cast<std::uint32_t>(this->config_.n_ff));
-        hadamard_forward(act, signs_hidden, this->config_.hadamard_block);
         std::vector<float> down(this->config_.n_embd);
-        Reader::matvec(w.ffn_down, act.data(), down.data());
+        bool fused = false;
+        if (dump_dir == nullptr && mnet::detail::compute::fast_path_enabled() &&
+            mnet::detail::compute::fused_ffn_enabled()) {
+            fused = Reader::ffn_swiglu(w.ffn_gate, w.ffn_up, w.ffn_down, ph.data(), signs_hidden.data(),
+                                       this->config_.hadamard_block, down.data());
+        }
+        if (!fused) {
+            std::vector<float> gate(w.ffn_gate.rows);
+            std::vector<float> up(w.ffn_up.rows);
+            Reader::matvec_batch({{&w.ffn_gate, gate.data()}, {&w.ffn_up, up.data()}}, ph.data());
+            std::vector<float> act(w.ffn_gate.rows);
+            swiglu(act.data(), gate.data(), up.data(), act.size());
+            if (dump_dir != nullptr) {
+                this->dump_tensor(*dump_dir, "ffn_gate", layer, gate, token);
+                this->dump_tensor(*dump_dir, "ffn_up", layer, up, token);
+                this->dump_tensor(*dump_dir, "ffn_swiglu", layer, act, token);
+            }
+            hadamard_forward(act, signs_hidden, this->config_.hadamard_block);
+            Reader::matvec(w.ffn_down, act.data(), down.data());
+        }
         for (std::size_t i = 0; i < this->config_.n_embd; ++i) {
             x[i] += down[i];
         }

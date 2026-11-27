@@ -540,6 +540,26 @@ void Reader::matvec_batch(std::initializer_list<std::pair<const Quantized*, floa
                                              q80.d.data());
 }
 
+bool Reader::ffn_swiglu(const Quantized& gate, const Quantized& up, const Quantized& down, const float* input,
+                        const std::int32_t* signs, std::uint32_t block_size, float* output) {
+    if (gate.type != kGgmlQ2_0 || up.type != kGgmlQ2_0 || down.type != kGgmlQ2_0 || block_size != 256U) {
+        return false;
+    }
+    const auto info = type_info(gate.type);
+    if (gate.columns != up.columns || down.columns != gate.rows || gate.rows != up.rows ||
+        gate.columns % info.block_elements != 0 || down.columns % info.block_elements != 0 ||
+        gate.rows % block_size != 0) {
+        return false;
+    }
+    const std::uint64_t gate_bytes = gate.columns / info.block_elements * info.block_bytes;
+    const std::uint64_t down_bytes = down.columns / info.block_elements * info.block_bytes;
+    return mnet::detail::compute::ffn_swiglu_q2_0(
+        {gate.type, gate.blocks.data(), gate.rows, gate_bytes, gate.scale, output, gate.identity},
+        {up.type, up.blocks.data(), up.rows, gate_bytes, up.scale, nullptr, up.identity},
+        {down.type, down.blocks.data(), down.rows, down_bytes, down.scale, output, down.identity}, gate.columns,
+        gate.rows, input, signs, block_size);
+}
+
 void Reader::matmul(const Quantized& matrix, const float* input, float* output, std::size_t tokens,
                     std::size_t input_stride, std::size_t output_stride) {
     for (std::size_t t = 0; t < tokens; ++t) {

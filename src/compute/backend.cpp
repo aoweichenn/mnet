@@ -28,6 +28,11 @@ std::atomic<MatvecQ8_0BatchFn>& batch_slot() {
     return slot;
 }
 
+std::atomic<FfnSwigluFn>& ffn_slot() {
+    static std::atomic<FfnSwigluFn> slot{nullptr};
+    return slot;
+}
+
 struct Stats {
     std::atomic<std::uint64_t> backend_ns{0};
     std::atomic<std::uint64_t> cpu_ns{0};
@@ -64,6 +69,10 @@ void set_matvec_q8_0_backend(MatvecQ8_0Fn backend) {
 
 void set_matvec_q8_0_batch_backend(MatvecQ8_0BatchFn backend) {
     batch_slot().store(backend);
+}
+
+void set_ffn_swiglu_backend(FfnSwigluFn backend) {
+    ffn_slot().store(backend);
 }
 
 namespace {
@@ -143,6 +152,25 @@ void matvec_q8_0_batch(const MatvecQ8_0Job* jobs, std::size_t count, std::uint64
                    jobs[i].out);
     }
     stats().cpu_calls += count;
+}
+
+bool ffn_swiglu_q2_0(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const MatvecQ8_0Job& down,
+                     std::uint64_t columns, std::uint64_t hidden, const float* input, const std::int32_t* signs,
+                     std::uint32_t block_size) {
+    static std::once_flag once;
+    std::call_once(once, [] { register_platform_backends(); });
+    const FfnSwigluFn backend = ffn_slot().load();
+    return backend != nullptr && backend(gate, up, down, columns, hidden, input, signs, block_size);
+}
+
+bool fast_path_enabled() {
+    static const bool enabled = std::getenv("MNET_METAL_FAST") != nullptr;
+    return enabled;
+}
+
+bool fused_ffn_enabled() {
+    static const bool enabled = std::getenv("MNET_METAL_FUSED_FFN") != nullptr;
+    return enabled;
 }
 
 }  // namespace mnet::detail::compute

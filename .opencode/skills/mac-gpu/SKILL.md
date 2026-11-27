@@ -73,9 +73,21 @@ Quirk: this llama-bench build prints `ngl 10` in every row even with
 - The Q2_0 kernel mirrors the CPU accumulation order, so results are
   bit-identical; Bonsai dumps matched 2371/2371.
 - `MNET_METAL_DEBUG=1` prints whether the backend initialised.
-- Measured Bonsai 27B Q2_0 (7.6 GB): CPU 5.24 s/token, Metal 0.25 s/token
-  (4.0 t/s) = 21x. Weight upload is one-time; each matvec is one dispatch +
-  wait.
+- Metal pitfalls found the hard way:
+  * shaders compile with **fast-math on** by default: set
+    `MTLCompileOptions.fastMathEnabled = NO` or the Q2_0 kernel loses the last
+    ulps (48/2304 rows) and a 64-layer model diverges completely.
+  * never key device buffers by host pointer: `Quantized` objects are loaded
+    and released, addresses get reused. `Reader::Quantized::identity`
+    (reader, tensor offset, expert) is the cache key.
+- Two kernels: the exact one (CPU accumulation order, bit-identical) is the
+  default; `MNET_METAL_FAST=1` selects the 32-lane/row + simd_sum kernel
+  (llama.cpp mul_mv shape), which is ~25% faster but only tolerance-close.
+- `Reader::matvec_batch` fuses independent matvecs that share an activation
+  (ffn gate/up, qkv+gate, q/k/v) into one command buffer and one wait.
+- Measured Bonsai 27B Q2_0, 32 tokens: CPU 167.7 s (5.24 s/token); Metal
+  exact 8.23 s (0.26 s/token, 2371/2371 identical); Metal fast 6.47 s
+  (0.20 s/token, top-5 unchanged, max rel 2e-2).
 - Build dirs: `build-metal` (Metal ON), `build-cpu` (CPU reference) in
   `~/mnet_p4/mnet`. Dumps: `~/mnet_p4/{bonsai_cpu,bonsai_gpu}`.
 
