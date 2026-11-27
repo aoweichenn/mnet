@@ -382,18 +382,25 @@ kernel void ssm_conv_norm(device const float* window     [[buffer(0)]],
                           constant uint& norm_blocks     [[buffer(6)]],
                           constant float& eps            [[buffer(7)]],
                           constant uint& head_dim        [[buffer(8)]],
+                          constant uint& wrap            [[buffer(9)]],
                           uint tgid                      [[threadgroup_position_in_grid]],
                           uint tid                       [[thread_position_in_threadgroup]]) {
     threadgroup float squares[8];
     const uint index = tgid * head_dim + tid;
     float sum = 0.0f;
-    for (uint k = 0; k + 1u < kernel_size; ++k) {
-        const uint row = (ring + 1u + k) % kernel_size;
+    for (uint k = 0; k < kernel_size; ++k) {
+        // `wrap` is the ring size; zero means the window is a straight run of
+        // rows with `ring` the oldest one (the batched path keeps the whole
+        // layer's sequence).
+        uint row = ring;
+        if (wrap != 0u) {
+            row = (k + 1u < kernel_size) ? ((ring + 1u + k) % wrap) : ring;
+        } else {
+            row = ring + k;
+        }
         const volatile float product = window[row * conv_dim + index] * conv_w[index * kernel_size + k];
         sum += product;
     }
-    const volatile float newest = window[ring * conv_dim + index] * conv_w[index * kernel_size + kernel_size - 1u];
-    sum += newest;
     float value = sum / (1.0f + exp(-sum));
     if (tgid < norm_blocks) {
         // llama's build_gdn_l2_norm: scale(x, 1/sqrt(mean + eps/n)) then
@@ -556,6 +563,36 @@ struct FfnBatchBuffers {
     std::size_t out_capacity = 0;
 };
 
+// Per-token scratch for a batched gated-delta block.
+struct SsmBatchBuffers {
+    id<MTLBuffer> q8 = nil;
+    id<MTLBuffer> scales = nil;
+    id<MTLBuffer> wide = nil;
+    id<MTLBuffer> activation = nil;
+    id<MTLBuffer> raw = nil;
+    id<MTLBuffer> gates = nil;
+    id<MTLBuffer> conv = nil;
+    id<MTLBuffer> z = nil;
+    id<MTLBuffer> delta = nil;
+    id<MTLBuffer> grouped = nil;
+    id<MTLBuffer> act_q8 = nil;
+    id<MTLBuffer> act_scales = nil;
+    id<MTLBuffer> out = nil;
+    std::size_t q8_capacity = 0;
+    std::size_t scales_capacity = 0;
+    std::size_t wide_capacity = 0;
+    std::size_t activation_capacity = 0;
+    std::size_t raw_capacity = 0;
+    std::size_t gates_capacity = 0;
+    std::size_t conv_capacity = 0;
+    std::size_t z_capacity = 0;
+    std::size_t delta_capacity = 0;
+    std::size_t grouped_capacity = 0;
+    std::size_t act_q8_capacity = 0;
+    std::size_t act_scales_capacity = 0;
+    std::size_t out_capacity = 0;
+};
+
 // Per-call scratch for the gated-delta block (kept across layers).
 struct SsmBuffers {
     id<MTLBuffer> activation = nil;  // raw_input, fp32 (the beta/alpha projection input)
@@ -615,6 +652,7 @@ struct MetalState {
     id<MTLComputePipelineState> ssm_scan_pipeline = nil;
     id<MTLComputePipelineState> ssm_gate_norm_pipeline = nil;
     FfnBatchBuffers ffn_batch;
+    SsmBatchBuffers ssm_batch;
     AttentionBuffers attn;
     SsmBuffers ssm;
     std::unordered_map<std::uint64_t, SsmLayer> ssm_layers;
@@ -1520,6 +1558,7 @@ bool ssm_block(const SsmQ2_0Job& job) {
     [encoder setBytes:&norm_blocks32 length:sizeof(norm_blocks32) atIndex:6];
     [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
     [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:8];
+    [encoder setBytes:&kernel32 length:sizeof(kernel32) atIndex:9];
     [encoder dispatchThreadgroups:MTLSizeMake(conv_dim / head_dim, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
     }
@@ -1787,6 +1826,328 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
     return true;
 }
 
+// Gated-delta block for several tokens of one layer. The token-independent
+// part (qkv/gate matvec, head gates, convolution) is encoded for all tokens
+// first so those dispatches overlap; the scan and what reads it stay in token
+// order because the recurrent state carries across tokens. The convolution
+// window is kept as a straight run of (kernel-1 + count) rows instead of a
+// ring, so each token's four-tap window is just its own row and the three
+// before it.
+bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::size_t count) {
+    MetalState& s = state();
+    if (!s.ready || s.ssm_rows_pipeline == nil || s.ssm_act_pipeline == nil || s.ssm_conv_norm_pipeline == nil ||
+        s.ssm_scan_pipeline == nil || s.ssm_gate_norm_pipeline == nil || s.hadamard_quantize_pipeline == nil ||
+        s.fast_f32_pipeline == nil || s.dequant_pipeline == nil || entries == nullptr || count == 0U) {
+        return false;
+    }
+    if (job.qkv.type != 42U || job.gate.type != 42U || job.out.type != 42U) {
+        return false;
+    }
+    const std::uint64_t head_dim = job.head_dim;
+    const std::uint64_t key_heads = job.key_heads;
+    const std::uint64_t value_heads = job.value_heads;
+    const std::uint64_t conv_dim = job.conv_dim;
+    const std::uint64_t hidden = value_heads * head_dim;
+    if (head_dim == 0U || head_dim > 256U || (head_dim % 32U) != 0U || key_heads == 0U || value_heads == 0U ||
+        (value_heads % key_heads) != 0U || job.conv_kernel < 2U || job.conv_kernel > 8U ||
+        conv_dim != 2U * key_heads * head_dim + hidden || (job.columns % 64U) != 0U ||
+        job.block_size < 64U || job.block_size > 1024U || (job.block_size & (job.block_size - 1U)) != 0U ||
+        (hidden % job.block_size) != 0U || job.qkv.rows != conv_dim || job.gate.rows != hidden ||
+        job.out.rows != job.columns) {
+        return false;
+    }
+
+    const WeightBinding qkv_weights = weight_buffer_for(s, job.qkv, job.qkv.rows, job.qkv.row_bytes, true);
+    const WeightBinding gate_weights = weight_buffer_for(s, job.gate, job.gate.rows, job.gate.row_bytes, true);
+    const WeightBinding out_weights = weight_buffer_for(s, job.out, job.out.rows, job.out.row_bytes, true);
+    if (qkv_weights.buffer == nil || gate_weights.buffer == nil || out_weights.buffer == nil) {
+        return false;
+    }
+
+    // Resident per-layer state, seeded from the caller's vectors on first use.
+    const std::uint64_t window_rows = job.conv_kernel - 1U + count;
+    const std::uint64_t window_floats = window_rows * conv_dim;
+    const std::uint64_t side_floats = 2U * value_heads * job.columns + 2U * value_heads +
+                                      conv_dim * job.conv_kernel + head_dim;
+    const std::uint64_t state_floats = value_heads * head_dim * head_dim;
+    SsmLayer& layer = s.ssm_layers[cache_key(job.identity, job.qkv.data)];
+    if (layer.window == nil) {
+        layer.window = [s.device newBufferWithLength:static_cast<NSUInteger>(window_floats * sizeof(float))
+                                             options:MTLResourceStorageModeShared];
+        layer.state = [s.device newBufferWithLength:static_cast<NSUInteger>(state_floats * sizeof(float))
+                                            options:MTLResourceStorageModeShared];
+        layer.side = [s.device newBufferWithLength:static_cast<NSUInteger>(side_floats * sizeof(float))
+                                           options:MTLResourceStorageModeShared];
+        if (layer.window == nil || layer.state == nil || layer.side == nil) {
+            layer = SsmLayer{};
+            return false;
+        }
+        auto* side = static_cast<float*>(layer.side.contents);
+        const std::size_t alpha_offset = static_cast<std::size_t>(value_heads * job.columns);
+        const std::size_t dt_offset = 2U * alpha_offset;
+        const std::size_t a_offset = dt_offset + static_cast<std::size_t>(value_heads);
+        const std::size_t conv_w_offset = a_offset + static_cast<std::size_t>(value_heads);
+        const std::size_t norm_offset = conv_w_offset + static_cast<std::size_t>(conv_dim * job.conv_kernel);
+        std::memcpy(side, job.beta_w, static_cast<std::size_t>(value_heads * job.columns) * sizeof(float));
+        std::memcpy(side + alpha_offset, job.alpha_w,
+                    static_cast<std::size_t>(value_heads * job.columns) * sizeof(float));
+        std::memcpy(side + dt_offset, job.dt, static_cast<std::size_t>(value_heads) * sizeof(float));
+        std::memcpy(side + a_offset, job.ssm_a, static_cast<std::size_t>(value_heads) * sizeof(float));
+        std::memcpy(side + conv_w_offset, job.conv_w,
+                    static_cast<std::size_t>(conv_dim * job.conv_kernel) * sizeof(float));
+        std::memcpy(side + norm_offset, job.ssm_norm, static_cast<std::size_t>(head_dim) * sizeof(float));
+        auto* window = static_cast<float*>(layer.window.contents);
+        std::memcpy(window, job.conv_state,
+                    static_cast<std::size_t>((job.conv_kernel - 1U) * conv_dim) * sizeof(float));
+        auto* resident = static_cast<float*>(layer.state.contents);
+        for (std::uint64_t h = 0; h < value_heads; ++h) {
+            const float* source = job.ssm_state + h * head_dim * head_dim;
+            float* target = resident + h * head_dim * head_dim;
+            for (std::uint64_t j = 0; j < head_dim; ++j) {
+                for (std::uint64_t i = 0; i < head_dim; ++i) {
+                    target[i * head_dim + j] = source[j * head_dim + i];
+                }
+            }
+        }
+    } else if (layer.window.length < static_cast<NSUInteger>(window_floats * sizeof(float))) {
+        // A later batch with more tokens needs a longer window.
+        id<MTLBuffer> grown = [s.device newBufferWithLength:static_cast<NSUInteger>(window_floats * sizeof(float))
+                                                    options:MTLResourceStorageModeShared];
+        if (grown == nil) {
+            return false;
+        }
+        std::memcpy(grown.contents, layer.window.contents,
+                    static_cast<std::size_t>(job.conv_kernel - 1U) * conv_dim * sizeof(float));
+        layer.window = grown;
+    }
+    auto* side = static_cast<const float*>(layer.side.contents);
+    const std::size_t alpha_offset = static_cast<std::size_t>(value_heads * job.columns);
+    const std::size_t dt_offset = 2U * alpha_offset;
+    const std::size_t a_offset = dt_offset + static_cast<std::size_t>(value_heads);
+    const std::size_t conv_w_offset = a_offset + static_cast<std::size_t>(value_heads);
+    const std::size_t norm_offset = conv_w_offset + static_cast<std::size_t>(conv_dim * job.conv_kernel);
+    id<MTLBuffer> signs_buffer =
+        ensure_buffer(s.device, s.signs_buffer, s.signs_capacity, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
+    if (signs_buffer == nil) {
+        return false;
+    }
+    std::memcpy(signs_buffer.contents, job.signs, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
+
+    SsmBatchBuffers& b = s.ssm_batch;
+    const std::size_t n = count;
+    const std::uint64_t widest = job.columns > hidden ? job.columns : hidden;
+    b.q8 = ensure_buffer(s.device, b.q8, b.q8_capacity, n * static_cast<std::size_t>(job.columns));
+    b.scales = ensure_buffer(s.device, b.scales, b.scales_capacity,
+                             n * static_cast<std::size_t>(job.columns / 32U) * sizeof(float));
+    b.wide = ensure_buffer(s.device, b.wide, b.wide_capacity, n * static_cast<std::size_t>(widest) * sizeof(float));
+    b.activation = ensure_buffer(s.device, b.activation, b.activation_capacity,
+                                 n * static_cast<std::size_t>(job.columns) * sizeof(float));
+    b.raw = ensure_buffer(s.device, b.raw, b.raw_capacity, n * static_cast<std::size_t>(2U * value_heads) * sizeof(float));
+    b.gates =
+        ensure_buffer(s.device, b.gates, b.gates_capacity, n * static_cast<std::size_t>(2U * value_heads) * sizeof(float));
+    b.conv = ensure_buffer(s.device, b.conv, b.conv_capacity, n * static_cast<std::size_t>(conv_dim) * sizeof(float));
+    b.z = ensure_buffer(s.device, b.z, b.z_capacity, n * static_cast<std::size_t>(hidden) * sizeof(float));
+    b.delta = ensure_buffer(s.device, b.delta, b.delta_capacity, n * static_cast<std::size_t>(hidden) * sizeof(float));
+    b.grouped = ensure_buffer(s.device, b.grouped, b.grouped_capacity, n * static_cast<std::size_t>(hidden) * sizeof(float));
+    b.act_q8 = ensure_buffer(s.device, b.act_q8, b.act_q8_capacity, n * static_cast<std::size_t>(hidden));
+    b.act_scales = ensure_buffer(s.device, b.act_scales, b.act_scales_capacity,
+                                 n * static_cast<std::size_t>(hidden / 32U) * sizeof(float));
+    b.out = ensure_buffer(s.device, b.out, b.out_capacity, n * static_cast<std::size_t>(job.columns) * sizeof(float));
+    if (b.q8 == nil || b.scales == nil || b.wide == nil || b.activation == nil || b.raw == nil || b.gates == nil ||
+        b.conv == nil || b.z == nil || b.delta == nil || b.grouped == nil || b.act_q8 == nil ||
+        b.act_scales == nil || b.out == nil) {
+        return false;
+    }
+    auto* q8_destination = static_cast<std::uint8_t*>(b.q8.contents);
+    auto* scale_destination = static_cast<float*>(b.scales.contents);
+    auto* activation_destination = static_cast<float*>(b.activation.contents);
+    for (std::size_t t = 0; t < count; ++t) {
+        const auto q80 = mnet::gguf::make_q8_0_blocks(entries[t].input, job.columns);
+        std::memcpy(q8_destination + t * job.columns, q80.qs.data(), static_cast<std::size_t>(job.columns));
+        std::memcpy(scale_destination + t * (job.columns / 32U), q80.d.data(),
+                    static_cast<std::size_t>(job.columns / 32U) * sizeof(float));
+        std::memcpy(activation_destination + t * job.columns, entries[t].raw_input,
+                    static_cast<std::size_t>(job.columns) * sizeof(float));
+    }
+
+    const std::uint32_t head_dim32 = static_cast<std::uint32_t>(head_dim);
+    const std::uint32_t key_heads32 = static_cast<std::uint32_t>(key_heads);
+    const std::uint32_t value_heads32 = static_cast<std::uint32_t>(value_heads);
+    const std::uint32_t conv_dim32 = static_cast<std::uint32_t>(conv_dim);
+    const std::uint32_t kernel32 = job.conv_kernel;
+    const std::uint32_t hidden32 = static_cast<std::uint32_t>(hidden);
+    const std::uint32_t columns32 = static_cast<std::uint32_t>(job.columns);
+    const std::uint32_t heads_per_key32 = static_cast<std::uint32_t>(value_heads / key_heads);
+    const std::uint32_t norm_blocks32 = static_cast<std::uint32_t>(2U * key_heads);
+    const std::uint32_t block32 = job.block_size;
+    const std::uint32_t wrap_linear = 0U;
+    const float eps = job.eps;
+    const float inv_dim = 1.0F / std::sqrt(static_cast<float>(head_dim));
+
+    id<MTLCommandBuffer> command = [s.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    // Widen every token's activation once, then run all qkv and all gate
+    // matvecs.
+    for (std::size_t t = 0; t < count; ++t) {
+        [encoder setComputePipelineState:s.dequant_pipeline];
+        [encoder setBuffer:b.q8 offset:static_cast<NSUInteger>(t * job.columns) atIndex:0];
+        [encoder setBuffer:b.scales offset:static_cast<NSUInteger>(t * (job.columns / 32U) * sizeof(float)) atIndex:1];
+        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(job.columns, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    }
+    for (std::size_t pass = 0; pass < 2U; ++pass) {
+        const std::uint64_t rows = pass == 0U ? conv_dim : hidden;
+        const std::uint32_t blocks32 = static_cast<std::uint32_t>(
+            (pass == 0U ? job.columns : job.columns) / 64U);
+        for (std::size_t t = 0; t < count; ++t) {
+            [encoder setComputePipelineState:s.fast_f32_pipeline];
+            [encoder setBuffer:(pass == 0U ? qkv_weights.buffer : gate_weights.buffer)
+                         offset:static_cast<NSUInteger>(pass == 0U ? qkv_weights.offset : gate_weights.offset)
+                        atIndex:0];
+            [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:1];
+            // qkv lands in the window row for this token, gate in its own slab.
+            [encoder setBuffer:(pass == 0U ? layer.window : b.z)
+                         offset:static_cast<NSUInteger>(pass == 0U
+                                                            ? (job.conv_kernel - 1U + t) * conv_dim * sizeof(float)
+                                                            : t * hidden * sizeof(float))
+                        atIndex:3];
+            const std::uint32_t row_bytes32 =
+                static_cast<std::uint32_t>(pass == 0U ? job.qkv.row_bytes : job.gate.row_bytes);
+            const float scale = pass == 0U ? job.qkv.scale : job.gate.scale;
+            const std::uint32_t lanes = 32U;
+            [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
+            [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
+            [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+            [encoder setBytes:&lanes length:sizeof(lanes) atIndex:7];
+            [encoder dispatchThreadgroups:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        }
+    }
+    // Head gates and the convolution for every token.
+    for (std::size_t t = 0; t < count; ++t) {
+        [encoder setComputePipelineState:s.ssm_rows_pipeline];
+        [encoder setBuffer:layer.side offset:0 atIndex:0];
+        [encoder setBuffer:b.activation offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:1];
+        [encoder setBuffer:b.raw offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float)) atIndex:2];
+        [encoder setBytes:&columns32 length:sizeof(columns32) atIndex:3];
+        [encoder dispatchThreadgroups:MTLSizeMake(2U * value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+
+        [encoder setComputePipelineState:s.ssm_act_pipeline];
+        [encoder setBuffer:b.raw offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float)) atIndex:0];
+        [encoder setBuffer:layer.side offset:dt_offset * sizeof(float) atIndex:1];
+        [encoder setBuffer:layer.side offset:a_offset * sizeof(float) atIndex:2];
+        [encoder setBuffer:b.gates offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float)) atIndex:3];
+        [encoder setBuffer:b.gates
+                     offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float) +
+                                                    value_heads * sizeof(float))
+                    atIndex:4];
+        [encoder setBytes:&value_heads32 length:sizeof(value_heads32) atIndex:5];
+        [encoder dispatchThreads:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+
+        // Linear window: token t's four taps are rows t .. t + kernel - 1.
+        const std::uint32_t ring32 = static_cast<std::uint32_t>(t);
+        [encoder setComputePipelineState:s.ssm_conv_norm_pipeline];
+        [encoder setBuffer:layer.window offset:0 atIndex:0];
+        [encoder setBuffer:layer.side offset:conv_w_offset * sizeof(float) atIndex:1];
+        [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(t * conv_dim * sizeof(float)) atIndex:2];
+        [encoder setBytes:&conv_dim32 length:sizeof(conv_dim32) atIndex:3];
+        [encoder setBytes:&kernel32 length:sizeof(kernel32) atIndex:4];
+        [encoder setBytes:&ring32 length:sizeof(ring32) atIndex:5];
+        [encoder setBytes:&norm_blocks32 length:sizeof(norm_blocks32) atIndex:6];
+        [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
+        [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:8];
+        [encoder setBytes:&wrap_linear length:sizeof(wrap_linear) atIndex:9];
+        [encoder dispatchThreadgroups:MTLSizeMake(conv_dim / head_dim, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+    }
+    // Token order from here: the scan carries state and the rest reads it.
+    const std::uint32_t q_offset = 0U;
+    const std::uint32_t k_offset = static_cast<std::uint32_t>(key_heads * head_dim);
+    const std::uint32_t v_offset = static_cast<std::uint32_t>(2U * key_heads * head_dim);
+    for (std::size_t t = 0; t < count; ++t) {
+        [encoder setComputePipelineState:s.ssm_scan_pipeline];
+        [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(t * conv_dim * sizeof(float)) + q_offset * sizeof(float)
+                    atIndex:0];
+        [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(t * conv_dim * sizeof(float)) + k_offset * sizeof(float)
+                    atIndex:1];
+        [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(t * conv_dim * sizeof(float)) + v_offset * sizeof(float)
+                    atIndex:2];
+        [encoder setBuffer:b.gates offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float)) atIndex:3];
+        [encoder setBuffer:b.gates
+                     offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float) +
+                                                    value_heads * sizeof(float))
+                    atIndex:4];
+        [encoder setBuffer:layer.state offset:0 atIndex:5];
+        [encoder setBuffer:b.delta offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:6];
+        [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:7];
+        [encoder setBytes:&key_heads32 length:sizeof(key_heads32) atIndex:8];
+        [encoder setBytes:&inv_dim length:sizeof(inv_dim) atIndex:9];
+        [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+
+        [encoder setComputePipelineState:s.ssm_gate_norm_pipeline];
+        [encoder setBuffer:b.delta offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
+        [encoder setBuffer:b.z offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
+        [encoder setBuffer:layer.side offset:norm_offset * sizeof(float) atIndex:2];
+        [encoder setBuffer:b.grouped offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:3];
+        [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:4];
+        [encoder setBytes:&key_heads32 length:sizeof(key_heads32) atIndex:5];
+        [encoder setBytes:&heads_per_key32 length:sizeof(heads_per_key32) atIndex:6];
+        [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
+        [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+
+        [encoder setComputePipelineState:s.hadamard_quantize_pipeline];
+        [encoder setBuffer:b.grouped offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
+        [encoder setBuffer:signs_buffer offset:0 atIndex:1];
+        [encoder setBuffer:b.act_q8 offset:static_cast<NSUInteger>(t * hidden) atIndex:2];
+        [encoder setBuffer:b.act_scales offset:static_cast<NSUInteger>(t * (hidden / 32U) * sizeof(float)) atIndex:3];
+        [encoder setBytes:&block32 length:sizeof(block32) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(hidden / job.block_size, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(job.block_size, 1, 1)];
+
+        [encoder setComputePipelineState:s.dequant_pipeline];
+        [encoder setBuffer:b.act_q8 offset:static_cast<NSUInteger>(t * hidden) atIndex:0];
+        [encoder setBuffer:b.act_scales offset:static_cast<NSUInteger>(t * (hidden / 32U) * sizeof(float)) atIndex:1];
+        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+
+        [encoder setComputePipelineState:s.fast_f32_pipeline];
+        [encoder setBuffer:out_weights.buffer offset:static_cast<NSUInteger>(out_weights.offset) atIndex:0];
+        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
+        [encoder setBuffer:b.out offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:3];
+        const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(job.out.row_bytes);
+        const std::uint32_t blocks32 = static_cast<std::uint32_t>(hidden / 64U);
+        const float scale = job.out.scale;
+        const std::uint32_t lanes = 32U;
+        [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
+        [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
+        [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+        [encoder setBytes:&lanes length:sizeof(lanes) atIndex:7];
+        [encoder dispatchThreadgroups:MTLSizeMake(job.out.rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    }
+    [encoder endEncoding];
+    // Carry the last tokens' rows to the front for the next batch.
+    {
+        const std::uint64_t tail_rows = job.conv_kernel - 1U;
+        const std::uint64_t source_offset = static_cast<std::uint64_t>(count) * conv_dim * sizeof(float);
+        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+        [blit copyFromBuffer:layer.window
+                sourceOffset:static_cast<NSUInteger>(source_offset)
+                    toBuffer:layer.window
+           destinationOffset:0
+                        size:static_cast<NSUInteger>(tail_rows * conv_dim * sizeof(float))];
+        [blit endEncoding];
+    }
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted) {
+        return false;
+    }
+    const auto* results = static_cast<const float*>(b.out.contents);
+    for (std::size_t t = 0; t < count; ++t) {
+        std::memcpy(entries[t].output, results + t * job.columns, static_cast<std::size_t>(job.columns) * sizeof(float));
+    }
+    return true;
+}
+
 bool matvec_q8_0_backend(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
                          std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales,
                          float* out, std::uint64_t identity, const std::uint8_t* region,
@@ -1822,6 +2183,7 @@ void register_platform_backends() {
     set_ffn_swiglu_batch_backend(&ffn_batch_block);
     set_attention_backend(&attention);
     set_ssm_backend(&ssm_block);
+    set_ssm_batch_backend(&ssm_batch_block);
 }
 
 }  // namespace mnet::detail::compute

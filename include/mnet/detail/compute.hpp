@@ -174,6 +174,20 @@ struct SsmQ2_0Job {
     std::uint64_t identity = 0;  // per-layer key for the resident state
 };
 
+// One token of a batched gated-delta block. The block's qkv/gate matvecs, the
+// head gates and the convolution are token independent; only the delta-rule
+// scan and what reads it (gated RMS norm, Hadamard, output projection) must run
+// in token order.
+struct SsmBatchEntry {
+    const float* input = nullptr;      // n_embd, already Hadamard'ed
+    const float* raw_input = nullptr;  // n_embd, before the Hadamard
+    float* output = nullptr;           // n_embd
+};
+
+using SsmQ2_0BatchFn = bool (*)(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::size_t count);
+void set_ssm_batch_backend(SsmQ2_0BatchFn backend);
+[[nodiscard]] bool ssm_q2_0_batch(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::size_t count);
+
 using SsmQ2_0Fn = bool (*)(const SsmQ2_0Job& job);
 void set_ssm_backend(SsmQ2_0Fn backend);
 

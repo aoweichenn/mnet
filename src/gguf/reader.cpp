@@ -700,6 +700,73 @@ bool Reader::attention(const Quantized& q, const Quantized& k, const Quantized& 
     return mnet::detail::compute::attention_q2_0(job);
 }
 
+bool Reader::ssm_block_batch(const Quantized& qkv, const Quantized& gate, const Quantized& out, const SsmParams& params,
+                             const SsmBatchEntry* entries, std::size_t count) {
+    if (entries == nullptr || count == 0U) {
+        return false;
+    }
+    // The single-token wrapper validates the shapes; build the prototype job
+    // from it by running the same checks through ssm_block's job filling.
+    mnet::detail::compute::SsmQ2_0Job job;
+    {
+        // Reuse the single-token validation path with a throwaway result, then
+        // overwrite the per-token fields below. Passing a null result would
+        // trip the same checks, so validate via the batch-derived fields.
+        const std::uint64_t key_heads = params.key_heads;
+        const std::uint64_t value_heads = params.value_heads;
+        const std::uint64_t head_dim = params.head_dim;
+        if (qkv.type != kGgmlQ2_0 || gate.type != kGgmlQ2_0 || out.type != kGgmlQ2_0 || key_heads == 0U ||
+            value_heads == 0U || head_dim == 0U) {
+            return false;
+        }
+        const std::uint64_t conv_dim = key_heads * head_dim * 2U + value_heads * head_dim;
+        if (qkv.rows != conv_dim || gate.rows != value_heads * head_dim || out.columns != value_heads * head_dim ||
+            qkv.columns != gate.columns || out.rows != qkv.columns) {
+            return false;
+        }
+        const auto info = type_info(qkv.type);
+        const std::uint64_t row_bytes = qkv.columns / info.block_elements * info.block_bytes;
+        const std::uint64_t out_bytes = out.columns / info.block_elements * info.block_bytes;
+        job.qkv = {qkv.type, qkv.data(),   qkv.rows,   row_bytes,       qkv.scale,
+                   nullptr,  qkv.identity, qkv.region, qkv.region_bytes};
+        job.gate = {gate.type, gate.data(),   gate.rows,   row_bytes,        gate.scale,
+                    nullptr,   gate.identity, gate.region, gate.region_bytes};
+        job.out = {out.type, out.data(),   out.rows,   out_bytes,       out.scale,
+                   nullptr,  out.identity, out.region, out.region_bytes};
+        job.input = entries[0].input;
+        job.raw_input = entries[0].raw_input;
+        job.beta_w = params.beta_w;
+        job.alpha_w = params.alpha_w;
+        job.dt = params.dt;
+        job.ssm_a = params.ssm_a;
+        job.conv_w = params.conv_w;
+        job.ssm_norm = params.ssm_norm;
+        job.signs = params.signs;
+        job.conv_state = params.conv_state;
+        job.ssm_state = params.ssm_state;
+        job.result = entries[0].output;
+        job.columns = qkv.columns;
+        job.conv_dim = static_cast<std::uint32_t>(conv_dim);
+        job.key_heads = params.key_heads;
+        job.value_heads = params.value_heads;
+        job.head_dim = params.head_dim;
+        job.conv_kernel = params.conv_kernel;
+        job.block_size = params.block_size;
+        job.eps = params.eps;
+        job.identity = qkv.identity;
+    }
+    std::vector<mnet::detail::compute::SsmBatchEntry> batch(count);
+    for (std::size_t t = 0; t < count; ++t) {
+        if (entries[t].input == nullptr || entries[t].raw_input == nullptr || entries[t].output == nullptr) {
+            return false;
+        }
+        batch[t].input = entries[t].input;
+        batch[t].raw_input = entries[t].raw_input;
+        batch[t].output = entries[t].output;
+    }
+    return mnet::detail::compute::ssm_q2_0_batch(job, batch.data(), count);
+}
+
 bool Reader::ssm_block(const Quantized& qkv, const Quantized& gate, const Quantized& out, const SsmParams& params,
                        float* result) {
     if (qkv.type != kGgmlQ2_0 || gate.type != kGgmlQ2_0 || out.type != kGgmlQ2_0) {

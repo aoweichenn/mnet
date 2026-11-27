@@ -177,6 +177,19 @@ public:
     [[nodiscard]] static bool ssm_block(const Quantized& qkv, const Quantized& gate, const Quantized& out,
                                         const SsmParams& params, float* result);
 
+    // Same block for several tokens of one layer. The token-independent part
+    // (qkv/gate matvec, head gates, convolution) is encoded for all tokens
+    // first; the scan and its consumers stay in token order because the state
+    // carries across tokens.
+    struct SsmBatchEntry {
+        const float* input = nullptr;      // n_embd, Hadamard'ed
+        const float* raw_input = nullptr;  // n_embd, before the Hadamard
+        float* output = nullptr;           // n_embd
+    };
+
+    [[nodiscard]] static bool ssm_block_batch(const Quantized& qkv, const Quantized& gate, const Quantized& out,
+                                              const SsmParams& params, const SsmBatchEntry* entries, std::size_t count);
+
     static void matmul(const Quantized& matrix, const float* input, float* output, std::size_t tokens,
                        std::size_t input_stride, std::size_t output_stride);
 

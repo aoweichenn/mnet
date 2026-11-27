@@ -417,10 +417,14 @@ public:
         for (std::size_t layer = 0; layer < this->config_.n_layer; ++layer) {
             const LayerWeights& weights = this->weights_[layer];
             LayerState& state = this->state_[layer];
-            for (std::size_t t = 0; t < tokens; ++t) {
-                float* x = hidden.data() + t * this->config_.n_embd;
-                this->layer_branch(layer, weights, state, x, static_cast<std::size_t>(positions[t]),
-                                   dump ? &dump_dir : nullptr, t);
+            if (this->is_recurrent(layer)) {
+                this->recurrent_layer_batch(hidden, tokens, layer, weights, state, dump ? &dump_dir : nullptr);
+            } else {
+                for (std::size_t t = 0; t < tokens; ++t) {
+                    float* x = hidden.data() + t * this->config_.n_embd;
+                    this->layer_branch(layer, weights, state, x, static_cast<std::size_t>(positions[t]),
+                                       dump ? &dump_dir : nullptr, t);
+                }
             }
             this->layer_tail(hidden, tokens, layer, weights, dump ? &dump_dir : nullptr);
         }
@@ -534,6 +538,68 @@ private:
         }
 
         add_time("layer_tail", since(t_tail));
+    }
+
+    // Recurrent (gated-delta) layer for every token: the block's token
+    // independent part is encoded for all tokens at once, the scan stays in
+    // token order. Falls back to the per-token path when the block declines.
+    void recurrent_layer_batch(std::vector<float>& hidden, std::size_t tokens, std::size_t layer,
+                               const LayerWeights& w, LayerState& state, const std::string* dump_dir) {
+        const std::size_t n_embd = this->config_.n_embd;
+        std::vector<float> xn(tokens * n_embd);
+        std::vector<float> xh(tokens * n_embd);
+        std::vector<float> projected(tokens * n_embd);
+        for (std::size_t t = 0; t < tokens; ++t) {
+            auto normed = rms_norm(hidden.data() + t * n_embd, n_embd, w.attn_norm, this->config_.eps);
+            if (dump_dir != nullptr) {
+                this->dump_tensor(*dump_dir, "attn_norm", layer, normed, t);
+            }
+            std::copy(normed.begin(), normed.end(), xn.begin() + static_cast<std::ptrdiff_t>(t * n_embd));
+            hadamard_forward(normed, this->signs_embd_, this->config_.hadamard_block);
+            std::copy(normed.begin(), normed.end(), xh.begin() + static_cast<std::ptrdiff_t>(t * n_embd));
+        }
+        std::vector<Reader::SsmBatchEntry> entries(tokens);
+        Reader::SsmParams params;
+        params.beta_w = w.beta_w.data();
+        params.alpha_w = w.alpha_w.data();
+        params.dt = w.dt.data();
+        params.ssm_a = w.ssm_a.data();
+        params.conv_w = w.conv_w.data();
+        params.ssm_norm = w.ssm_norm.data();
+        params.signs = this->signs_ssm_.data();
+        params.conv_state = state.conv_state.data();
+        params.ssm_state = state.ssm_state.data();
+        params.key_heads = static_cast<std::uint32_t>(kSsmKeyHeads);
+        params.value_heads = static_cast<std::uint32_t>(kSsmValueHeads);
+        params.head_dim = static_cast<std::uint32_t>(kSsmHeadDim);
+        params.conv_kernel = static_cast<std::uint32_t>(kSsmConvKernel);
+        params.block_size = this->config_.hadamard_block;
+        params.eps = this->config_.eps;
+        bool handled = mnet::detail::compute::fast_path_enabled() && mnet::detail::compute::fused_ssm_enabled();
+        if (handled) {
+            for (std::size_t t = 0; t < tokens; ++t) {
+                entries[t].input = xh.data() + t * n_embd;
+                entries[t].raw_input = xn.data() + t * n_embd;
+                entries[t].output = projected.data() + t * n_embd;
+            }
+            handled = Reader::ssm_block_batch(w.qkv, w.gate, w.ssm_out, params, entries.data(), tokens);
+        }
+        if (!handled) {
+            for (std::size_t t = 0; t < tokens; ++t) {
+                this->layer_branch(layer, w, state, hidden.data() + t * n_embd, 0U, dump_dir, t);
+            }
+            return;
+        }
+        for (std::size_t t = 0; t < tokens; ++t) {
+            float* x = hidden.data() + t * n_embd;
+            const float* branch = projected.data() + t * n_embd;
+            for (std::size_t i = 0; i < n_embd; ++i) {
+                x[i] += branch[i];
+            }
+            if (dump_dir != nullptr) {
+                this->dump_tensor(*dump_dir, "attn_residual", layer, std::vector<float>(x, x + n_embd), t);
+            }
+        }
     }
 
     // First half of a layer for every token: the FFN input of each token is
