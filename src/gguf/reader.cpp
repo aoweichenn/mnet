@@ -11,12 +11,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -258,6 +261,9 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
         throw std::runtime_error("cannot open " + this->path_);
     }
     this->parse_header();
+    if (std::getenv("MNET_PREFETCH") != nullptr) {
+        this->start_prefetch();
+    }
     // Map the file read-only. Tensor bytes are then borrowed from here instead
     // of being copied into a vector, and a device backend can alias the same
     // mapping with a no-copy buffer: the 6.7 GB model is never copied twice.
@@ -306,7 +312,34 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
     }
 }
 
+// Warm the mapping on a background thread with real sequential reads: a 1 MB
+// memcpy per chunk lets the kernel see a streaming pattern, where touching one
+// byte per page only earns a page-sized readahead.
+void Reader::start_prefetch() {
+    if (this->mapping_ == nullptr || this->prefetch_thread_.joinable()) {
+        return;
+    }
+    constexpr std::size_t kChunk = 1024U * 1024U;
+    const auto* base = this->mapping_;
+    const std::uint64_t size = this->mapping_size_;
+    auto scratch = std::make_unique<std::uint8_t[]>(kChunk);
+    this->prefetch_thread_ = std::thread([this, base, size, buffer = std::move(scratch)]() {
+        constexpr std::size_t kChunkBytes = 1024U * 1024U;
+        for (std::uint64_t offset = 0; offset < size; offset += kChunk) {
+            if (this->prefetch_stop_.load(std::memory_order_relaxed)) {
+                return;
+            }
+            const auto bytes = static_cast<std::size_t>(std::min<std::uint64_t>(kChunkBytes, size - offset));
+            std::memcpy(buffer.get(), base + offset, bytes);
+        }
+    });
+}
+
 Reader::~Reader() {
+    this->prefetch_stop_.store(true, std::memory_order_relaxed);
+    if (this->prefetch_thread_.joinable()) {
+        this->prefetch_thread_.join();
+    }
     if (this->mapping_ != nullptr) {
         ::munmap(const_cast<std::uint8_t*>(this->mapping_), static_cast<std::size_t>(this->mapping_size_));
         this->mapping_ = nullptr;

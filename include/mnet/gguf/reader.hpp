@@ -10,10 +10,12 @@
 
 #include <cstdint>
 
+#include <atomic>
 #include <fstream>
 #include <istream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -84,6 +86,11 @@ public:
         }
         [[nodiscard]] bool empty() const { return this->size() == 0U; }
     };
+
+    // Reads the mapping sequentially on a background thread, so the first touch
+    // of a later layer's weights happens while the GPU is busy with an earlier
+    // one. Off unless MNET_PREFETCH is set.
+    void start_prefetch();
 
     // Read-only mapping of the whole file, page aligned, and its length rounded
     // up to a page. A device backend can alias it instead of copying.
@@ -222,6 +229,8 @@ private:
     mutable std::ifstream file_;
     const std::uint8_t* mapping_ = nullptr;
     std::uint64_t mapping_size_ = 0;
+    std::thread prefetch_thread_;
+    std::atomic<bool> prefetch_stop_{false};
     std::uint32_t version_ = 0;
     std::uint64_t data_start_ = 0;
     std::vector<TensorInfo> tensors_;
