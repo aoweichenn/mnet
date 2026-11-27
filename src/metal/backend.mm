@@ -169,57 +169,43 @@ kernel void swiglu_f32(device const float* gate [[buffer(0)]],
     out[gid] = (x / (1.0f + exp(-x))) * up[gid];
 }
 
-// out = in * sign * scale (the model's signed Hadamard pre-step).
-kernel void sign_scale(device const float* in  [[buffer(0)]],
-                       device const int* signs  [[buffer(1)]],
-                       device float* out        [[buffer(2)]],
-                       constant float& scale    [[buffer(3)]],
-                       constant uint& count     [[buffer(4)]],
-                       uint gid                 [[thread_position_in_grid]]) {
-    if (gid >= count) {
-        return;
-    }
-    out[gid] = (in[gid] * float(signs[gid])) * scale;
-}
-
-// Normalised in-place Hadamard over one 256-value block, same butterfly order
-// as the CPU fwht (a+b, a-b per stage), one threadgroup of 256 threads.
-kernel void fwht_block(device float* data       [[buffer(0)]],
-                       constant uint& block_size [[buffer(1)]],
-                       uint tgid                 [[threadgroup_position_in_grid]],
-                       uint lane                 [[thread_position_in_threadgroup]]) {
-    threadgroup float v[1024];
+// Signed, normalised block Hadamard followed by Q8_0 requantisation, with the
+// block kept in threadgroup memory: one threadgroup per block instead of three
+// separate dispatches (sign*scale, FWHT, quantise).
+kernel void hadamard_quantize(device const float* in     [[buffer(0)]],
+                              device const int* signs     [[buffer(1)]],
+                              device char* qs             [[buffer(2)]],
+                              device float* scales        [[buffer(3)]],
+                              constant uint& block_size   [[buffer(4)]],
+                              uint tgid                   [[threadgroup_position_in_grid]],
+                              uint lane                   [[thread_position_in_threadgroup]]) {
+    threadgroup float values[1024];
     const uint base = tgid * block_size;
-    v[lane] = data[base + lane];
+    const float scale = 1.0f / sqrt(float(block_size));
+    values[lane] = (in[base + lane] * float(signs[base + lane])) * scale;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint len = 1u; len < block_size; len <<= 1u) {
         if ((lane & len) == 0u) {
-            const float a = v[lane];
-            const float b = v[lane + len];
-            v[lane] = a + b;
-            v[lane + len] = a - b;
+            const float a = values[lane];
+            const float b = values[lane + len];
+            values[lane] = a + b;
+            values[lane + len] = a - b;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    data[base + lane] = v[lane];
-}
-
-// Q8_0 activation quantisation, one thread per 32-value block; matches
-// make_q8_0_blocks: round-to-nearest-even codes and a half-rounded scale.
-kernel void q8_0_quantize(device const float* x    [[buffer(0)]],
-                          device char* qs          [[buffer(1)]],
-                          device float* scales     [[buffer(2)]],
-                          uint gid                 [[thread_position_in_grid]]) {
-    const uint base = gid * 32u;
-    float amax = 0.0f;
-    for (uint j = 0; j < 32u; ++j) {
-        amax = fmax(amax, fabs(x[base + j]));
+    // The first block_size / 32 threads quantise one 32-value block each.
+    if (lane < block_size / 32u) {
+        const uint offset = lane * 32u;
+        float amax = 0.0f;
+        for (uint j = 0; j < 32u; ++j) {
+            amax = fmax(amax, fabs(values[offset + j]));
+        }
+        const float id = amax != 0.0f ? 127.0f / amax : 0.0f;
+        for (uint j = 0; j < 32u; ++j) {
+            qs[base + offset + j] = char(rint(values[offset + j] * id));
+        }
+        scales[(base + offset) / 32u] = float(half(amax / 127.0f));
     }
-    const float id = amax != 0.0f ? 127.0f / amax : 0.0f;
-    for (uint j = 0; j < 32u; ++j) {
-        qs[base + j] = char(rint(x[base + j] * id));
-    }
-    scales[gid] = float(half(amax / 127.0f));
 }
 
 // ---- attention block -----------------------------------------------------
@@ -382,59 +368,56 @@ kernel void ssm_activation(device const float* raw   [[buffer(0)]],
     gate[gid] = sp * ssm_a[gid];
 }
 
-// Causal depthwise convolution + SiLU. `window` is a kernel_size-row ring; the
-// newest row sits at `ring` and the older ones follow it modulo the size.
-// Every product is materialised (volatile) so the result matches the CPU path,
-// which rounds each product before adding it.
-kernel void ssm_conv(device const float* window     [[buffer(0)]],
-                     device const float* conv_w     [[buffer(1)]],
-                     device float* out              [[buffer(2)]],
-                     constant uint& conv_dim        [[buffer(3)]],
-                     constant uint& kernel_size     [[buffer(4)]],
-                     constant uint& ring            [[buffer(5)]],
-                     uint gid                       [[thread_position_in_grid]]) {
-    if (gid >= conv_dim) {
-        return;
-    }
+// Causal depthwise convolution + SiLU, and the per-head L2 norm of the q and k
+// blocks, in one kernel: one threadgroup per head-sized block of the
+// convolution output, so no second dispatch is needed for the norm. Every
+// product is materialised (volatile) so the result matches the CPU path, which
+// rounds each product before adding it.
+kernel void ssm_conv_norm(device const float* window     [[buffer(0)]],
+                          device const float* conv_w     [[buffer(1)]],
+                          device float* out              [[buffer(2)]],
+                          constant uint& conv_dim        [[buffer(3)]],
+                          constant uint& kernel_size     [[buffer(4)]],
+                          constant uint& ring            [[buffer(5)]],
+                          constant uint& norm_blocks     [[buffer(6)]],
+                          constant float& eps            [[buffer(7)]],
+                          constant uint& head_dim        [[buffer(8)]],
+                          uint tgid                      [[threadgroup_position_in_grid]],
+                          uint tid                       [[thread_position_in_threadgroup]]) {
+    threadgroup float squares[8];
+    const uint index = tgid * head_dim + tid;
     float sum = 0.0f;
     for (uint k = 0; k + 1u < kernel_size; ++k) {
         const uint row = (ring + 1u + k) % kernel_size;
-        const volatile float product = window[row * conv_dim + gid] * conv_w[gid * kernel_size + k];
+        const volatile float product = window[row * conv_dim + index] * conv_w[index * kernel_size + k];
         sum += product;
     }
-    const volatile float newest = window[ring * conv_dim + gid] * conv_w[gid * kernel_size + kernel_size - 1u];
+    const volatile float newest = window[ring * conv_dim + index] * conv_w[index * kernel_size + kernel_size - 1u];
     sum += newest;
-    out[gid] = sum / (1.0f + exp(-sum));
-}
-
-// llama's build_gdn_l2_norm: scale(x, 1/sqrt(mean(x^2) + eps/n)) then
-// scale(., 1/sqrt(n)), as two separate multiplies.
-kernel void ssm_l2norm(device float* data            [[buffer(0)]],
-                       constant uint& head_dim       [[buffer(1)]],
-                       constant float& eps           [[buffer(2)]],
-                       uint tgid                     [[threadgroup_position_in_grid]],
-                       uint tid                      [[thread_position_in_threadgroup]]) {
-    threadgroup float squares[kAttentionSimdGroups];
-    device float* head = data + tgid * head_dim;
-    const float x = head[tid];
-    const float partial = simd_sum(x * x);
-    if ((tid & 31u) == 0u) {
-        squares[tid >> 5u] = partial;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid == 0u) {
-        float total = 0.0f;
-        const uint groups = (head_dim + 31u) / 32u;
-        for (uint i = 0; i < groups; ++i) {
-            total += squares[i];
+    float value = sum / (1.0f + exp(-sum));
+    if (tgid < norm_blocks) {
+        // llama's build_gdn_l2_norm: scale(x, 1/sqrt(mean + eps/n)) then
+        // scale(., 1/sqrt(n)), as two separate multiplies.
+        const float partial = simd_sum(value * value);
+        if ((tid & 31u) == 0u) {
+            squares[tid >> 5u] = partial;
         }
-        squares[0] = total / float(head_dim);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0u) {
+            float total = 0.0f;
+            const uint groups = (head_dim + 31u) / 32u;
+            for (uint i = 0; i < groups; ++i) {
+                total += squares[i];
+            }
+            squares[0] = total / float(head_dim);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const float n = float(head_dim);
+        const float rms = 1.0f / sqrt(squares[0] + eps / n);
+        const float extra = 1.0f / sqrt(n);
+        value = (value * rms) * extra;
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    const float n = float(head_dim);
-    const float rms = 1.0f / sqrt(squares[0] + eps / n);
-    const float extra = 1.0f / sqrt(n);
-    head[tid] = (x * rms) * extra;
+    out[index] = value;
 }
 
 // One delta-rule step per value head: decay the state, compute the delta from
@@ -593,23 +576,20 @@ struct MetalState {
     id<MTLComputePipelineState> fast_f32_pipeline = nil;
     id<MTLComputePipelineState> dequant_pipeline = nil;
     id<MTLComputePipelineState> swiglu_pipeline = nil;
-    id<MTLComputePipelineState> quantize_pipeline = nil;
     id<MTLBuffer> act_buffer = nil;
     id<MTLBuffer> act_q8_buffer = nil;
     id<MTLBuffer> act_scale_buffer = nil;
     id<MTLBuffer> gate_buffer = nil;
     id<MTLBuffer> up_buffer = nil;
     id<MTLBuffer> signs_buffer = nil;
-    id<MTLComputePipelineState> sign_scale_pipeline = nil;
-    id<MTLComputePipelineState> fwht_pipeline = nil;
+    id<MTLComputePipelineState> hadamard_quantize_pipeline = nil;
     id<MTLComputePipelineState> attn_prep_pipeline = nil;
     id<MTLComputePipelineState> attn_gate_pipeline = nil;
     id<MTLComputePipelineState> attn_flash_pipeline = nil;
     id<MTLComputePipelineState> attn_store_pipeline = nil;
     id<MTLComputePipelineState> ssm_rows_pipeline = nil;
     id<MTLComputePipelineState> ssm_act_pipeline = nil;
-    id<MTLComputePipelineState> ssm_conv_pipeline = nil;
-    id<MTLComputePipelineState> ssm_l2norm_pipeline = nil;
+    id<MTLComputePipelineState> ssm_conv_norm_pipeline = nil;
     id<MTLComputePipelineState> ssm_scan_pipeline = nil;
     id<MTLComputePipelineState> ssm_gate_norm_pipeline = nil;
     AttentionBuffers attn;
@@ -655,21 +635,14 @@ void initialise(MetalState& state) {
     if (function != nil) {
         state.pipeline = [state.device newComputePipelineStateWithFunction:function error:&error];
     }
-    id<MTLFunction> sign_scale_function = library != nil ? [library newFunctionWithName:@"sign_scale"] : nil;
-    if (sign_scale_function != nil) {
-        state.sign_scale_pipeline = [state.device newComputePipelineStateWithFunction:sign_scale_function error:&error];
-    }
-    id<MTLFunction> fwht_function = library != nil ? [library newFunctionWithName:@"fwht_block"] : nil;
-    if (fwht_function != nil) {
-        state.fwht_pipeline = [state.device newComputePipelineStateWithFunction:fwht_function error:&error];
+    id<MTLFunction> hadamard_function = library != nil ? [library newFunctionWithName:@"hadamard_quantize"] : nil;
+    if (hadamard_function != nil) {
+        state.hadamard_quantize_pipeline =
+            [state.device newComputePipelineStateWithFunction:hadamard_function error:&error];
     }
     id<MTLFunction> swiglu_function = library != nil ? [library newFunctionWithName:@"swiglu_f32"] : nil;
     if (swiglu_function != nil) {
         state.swiglu_pipeline = [state.device newComputePipelineStateWithFunction:swiglu_function error:&error];
-    }
-    id<MTLFunction> quantize_function = library != nil ? [library newFunctionWithName:@"q8_0_quantize"] : nil;
-    if (quantize_function != nil) {
-        state.quantize_pipeline = [state.device newComputePipelineStateWithFunction:quantize_function error:&error];
     }
     id<MTLFunction> fast_function = library != nil ? [library newFunctionWithName:@"q2_0_matvec_fast"] : nil;
     if (fast_function != nil) {
@@ -696,8 +669,7 @@ void initialise(MetalState& state) {
         state.attn_store_pipeline = pipeline_for("attn_store_half");
         state.ssm_rows_pipeline = pipeline_for("ssm_rows_dot");
         state.ssm_act_pipeline = pipeline_for("ssm_activation");
-        state.ssm_conv_pipeline = pipeline_for("ssm_conv");
-        state.ssm_l2norm_pipeline = pipeline_for("ssm_l2norm");
+        state.ssm_conv_norm_pipeline = pipeline_for("ssm_conv_norm");
         state.ssm_scan_pipeline = pipeline_for("ssm_scan");
         state.ssm_gate_norm_pipeline = pipeline_for("ssm_gate_norm");
         state.dequant_pipeline = pipeline_for("q8_0_dequantize");
@@ -983,8 +955,7 @@ SsmProfile& ssm_profile() {
 bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const MatvecQ8_0Job& down, std::uint64_t columns,
                 std::uint64_t hidden, const float* input, const std::int32_t* signs, std::uint32_t block_size) {
     MetalState& s = state();
-    if (!s.ready || s.swiglu_pipeline == nil || s.quantize_pipeline == nil || s.sign_scale_pipeline == nil ||
-        s.fwht_pipeline == nil) {
+    if (!s.ready || s.swiglu_pipeline == nil || s.hadamard_quantize_pipeline == nil) {
         return false;
     }
     if (block_size < 64U || block_size > 1024U || (block_size & (block_size - 1U)) != 0U) {
@@ -1056,31 +1027,15 @@ bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const Matvec
     [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:3];
     [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
-    const bool skip_hadamard = std::getenv("MNET_FFN_SKIP_HADAMARD") != nullptr;
-    if (!skip_hadamard) {
-    [encoder setComputePipelineState:s.sign_scale_pipeline];
+    // Signed Hadamard and requantisation in one dispatch (was three).
+    [encoder setComputePipelineState:s.hadamard_quantize_pipeline];
     [encoder setBuffer:act_buffer offset:0 atIndex:0];
     [encoder setBuffer:signs_buffer offset:0 atIndex:1];
-    [encoder setBuffer:act_buffer offset:0 atIndex:2];
-    const float hadamard_scale = 1.0F / std::sqrt(static_cast<float>(block_size));
-    [encoder setBytes:&hadamard_scale length:sizeof(hadamard_scale) atIndex:3];
-    [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:4];
-    [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-
-    if (std::getenv("MNET_FFN_SKIP_FWHT") == nullptr) {
-        [encoder setComputePipelineState:s.fwht_pipeline];
-        [encoder setBuffer:act_buffer offset:0 atIndex:0];
-        [encoder setBytes:&block_size length:sizeof(block_size) atIndex:1];
-        [encoder dispatchThreadgroups:MTLSizeMake(hidden / block_size, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
-    }
-    }
-
-    [encoder setComputePipelineState:s.quantize_pipeline];
-    [encoder setBuffer:act_buffer offset:0 atIndex:0];
-    [encoder setBuffer:act_q8_buffer offset:0 atIndex:1];
-    [encoder setBuffer:act_scale_buffer offset:0 atIndex:2];
-    [encoder dispatchThreads:MTLSizeMake(hidden / 32U, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [encoder setBuffer:act_q8_buffer offset:0 atIndex:2];
+    [encoder setBuffer:act_scale_buffer offset:0 atIndex:3];
+    [encoder setBytes:&block_size length:sizeof(block_size) atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(hidden / block_size, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
 
     encode_dispatch(s, encoder, down_weights, down.rows, hidden, down.row_bytes, down.scale, 0, act_q8_buffer,
                     act_scale_buffer, out_buffer);
@@ -1124,8 +1079,7 @@ bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const Matvec
 bool attention(const AttentionQ2_0Job& job) {
     MetalState& s = state();
     if (!s.ready || s.attn_prep_pipeline == nil || s.attn_flash_pipeline == nil || s.attn_gate_pipeline == nil ||
-        s.attn_store_pipeline == nil || s.sign_scale_pipeline == nil || s.fwht_pipeline == nil ||
-        s.quantize_pipeline == nil) {
+        s.attn_store_pipeline == nil || s.hadamard_quantize_pipeline == nil) {
         return false;
     }
     if (job.q.type != 42U || job.k.type != 42U || job.v.type != 42U || job.out.type != 42U) {
@@ -1295,26 +1249,14 @@ bool attention(const AttentionQ2_0Job& job) {
     [encoder setBytes:&attn_scale length:sizeof(attn_scale) atIndex:9];
     [encoder dispatchThreadgroups:MTLSizeMake(heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
-    [encoder setComputePipelineState:s.sign_scale_pipeline];
+    [encoder setComputePipelineState:s.hadamard_quantize_pipeline];
     [encoder setBuffer:b.attn offset:0 atIndex:0];
     [encoder setBuffer:b.signs offset:0 atIndex:1];
-    [encoder setBuffer:b.attn offset:0 atIndex:2];
-    const float hadamard_scale = 1.0F / std::sqrt(static_cast<float>(job.block_size));
-    [encoder setBytes:&hadamard_scale length:sizeof(hadamard_scale) atIndex:3];
-    [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:4];
-    [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-
-    [encoder setComputePipelineState:s.fwht_pipeline];
-    [encoder setBuffer:b.attn offset:0 atIndex:0];
-    [encoder setBytes:&job.block_size length:sizeof(job.block_size) atIndex:1];
+    [encoder setBuffer:act_q8 offset:0 atIndex:2];
+    [encoder setBuffer:act_scales offset:0 atIndex:3];
+    [encoder setBytes:&job.block_size length:sizeof(job.block_size) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(hidden / job.block_size, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(job.block_size, 1, 1)];
-
-    [encoder setComputePipelineState:s.quantize_pipeline];
-    [encoder setBuffer:b.attn offset:0 atIndex:0];
-    [encoder setBuffer:act_q8 offset:0 atIndex:1];
-    [encoder setBuffer:act_scales offset:0 atIndex:2];
-    [encoder dispatchThreads:MTLSizeMake(hidden / 32U, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
     encode_dispatch(s, encoder, out_weights, job.out.rows, hidden, job.out.row_bytes, job.out.scale, 0, act_q8,
                     act_scales, out_buffer);
@@ -1355,9 +1297,8 @@ bool attention(const AttentionQ2_0Job& job) {
 // Q8_0 -> ssm_out matvec, one submission per layer-token.
 bool ssm_block(const SsmQ2_0Job& job) {
     MetalState& s = state();
-    if (!s.ready || s.ssm_rows_pipeline == nil || s.ssm_act_pipeline == nil || s.ssm_conv_pipeline == nil ||
-        s.ssm_l2norm_pipeline == nil || s.ssm_scan_pipeline == nil || s.ssm_gate_norm_pipeline == nil ||
-        s.sign_scale_pipeline == nil || s.fwht_pipeline == nil || s.quantize_pipeline == nil) {
+    if (!s.ready || s.ssm_rows_pipeline == nil || s.ssm_act_pipeline == nil || s.ssm_conv_norm_pipeline == nil ||
+        s.ssm_scan_pipeline == nil || s.ssm_gate_norm_pipeline == nil || s.hadamard_quantize_pipeline == nil) {
         return false;
     }
     if (job.qkv.type != 42U || job.gate.type != 42U || job.out.type != 42U) {
@@ -1544,20 +1485,20 @@ bool ssm_block(const SsmQ2_0Job& job) {
     }
 
     if (!skip_conv) {
-    [encoder setComputePipelineState:s.ssm_conv_pipeline];
+    // Convolution and the q/k L2 norms in one dispatch.
+    const std::uint32_t norm_blocks32 = static_cast<std::uint32_t>(2U * key_heads);
+    [encoder setComputePipelineState:s.ssm_conv_norm_pipeline];
     [encoder setBuffer:layer.window offset:0 atIndex:0];
     [encoder setBuffer:layer.side offset:conv_w_offset * sizeof(float) atIndex:1];
     [encoder setBuffer:b.conv offset:0 atIndex:2];
     [encoder setBytes:&conv_dim32 length:sizeof(conv_dim32) atIndex:3];
     [encoder setBytes:&kernel32 length:sizeof(kernel32) atIndex:4];
     [encoder setBytes:&ring32 length:sizeof(ring32) atIndex:5];
-    [encoder dispatchThreads:MTLSizeMake(conv_dim, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-
-    [encoder setComputePipelineState:s.ssm_l2norm_pipeline];
-    [encoder setBuffer:b.conv offset:0 atIndex:0];
-    [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:1];
-    [encoder setBytes:&eps length:sizeof(eps) atIndex:2];
-    [encoder dispatchThreadgroups:MTLSizeMake(2U * key_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+    [encoder setBytes:&norm_blocks32 length:sizeof(norm_blocks32) atIndex:6];
+    [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
+    [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:8];
+    [encoder dispatchThreadgroups:MTLSizeMake(conv_dim / head_dim, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
     }
 
     if (!skip_scan) {
@@ -1587,26 +1528,14 @@ bool ssm_block(const SsmQ2_0Job& job) {
     [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
     [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
 
-    [encoder setComputePipelineState:s.sign_scale_pipeline];
+    [encoder setComputePipelineState:s.hadamard_quantize_pipeline];
     [encoder setBuffer:b.grouped offset:0 atIndex:0];
     [encoder setBuffer:b.signs offset:0 atIndex:1];
-    [encoder setBuffer:b.grouped offset:0 atIndex:2];
-    const float hadamard_scale = 1.0F / std::sqrt(static_cast<float>(job.block_size));
-    [encoder setBytes:&hadamard_scale length:sizeof(hadamard_scale) atIndex:3];
-    [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:4];
-    [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-
-    [encoder setComputePipelineState:s.fwht_pipeline];
-    [encoder setBuffer:b.grouped offset:0 atIndex:0];
-    [encoder setBytes:&job.block_size length:sizeof(job.block_size) atIndex:1];
+    [encoder setBuffer:act_q8 offset:0 atIndex:2];
+    [encoder setBuffer:act_scales offset:0 atIndex:3];
+    [encoder setBytes:&job.block_size length:sizeof(job.block_size) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(hidden / job.block_size, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(job.block_size, 1, 1)];
-
-    [encoder setComputePipelineState:s.quantize_pipeline];
-    [encoder setBuffer:b.grouped offset:0 atIndex:0];
-    [encoder setBuffer:act_q8 offset:0 atIndex:1];
-    [encoder setBuffer:act_scales offset:0 atIndex:2];
-    [encoder dispatchThreads:MTLSizeMake(hidden / 32U, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
     encode_dispatch(s, encoder, out_weights, job.out.rows, hidden, job.out.row_bytes, job.out.scale, 0, act_q8,
                     act_scales, out_buffer);
@@ -1684,8 +1613,7 @@ void register_platform_backends() {
     if (std::getenv("MNET_METAL_DEBUG") != nullptr) {
         std::fprintf(stderr, "mnet: metal backend %s (fast %s, ffn %s, attn %s, ssm %s)\n",
                      state().ready ? "ready" : "unavailable", state().fast_pipeline != nil ? "ready" : "unavailable",
-                     (state().swiglu_pipeline != nil && state().quantize_pipeline != nil &&
-                      state().sign_scale_pipeline != nil && state().fwht_pipeline != nil)
+                     (state().swiglu_pipeline != nil && state().hadamard_quantize_pipeline != nil)
                          ? "ready"
                          : "unavailable",
                      (state().attn_prep_pipeline != nil && state().attn_flash_pipeline != nil &&
@@ -1693,8 +1621,8 @@ void register_platform_backends() {
                          ? "ready"
                          : "unavailable",
                      (state().ssm_rows_pipeline != nil && state().ssm_act_pipeline != nil &&
-                      state().ssm_conv_pipeline != nil && state().ssm_l2norm_pipeline != nil &&
-                      state().ssm_scan_pipeline != nil && state().ssm_gate_norm_pipeline != nil)
+                      state().ssm_conv_norm_pipeline != nil && state().ssm_scan_pipeline != nil &&
+                      state().ssm_gate_norm_pipeline != nil)
                          ? "ready"
                          : "unavailable");
     }
