@@ -226,6 +226,18 @@ kernel void swiglu_f32(device const float* gate [[buffer(0)]],
     out[gid] = (x / (1.0f + exp(-x))) * up[gid];
 }
 
+// residual += delta, element-wise. The device-resident residual stream needs
+// this in place of the model's host `for (i) x[i] += delta[i]` loops.
+kernel void residual_add(device float* x            [[buffer(0)]],
+                         device const float* delta  [[buffer(1)]],
+                         constant uint& count       [[buffer(2)]],
+                         uint gid                   [[thread_position_in_grid]]) {
+    if (gid >= count) {
+        return;
+    }
+    x[gid] += delta[gid];
+}
+
 // RMSNorm on the device: `size` values, one threadgroup, strided loads and a
 // threadgroup-wide reduction. The host reference sums the squares in double
 // (Apple GPUs have no fp64), so this is the one place where the fast path
@@ -913,6 +925,7 @@ struct MetalState {
     id<MTLComputePipelineState> gate_norm_multi_pipeline = nil;
     id<MTLComputePipelineState> head_gates_pipeline = nil;
     id<MTLComputePipelineState> rms_norm_pipeline = nil;
+    id<MTLComputePipelineState> residual_add_pipeline = nil;
     id<MTLComputePipelineState> attn_prep_pipeline = nil;
     id<MTLComputePipelineState> attn_gate_pipeline = nil;
     id<MTLComputePipelineState> attn_flash_pipeline = nil;
@@ -1014,6 +1027,7 @@ void initialise(MetalState& state) {
         state.gate_norm_multi_pipeline = pipeline_for("ssm_gate_norm_multi");
         state.head_gates_pipeline = pipeline_for("ssm_head_gates");
         state.rms_norm_pipeline = pipeline_for("rms_norm_f32");
+        state.residual_add_pipeline = pipeline_for("residual_add");
         if (state.attn_flash_pipeline == nil && std::getenv("MNET_METAL_DEBUG") != nullptr) {
             std::fprintf(stderr, "mnet: metal attention pipeline failed: %s\n", [[error description] UTF8String]);
         }
@@ -2891,6 +2905,40 @@ bool layer_prep_host(const float* input, const float* weight, std::uint64_t size
     return true;
 }
 
+// x += delta with both sides in host memory, one submission. Primitive of the
+// device-resident residual stream (the layer job will bind the buffers instead
+// of copying them), and exercised by benchmarks/metal/layer_prep_test.cpp.
+bool residual_add_host(float* x, const float* delta, std::uint64_t count) {
+    MetalState& s = state();
+    if (!s.ready || s.residual_add_pipeline == nil || count == 0U || count > 65536U) {
+        return false;
+    }
+    const std::size_t bytes = static_cast<std::size_t>(count) * sizeof(float);
+    id<MTLBuffer> xb = [s.device newBufferWithBytes:x length:static_cast<NSUInteger>(bytes)
+                                            options:MTLResourceStorageModeShared];
+    id<MTLBuffer> db = [s.device newBufferWithBytes:delta length:static_cast<NSUInteger>(bytes)
+                                            options:MTLResourceStorageModeShared];
+    if (xb == nil || db == nil) {
+        return false;
+    }
+    const std::uint32_t count32 = static_cast<std::uint32_t>(count);
+    id<MTLCommandBuffer> command = [s.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:s.residual_add_pipeline];
+    [encoder setBuffer:xb offset:0 atIndex:0];
+    [encoder setBuffer:db offset:0 atIndex:1];
+    [encoder setBytes:&count32 length:sizeof(count32) atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted) {
+        return false;
+    }
+    std::memcpy(x, xb.contents, bytes);
+    return true;
+}
+
 bool matvec_q8_0_backend(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
                          std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales,
                          float* out, std::uint64_t identity, const std::uint8_t* region,
@@ -2928,6 +2976,7 @@ void register_platform_backends() {
     set_attention_batch_backend(&attention_batch_block);
     set_rms_norm_backend(&rms_norm_host);
     set_layer_prep_backend(&layer_prep_host);
+    set_residual_add_backend(&residual_add_host);
     set_layer_prep_backend(&layer_prep_host);
     set_ssm_backend(&ssm_block);
     set_ssm_batch_backend(&ssm_batch_block);
