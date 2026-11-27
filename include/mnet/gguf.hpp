@@ -330,6 +330,22 @@ struct Q8_0Blocks {
 [[nodiscard]] inline float dot_iq2_s_q8_k_avx2(const std::uint8_t*, const Q8KBlocks&, std::uint64_t);
 #endif
 
+[[nodiscard]] inline const std::uint64_t* even_signs_avx2() {
+    static const std::vector<std::uint64_t> table = [] {
+        std::vector<std::uint64_t> out(128, 0);
+        for (std::size_t code = 0; code < 128; ++code) {
+            std::uint64_t bits = 0;
+            for (std::size_t j = 0; j < 8; ++j) {
+                const std::uint64_t byte = (detail::kSignsIq2xs[code] & (1U << j)) != 0 ? 0xFFU : 0x01U;
+                bits |= byte << (8 * j);
+            }
+            out[code] = bits;
+        }
+        return out;
+    }();
+    return table.data();
+}
+
 // hsum of an 8-lane accumulator: ((l0+l4)+(l2+l6)) + ((l1+l5)+(l3+l7)),
 // the same reduction the AVX2 kernels use, available on every architecture.
 [[nodiscard]] inline float hsum_float_8(const float* lanes) {
@@ -827,21 +843,6 @@ inline bool& ggml_tinyblas_batch() {
     return _mm_loadu_si128(reinterpret_cast<const __m128i*>(kShuffle) + index);
 }
 
-[[nodiscard]] inline const std::uint64_t* even_signs_avx2() {
-    static const std::vector<std::uint64_t> table = [] {
-        std::vector<std::uint64_t> out(128, 0);
-        for (std::size_t code = 0; code < 128; ++code) {
-            std::uint64_t bits = 0;
-            for (std::size_t j = 0; j < 8; ++j) {
-                const std::uint64_t byte = (detail::kSignsIq2xs[code] & (1U << j)) != 0 ? 0xFFU : 0x01U;
-                bits |= byte << (8 * j);
-            }
-            out[code] = bits;
-        }
-        return out;
-    }();
-    return table.data();
-}
 
 [[nodiscard]] inline float dot_q6_k_q8_k_avx2(const std::uint8_t* data, const Q8KBlocks& q8, std::uint64_t blocks) {
     const __m256i m3 = _mm256_set1_epi8(3);
@@ -1326,38 +1327,66 @@ inline bool& ggml_tinyblas_batch() {
 #if defined(__AVX2__) && defined(__FMA__)
     return dot_iq2_xxs_q8_k_avx2(data, q8, blocks);
 #else
-    float sumf = 0.0F;
+    // Lane-faithful replica of dot_iq2_xxs_q8_k_avx2: grid rows and sign masks
+    // are expanded into 32 bytes, the Q8_K values take the sign mask, maddubs
+    // pairs them against the unsigned grid, the per-group scale (2 * ls + 1)
+    // folds each 4-value group into one int32 lane, and the blocks accumulate
+    // with one fma into eight float lanes (0.125 scaling at the end).
+    const std::uint64_t* signs64 = even_signs_avx2();
+    float accum[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
     for (std::uint64_t b = 0; b < blocks; ++b) {
-        const std::uint8_t* block = data + b * 66;
-        const float d =
-            half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U))) *
-            q8.d[b];
-        const std::int8_t* q = q8.qs.data() + b * 256;
-        std::int32_t bsum = 0;
-        for (int ib = 0; ib < 8; ++ib) {
-            const std::uint8_t* q2 = block + 2 + 8 * ib;
-            const std::uint32_t lo = static_cast<std::uint32_t>(q2[0]) | (static_cast<std::uint32_t>(q2[1]) << 8U) |
-                                     (static_cast<std::uint32_t>(q2[2]) << 16U) |
-                                     (static_cast<std::uint32_t>(q2[3]) << 24U);
-            const std::uint32_t hi = static_cast<std::uint32_t>(q2[4]) | (static_cast<std::uint32_t>(q2[5]) << 8U) |
-                                     (static_cast<std::uint32_t>(q2[6]) << 16U) |
-                                     (static_cast<std::uint32_t>(q2[7]) << 24U);
-            const int ls = 2 * static_cast<int>(hi >> 28U) + 1;
-            int sumi = 0;
-            for (int l = 0; l < 4; ++l) {
-                const std::uint64_t grid = detail::kIq2xxsGrid[(lo >> (8 * l)) & 0xFFU];
-                const std::uint8_t signs = detail::kSignsIq2xs[(hi >> (7 * l)) & 127U];
-                for (int j = 0; j < 8; ++j) {
-                    const int value = static_cast<std::int8_t>((grid >> (8 * j)) & 0xFFU);
-                    sumi += value * q[j] * ((signs & (1U << j)) != 0 ? -1 : 1);
-                }
-                q += 8;
+        const std::uint8_t* block = data + b * 66U;
+        const float d = q8.d[b] *
+                        half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U)));
+        const auto* q2 = reinterpret_cast<const std::uint16_t*>(block + 2);
+        const std::int8_t* q = q8.qs.data() + b * 256U;
+        std::uint32_t sumi1[8] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
+        std::uint32_t sumi2[8] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
+        for (int ib = 0; ib < 8; ib += 2) {
+            const std::int8_t* q8_1 = q;
+            q += 32;
+            const std::int8_t* q8_2 = q;
+            q += 32;
+            std::uint32_t aux32[4] = {};
+            std::memcpy(aux32, q2, sizeof(aux32));
+            q2 += 8;
+            const auto* aux8 = reinterpret_cast<const std::uint8_t*>(aux32);
+            std::uint8_t grid1[32];
+            std::uint8_t grid2[32];
+            for (std::size_t k = 0; k < 4; ++k) {
+                std::memcpy(grid1 + k * 8U, &detail::kIq2xxsGrid[aux8[k]], 8);
+                std::memcpy(grid2 + k * 8U, &detail::kIq2xxsGrid[aux8[8U + k]], 8);
             }
-            bsum += sumi * ls;
+            const std::uint64_t s1[4] = {signs64[aux32[1] & 127U], signs64[(aux32[1] >> 7U) & 127U],
+                                         signs64[(aux32[1] >> 14U) & 127U], signs64[(aux32[1] >> 21U) & 127U]};
+            const std::uint64_t s2[4] = {signs64[aux32[3] & 127U], signs64[(aux32[3] >> 7U) & 127U],
+                                         signs64[(aux32[3] >> 14U) & 127U], signs64[(aux32[3] >> 21U) & 127U]};
+            const std::int32_t fs1 = static_cast<std::int32_t>(2U * (aux32[1] >> 28U) + 1U);
+            const std::int32_t fs2 = static_cast<std::int32_t>(2U * (aux32[3] >> 28U) + 1U);
+            for (std::size_t lane = 0; lane < 8; ++lane) {
+                std::int32_t p1 = 0;
+                std::int32_t p2 = 0;
+                for (std::size_t j = 0; j < 4; ++j) {
+                    const std::size_t at = lane * 4U + j;
+                    const auto sign1 = static_cast<std::int8_t>((s1[at / 8U] >> (8U * (at % 8U))) & 0xFFU);
+                    const auto sign2 = static_cast<std::int8_t>((s2[at / 8U] >> (8U * (at % 8U))) & 0xFFU);
+                    const std::int32_t v1 = sign1 < 0 ? -static_cast<std::int32_t>(q8_1[at])
+                                                      : static_cast<std::int32_t>(q8_1[at]);
+                    const std::int32_t v2 = sign2 < 0 ? -static_cast<std::int32_t>(q8_2[at])
+                                                      : static_cast<std::int32_t>(q8_2[at]);
+                    p1 += static_cast<std::int32_t>(grid1[at]) * v1;
+                    p2 += static_cast<std::int32_t>(grid2[at]) * v2;
+                }
+                sumi1[lane] += static_cast<std::uint32_t>(fs1 * p1);
+                sumi2[lane] += static_cast<std::uint32_t>(fs2 * p2);
+            }
         }
-        sumf += d * static_cast<float>(bsum);
+        for (std::size_t lane = 0; lane < 8; ++lane) {
+            const auto total = static_cast<std::int32_t>(sumi1[lane] + sumi2[lane]);
+            accum[lane] = std::fma(d, static_cast<float>(total), accum[lane]);
+        }
     }
-    return 0.125F * sumf;
+    return 0.125F * hsum_float_8(accum);
 #endif
 }
 
