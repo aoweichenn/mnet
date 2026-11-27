@@ -10,6 +10,14 @@ project(
 include(GNUInstallDirs)
 include(CTest)
 
+option(mnet_enable_metal "Build the Metal compute backend (Apple hosts only)" OFF)
+if(mnet_enable_metal AND APPLE)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+    set(CMAKE_OBJCXX_EXTENSIONS OFF)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -103,6 +111,7 @@ add_library(mnet_objs OBJECT
     src/core/net.cpp
     src/gguf/format.cpp
     src/gguf/kernels.cpp
+    src/compute/backend.cpp
     src/gguf/reader.cpp
     src/tts/exact.cpp
     src/tts/ops.cpp
@@ -125,6 +134,12 @@ target_include_directories(mnet_objs SYSTEM PRIVATE
     $<TARGET_PROPERTY:mlayer::mlayer,INTERFACE_INCLUDE_DIRECTORIES>)
 
 target_compile_options(mnet_objs PRIVATE ${MNET_WARNINGS})
+if(mnet_enable_metal AND APPLE)
+    target_sources(mnet_objs PRIVATE src/metal/backend.mm)
+    target_compile_definitions(mnet_objs PRIVATE MNET_METAL=1)
+    target_link_libraries(mnet_objs PRIVATE "-framework Metal" "-framework Foundation")
+    target_compile_options(mnet_objs PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:${MNET_WARNINGS_COMMON}>)
+endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # The quantised kernels spell out every fused multiply-add themselves; keep
     # the compiler from contracting the remaining a*b+c expressions so the
@@ -151,6 +166,11 @@ if(mnet_enable_avx2 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
 endif()
 if(mnet_enable_dotprod AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
     target_compile_options(mnet INTERFACE -march=armv8.2-a+dotprod)
+endif()
+if(mnet_enable_metal AND APPLE)
+    # The archive has no link step of its own, so the frameworks must travel
+    # with the interface to every executable that links mnet.
+    target_link_libraries(mnet INTERFACE "-framework Metal" "-framework Foundation" objc)
 endif()
 target_link_libraries(mnet PUBLIC mnet_omp)
 add_library(mnet::mnet ALIAS mnet)

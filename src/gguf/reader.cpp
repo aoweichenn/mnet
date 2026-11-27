@@ -17,6 +17,7 @@
 #include <gguf/internal.hpp>
 #include <mnet/detail/iq1s_grid.hpp>
 #include <mnet/detail/iq_grids.hpp>
+#include <mnet/detail/compute.hpp>
 #include <mnet/gguf/format.hpp>
 #include <mnet/gguf/kernels.hpp>
 
@@ -440,6 +441,13 @@ void Reader::matvec(const Quantized& matrix, const float* input, float* output) 
         source = converted.data();
     }
     const std::uint64_t blocks = matrix.columns / info.block_elements;
+    if (int_q80) {
+        // Device-neutral: the compute layer uses a GPU when one is registered,
+        // otherwise it runs the same CPU loop the reader used before.
+        mnet::detail::compute::matvec_q8_0(matrix.type, matrix.blocks.data(), matrix.rows, matrix.columns, row_bytes,
+                                     matrix.scale, q80.qs.data(), q80.d.data(), output);
+        return;
+    }
     // Rows are independent and keep a fixed accumulation order, so the
     // result is identical for any thread count.
 #if defined(_OPENMP)
@@ -479,10 +487,6 @@ void Reader::matvec(const Quantized& matrix, const float* input, float* output) 
                     value = dot_iq4_xs_q8_k(data, q8k, blocks);
                     break;
             }
-        } else if (int_q80) {
-            value = matrix.type == kGgmlNvfp4 ? dot_nvfp4_q8_0(data, q80, blocks)
-                                              : (matrix.type == kGgmlQ2_0 ? dot_q2_0_q8_0(data, q80, blocks)
-                                                                          : dot_q8_0_q8_0(data, q80, blocks));
         } else {
             value = dot_row(matrix.type, data, source, matrix.columns);
         }
