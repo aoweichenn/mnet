@@ -103,9 +103,15 @@ Quirk: this llama-bench build prints `ngl 10` in every row even with
 - `MNET_PROFILE=1` prints the per-section CPU seconds of a forward; it is how
   each remaining hotspot got located. `MNET_COMPUTE_STATS=1` prints the
   device-side split (matvec / fused ffn / fused attn / fused ssm).
+- The fast matvec reads a **fp32 activation** (`q2_0_matvec_f32`), widened
+  once per dispatch by `q8_0_dequantize`. That removed the per-weight
+  activation byte load and the per-block scale multiply: 65.8 -> 92.9 GB/s on
+  the fused-FFN shape. The integer-activation kernel stays as a fallback.
+  Two plausible-but-wrong explanations for the old 59 GB/s were measured and
+  rejected (accumulator dependency chain, rows per threadgroup).
 - Measured Bonsai 27B Q2_0, 32 tokens: CPU 167.7 s (5.24 s/token); Metal
-  exact 8.23-8.30 s (2371/2371 identical); Metal fast + fused FFN + fused
-  attention + fused SSM 5.33-5.36 s (-40% vs the CPU build's per-token cost
+  exact 8.23-8.48 s (2371/2371 identical); Metal fast + fused FFN + fused
+  attention + fused SSM 4.50 s (-40% vs the CPU build's per-token cost
   would be 5.24 s/token, i.e. ~30x faster); normalized max logit diff vs
   the CPU build 4.8e-3, top-5 unchanged.
 - Build dirs: `build-metal` (Metal ON), `build-cpu` (CPU reference) in
