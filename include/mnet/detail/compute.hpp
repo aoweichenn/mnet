@@ -20,7 +20,8 @@ namespace mnet::detail::compute {
 // Returns false when this device cannot handle the type.
 using MatvecQ8_0Fn = bool (*)(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
                               std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales,
-                              float* out, std::uint64_t identity);
+                              float* out, std::uint64_t identity, const std::uint8_t* region,
+                              std::uint64_t region_bytes);
 
 // One matrix in a batched call; all jobs share the activation (q8/q8_scales).
 struct MatvecQ8_0Job {
@@ -31,6 +32,11 @@ struct MatvecQ8_0Job {
     float scale = 1.0F;
     float* out = nullptr;
     std::uint64_t identity = 0;  // stable tensor id; devices key their caches on it
+    // When the blocks are borrowed from a read-only file mapping, `region` is
+    // that mapping's base and the device can alias it instead of copying.
+    // `region_bytes` is the mapping length rounded up to a page.
+    const std::uint8_t* region = nullptr;
+    std::uint64_t region_bytes = 0;
 };
 
 // A device can fuse several independent matvecs that share one activation into
@@ -53,7 +59,7 @@ void register_platform_backends();
 // Always computes the full matrix-vector product.
 void matvec_q8_0(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
                  std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales, float* out,
-                 std::uint64_t identity);
+                 std::uint64_t identity, const std::uint8_t* region = nullptr, std::uint64_t region_bytes = 0);
 
 // Same, for several matrices sharing one activation. The device may execute
 // the whole batch before returning; callers only see the outputs.

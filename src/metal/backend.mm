@@ -615,6 +615,7 @@ struct MetalState {
     std::size_t gate_capacity = 0;
     std::size_t up_capacity = 0;
     std::unordered_map<std::uint64_t, id<MTLBuffer>> weight_buffers;
+    std::unordered_map<const void*, id<MTLBuffer>> region_buffers;
     id<MTLBuffer> q8_buffer = nil;
     id<MTLBuffer> scale_buffer = nil;
     id<MTLBuffer> act_f32_buffer = nil;
@@ -722,36 +723,80 @@ std::uint64_t cache_key(std::uint64_t identity, const std::uint8_t* weights) {
     return identity != 0 ? identity : (reinterpret_cast<std::uintptr_t>(weights) | (1ULL << 63U));
 }
 
-id<MTLBuffer> weight_buffer_for(MetalState& s, std::uint64_t identity, const std::uint8_t* weights,
-                                std::uint64_t rows, std::uint64_t row_bytes) {
-    id<MTLBuffer>& weight_buffer = s.weight_buffers[cache_key(identity, weights)];
+// A weight tensor on the device: a whole buffer plus the byte offset inside it.
+struct WeightBinding {
+    id<MTLBuffer> buffer = nil;
+    std::uint64_t offset = 0;
+};
+
+// Weights borrowed from the reader's read-only file mapping are aliased with a
+// single no-copy buffer over the whole mapping, so the model is never copied
+// into device memory; the per-tensor offset is applied when the kernel is
+// encoded. Tensors that arrive as owned vectors (synthetic callers) keep the
+// copy path.
+WeightBinding weight_buffer_for(MetalState& s, const MatvecQ8_0Job& job, std::uint64_t rows,
+                                std::uint64_t row_bytes);
+WeightBinding owned_weight_buffer(MetalState& s, const MatvecQ8_0Job& job, std::uint64_t rows,
+                                  std::uint64_t row_bytes) {
+    const std::uint64_t bytes = rows * row_bytes;
+    const std::uint64_t key = cache_key(job.identity, job.data);
+    id<MTLBuffer>& weight_buffer = s.weight_buffers[key];
     if (weight_buffer != nil) {
-        if (weight_buffer.length != static_cast<NSUInteger>(rows * row_bytes)) {
+        if (weight_buffer.length != static_cast<NSUInteger>(bytes)) {
             if (std::getenv("MNET_METAL_DEBUG") != nullptr) {
                 std::fprintf(stderr, "mnet: metal weight cache shape mismatch (%lu vs %llu)\n",
                              static_cast<unsigned long>(weight_buffer.length),
-                             static_cast<unsigned long long>(rows * row_bytes));
+                             static_cast<unsigned long long>(bytes));
             }
-            return nil;
+            return {};
         }
-        return weight_buffer;
+        return {weight_buffer, 0U};
     }
-    weight_buffer = [s.device newBufferWithLength:static_cast<NSUInteger>(rows * row_bytes)
+    weight_buffer = [s.device newBufferWithLength:static_cast<NSUInteger>(bytes)
                                          options:MTLResourceStorageModeShared];
     if (weight_buffer == nil) {
-        s.weight_buffers.erase(cache_key(identity, weights));
-        return nil;
+        s.weight_buffers.erase(key);
+        return {};
     }
-    std::memcpy(weight_buffer.contents, weights, static_cast<std::size_t>(rows * row_bytes));
-    return weight_buffer;
+    std::memcpy(weight_buffer.contents, job.data, static_cast<std::size_t>(bytes));
+    return {weight_buffer, 0U};
 }
 
-void encode_dispatch(MetalState& s, id<MTLComputeCommandEncoder> encoder, id<MTLBuffer> weight_buffer,
+WeightBinding weight_buffer_for(MetalState& s, const MatvecQ8_0Job& job, std::uint64_t rows,
+                                std::uint64_t row_bytes) {
+    const std::uint64_t bytes = rows * row_bytes;
+    static const bool aliasing = std::getenv("MNET_NO_ALIAS") == nullptr;
+    if (!aliasing || job.region == nullptr || job.data == nullptr || job.region_bytes == 0U) {
+        return owned_weight_buffer(s, job, rows, row_bytes);
+    }
+    id<MTLBuffer>& region = s.region_buffers[job.region];
+    if (region == nil) {
+        region = [s.device newBufferWithBytesNoCopy:const_cast<std::uint8_t*>(job.region)
+                                            length:static_cast<NSUInteger>(job.region_bytes)
+                                           options:MTLResourceStorageModeShared
+                                       deallocator:nil];
+        if (region == nil) {
+            if (std::getenv("MNET_METAL_DEBUG") != nullptr) {
+                std::fprintf(stderr, "mnet: metal cannot alias the %llu byte mapping\n",
+                             static_cast<unsigned long long>(job.region_bytes));
+            }
+            s.region_buffers.erase(job.region);
+            return {};
+        }
+    }
+    const auto offset = static_cast<std::uint64_t>(job.data - job.region);
+    if (offset + bytes > job.region_bytes) {
+        return {};
+    }
+    return {region, offset};
+}
+
+void encode_dispatch(MetalState& s, id<MTLComputeCommandEncoder> encoder, const WeightBinding& weights,
                      std::uint64_t rows, std::uint64_t columns, std::uint64_t row_bytes, float scale,
                      std::uint64_t out_offset_floats, id<MTLBuffer> activations, id<MTLBuffer> activation_scales,
                      id<MTLBuffer> output_buffer) {
     const std::uint64_t blocks = columns / 64U;
-    [encoder setBuffer:weight_buffer offset:0 atIndex:0];
+    [encoder setBuffer:weights.buffer offset:static_cast<NSUInteger>(weights.offset) atIndex:0];
     [encoder setBuffer:activations offset:0 atIndex:1];
     [encoder setBuffer:activation_scales offset:0 atIndex:2];
     [encoder setBuffer:output_buffer offset:static_cast<NSUInteger>(out_offset_floats * sizeof(float)) atIndex:3];
@@ -773,7 +818,7 @@ void encode_dispatch(MetalState& s, id<MTLComputeCommandEncoder> encoder, id<MTL
             [encoder setBuffer:wide offset:0 atIndex:2];
             [encoder dispatchThreads:MTLSizeMake(columns, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
             [encoder setComputePipelineState:s.fast_f32_pipeline];
-            [encoder setBuffer:weight_buffer offset:0 atIndex:0];
+            [encoder setBuffer:weights.buffer offset:static_cast<NSUInteger>(weights.offset) atIndex:0];
             [encoder setBuffer:wide offset:0 atIndex:1];
             [encoder setBuffer:output_buffer offset:static_cast<NSUInteger>(out_offset_floats * sizeof(float)) atIndex:3];
             [encoder dispatchThreadgroups:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
@@ -795,8 +840,9 @@ bool matvec_batch(const MatvecQ8_0Job* jobs, std::size_t count, std::uint64_t co
                   const float* q8_scales);
 
 bool matvec_q2_0(const std::uint8_t* weights, std::uint64_t rows, std::uint64_t columns, std::uint64_t row_bytes,
-                 float scale, const std::int8_t* q8, const float* q8_scales, float* out, std::uint64_t identity) {
-    MatvecQ8_0Job job{42U, weights, rows, row_bytes, scale, out, identity};
+                 float scale, const std::int8_t* q8, const float* q8_scales, float* out, std::uint64_t identity,
+                 const std::uint8_t* region, std::uint64_t region_bytes) {
+    MatvecQ8_0Job job{42U, weights, rows, row_bytes, scale, out, identity, region, region_bytes};
     return matvec_batch(&job, 1, columns, q8, q8_scales);
 }
 
@@ -830,9 +876,8 @@ bool matvec_batch(const MatvecQ8_0Job* jobs, std::size_t count, std::uint64_t co
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     std::uint64_t offset = 0;
     for (std::size_t i = 0; i < count; ++i) {
-        id<MTLBuffer> weight_buffer =
-            weight_buffer_for(s, jobs[i].identity, jobs[i].data, jobs[i].rows, jobs[i].row_bytes);
-        if (weight_buffer == nil) {
+        const WeightBinding weight_buffer = weight_buffer_for(s, jobs[i], jobs[i].rows, jobs[i].row_bytes);
+        if (weight_buffer.buffer == nil) {
             [encoder endEncoding];
             [command commit];
             [command waitUntilCompleted];
@@ -949,10 +994,10 @@ bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const Matvec
 
     const std::uint64_t profile_copy = now_ns();
     const std::size_t cache_before = s.weight_buffers.size();
-    id<MTLBuffer> gate_weights = weight_buffer_for(s, gate.identity, gate.data, gate.rows, gate.row_bytes);
-    id<MTLBuffer> up_weights = weight_buffer_for(s, up.identity, up.data, up.rows, up.row_bytes);
-    id<MTLBuffer> down_weights = weight_buffer_for(s, down.identity, down.data, down.rows, down.row_bytes);
-    if (gate_weights == nil || up_weights == nil || down_weights == nil) {
+    const WeightBinding gate_weights = weight_buffer_for(s, gate, gate.rows, gate.row_bytes);
+    const WeightBinding up_weights = weight_buffer_for(s, up, up.rows, up.row_bytes);
+    const WeightBinding down_weights = weight_buffer_for(s, down, down.rows, down.row_bytes);
+    if (gate_weights.buffer == nil || up_weights.buffer == nil || down_weights.buffer == nil) {
         return false;
     }
 
@@ -1107,12 +1152,12 @@ bool attention(const AttentionQ2_0Job& job) {
     }
     std::memcpy(b.signs.contents, job.signs, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
 
-    id<MTLBuffer> q_weights = weight_buffer_for(s, job.q.identity, job.q.data, job.q.rows, job.q.row_bytes);
-    id<MTLBuffer> k_weights = weight_buffer_for(s, job.k.identity, job.k.data, job.k.rows, job.k.row_bytes);
-    id<MTLBuffer> v_weights = weight_buffer_for(s, job.v.identity, job.v.data, job.v.rows, job.v.row_bytes);
-    id<MTLBuffer> out_weights =
-        weight_buffer_for(s, job.out.identity, job.out.data, job.out.rows, job.out.row_bytes);
-    if (q_weights == nil || k_weights == nil || v_weights == nil || out_weights == nil) {
+    const WeightBinding q_weights = weight_buffer_for(s, job.q, job.q.rows, job.q.row_bytes);
+    const WeightBinding k_weights = weight_buffer_for(s, job.k, job.k.rows, job.k.row_bytes);
+    const WeightBinding v_weights = weight_buffer_for(s, job.v, job.v.rows, job.v.row_bytes);
+    const WeightBinding out_weights = weight_buffer_for(s, job.out, job.out.rows, job.out.row_bytes);
+    if (q_weights.buffer == nil || k_weights.buffer == nil || v_weights.buffer == nil ||
+        out_weights.buffer == nil) {
         return false;
     }
 
@@ -1336,10 +1381,10 @@ bool ssm_block(const SsmQ2_0Job& job) {
     }
     std::memcpy(b.signs.contents, job.signs, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
 
-    id<MTLBuffer> qkv_weights = weight_buffer_for(s, job.qkv.identity, job.qkv.data, job.qkv.rows, job.qkv.row_bytes);
-    id<MTLBuffer> gate_weights = weight_buffer_for(s, job.gate.identity, job.gate.data, job.gate.rows, job.gate.row_bytes);
-    id<MTLBuffer> out_weights = weight_buffer_for(s, job.out.identity, job.out.data, job.out.rows, job.out.row_bytes);
-    if (qkv_weights == nil || gate_weights == nil || out_weights == nil) {
+    const WeightBinding qkv_weights = weight_buffer_for(s, job.qkv, job.qkv.rows, job.qkv.row_bytes);
+    const WeightBinding gate_weights = weight_buffer_for(s, job.gate, job.gate.rows, job.gate.row_bytes);
+    const WeightBinding out_weights = weight_buffer_for(s, job.out, job.out.rows, job.out.row_bytes);
+    if (qkv_weights.buffer == nil || gate_weights.buffer == nil || out_weights.buffer == nil) {
         return false;
     }
 
@@ -1553,11 +1598,12 @@ bool ssm_block(const SsmQ2_0Job& job) {
 
 bool matvec_q8_0_backend(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
                          std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales,
-                         float* out, std::uint64_t identity) {
+                         float* out, std::uint64_t identity, const std::uint8_t* region,
+                         std::uint64_t region_bytes) {
     if (type != 42U) {  // kGgmlQ2_0; kept numeric so this TU needs no GGUF header
         return false;
     }
-    return matvec_q2_0(data, rows, columns, row_bytes, scale, q8, q8_scales, out, identity);
+    return matvec_q2_0(data, rows, columns, row_bytes, scale, q8, q8_scales, out, identity, region, region_bytes);
 }
 
 }  // namespace

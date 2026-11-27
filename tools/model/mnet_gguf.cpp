@@ -117,7 +117,7 @@ std::int32_t run_matmul_quantized(const mnet::gguf::Reader& reader, const std::s
     write_floats(output_path, output);
     const auto end = std::chrono::steady_clock::now();
     const double ms = std::chrono::duration<double, std::milli>(end - start).count();
-    const auto bytes = weights.blocks.size();
+    const auto bytes = weights.size();
     std::printf("%s: %.*s [%" PRIu64 ", %" PRIu64 "] expert=%d quantized=%zu bytes -> %s (%.2f ms)\n",
                 info.name.c_str(), static_cast<std::int32_t>(type.name.size()), type.name.data(), input_dim, output_dim,
                 expert, bytes, output_path.c_str(), ms);
@@ -214,8 +214,8 @@ std::int32_t run_bonsai_ffn(const mnet::gguf::Reader& reader, std::int32_t layer
     const auto gate = reader.quantized(reader.tensor(prefix + "ffn_gate.weight"));
     const auto up = reader.quantized(reader.tensor(prefix + "ffn_up.weight"));
     const auto down = reader.quantized(reader.tensor(prefix + "ffn_down.weight"));
-    std::printf("quantized weights: gate=%zu up=%zu down=%zu bytes (fp32 would be %zu)\n", gate.blocks.size(),
-                up.blocks.size(), down.blocks.size(), (hidden * in_dim * 3) * sizeof(float));
+    std::printf("quantized weights: gate=%zu up=%zu down=%zu bytes (fp32 would be %zu)\n", gate.size(),
+                up.size(), down.size(), (hidden * in_dim * 3) * sizeof(float));
 
     std::vector<float> hidden_in = rms_norm(input, norm, eps);
     hadamard_sign(hidden_in, signs_in, block_size);

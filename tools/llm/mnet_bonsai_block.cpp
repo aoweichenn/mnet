@@ -187,8 +187,8 @@ int main(std::int32_t argc, char** argv) {
         const auto& ffn_gate_info = reader.tensor(prefix + "ffn_gate.weight");
         const auto hidden = static_cast<std::size_t>(ffn_gate_info.dims[1]);
         const auto signs_hidden = reader.signs_for_width(static_cast<std::uint32_t>(hidden));
-        const std::size_t quantized_bytes = wqkv.blocks.size() + wgate_q.blocks.size() + wssm_out.blocks.size() +
-                                            ffn_gate.blocks.size() + ffn_up.blocks.size() + ffn_down.blocks.size();
+        const std::size_t quantized_bytes = wqkv.size() + wgate_q.size() + wssm_out.size() +
+                                            ffn_gate.size() + ffn_up.size() + ffn_down.size();
         std::printf("quantized weights: %zu bytes (fp32 vector would be %zu bytes)\n", quantized_bytes,
                     (qkv_dim * in_dim + z_dim * in_dim + in_dim * z_dim + 3 * hidden * in_dim) * sizeof(float));
 

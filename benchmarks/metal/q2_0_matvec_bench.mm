@@ -107,7 +107,7 @@ int main() {
         std::vector<std::uint8_t> packed(matrix.rows * blocks * 24U);
         for (std::uint64_t r = 0; r < matrix.rows; ++r) {
             for (std::uint64_t b = 0; b < blocks; ++b) {
-                const std::uint8_t* src = matrix.blocks.data() + r * row_bytes + b * 18U;
+                const std::uint8_t* src = matrix.data() + r * row_bytes + b * 18U;
                 std::uint8_t* dst = packed.data() + (r * blocks + b) * 24U;
                 std::memcpy(dst, src + 2U, 16U);
                 dst[16] = src[0];
@@ -167,7 +167,7 @@ int main() {
         std::uint64_t bad = 0;
         double worst = 0.0;
         for (std::uint64_t r = 0; r < matrix.rows; ++r) {
-            const float cpu = matrix.scale * mnet::gguf::dot_q2_0_q8_0(matrix.blocks.data() + r * row_bytes, q80, blocks);
+            const float cpu = matrix.scale * mnet::gguf::dot_q2_0_q8_0(matrix.data() + r * row_bytes, q80, blocks);
             if (cpu != out[r]) {
                 ++bad;
                 worst = std::max(worst, std::fabs(static_cast<double>(cpu) - static_cast<double>(out[r])) /

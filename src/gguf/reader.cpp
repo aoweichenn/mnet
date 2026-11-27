@@ -6,6 +6,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <fstream>
@@ -254,6 +258,33 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
         throw std::runtime_error("cannot open " + this->path_);
     }
     this->parse_header();
+    // Map the file read-only. Tensor bytes are then borrowed from here instead
+    // of being copied into a vector, and a device backend can alias the same
+    // mapping with a no-copy buffer: the 6.7 GB model is never copied twice.
+    // posix open() hands back a plain int file descriptor.
+    const std::int32_t descriptor = ::open(this->path_.c_str(), O_RDONLY);
+    if (descriptor >= 0) {
+        struct stat status = {};
+        if (::fstat(descriptor, &status) == 0 && status.st_size > 0) {
+            const auto size = static_cast<std::uint64_t>(status.st_size);
+            void* base = ::mmap(nullptr, static_cast<std::size_t>(size), PROT_READ, MAP_PRIVATE, descriptor, 0);
+            if (base != MAP_FAILED) {
+                // Round the length up to the page so a no-copy device buffer
+                // can cover the trailing partial page safely.
+                const auto page = static_cast<std::uint64_t>(::sysconf(_SC_PAGESIZE));
+                this->mapping_ = static_cast<const std::uint8_t*>(base);
+                this->mapping_size_ = (size + page - 1U) / page * page;
+            }
+        }
+        ::close(descriptor);
+    }
+}
+
+Reader::~Reader() {
+    if (this->mapping_ != nullptr) {
+        ::munmap(const_cast<std::uint8_t*>(this->mapping_), static_cast<std::size_t>(this->mapping_size_));
+        this->mapping_ = nullptr;
+    }
 }
 
 [[nodiscard]] std::vector<std::int32_t> Reader::signs_for_width(std::uint32_t width) const {
@@ -415,7 +446,18 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
             }
         }
     }
-    result.blocks = this->read_raw(info, byte_offset, byte_count);
+    if (this->mapping_ != nullptr) {
+        const std::uint64_t offset = this->data_start_ + info.offset + byte_offset;
+        if (offset + byte_count <= this->mapping_size_) {
+            result.view = this->mapping_ + offset;
+            result.view_bytes = byte_count;
+            result.region = this->mapping_;
+            result.region_bytes = this->mapping_size_;
+        }
+    }
+    if (result.view == nullptr) {
+        result.blocks = this->read_raw(info, byte_offset, byte_count);
+    }
     return result;
 }
 
@@ -452,8 +494,9 @@ void Reader::matvec(const Quantized& matrix, const float* input, float* output) 
     if (int_q80) {
         // Device-neutral: the compute layer uses a GPU when one is registered,
         // otherwise it runs the same CPU loop the reader used before.
-        mnet::detail::compute::matvec_q8_0(matrix.type, matrix.blocks.data(), matrix.rows, matrix.columns, row_bytes,
-                                           matrix.scale, q80.qs.data(), q80.d.data(), output, matrix.identity);
+        mnet::detail::compute::matvec_q8_0(matrix.type, matrix.data(), matrix.rows, matrix.columns, row_bytes,
+                                           matrix.scale, q80.qs.data(), q80.d.data(), output, matrix.identity,
+                                           matrix.region, matrix.region_bytes);
         return;
     }
     // Rows are independent and keep a fixed accumulation order, so the
@@ -462,7 +505,7 @@ void Reader::matvec(const Quantized& matrix, const float* input, float* output) 
 #pragma omp parallel for schedule(static) if (matrix.rows >= 128)
 #endif
     for (std::uint64_t row = 0; row < matrix.rows; ++row) {
-        const std::uint8_t* data = matrix.blocks.data() + row * row_bytes;
+        const std::uint8_t* data = matrix.data() + row * row_bytes;
         float value = 0.0F;
         if (int_q8k) {
             switch (matrix.type) {
@@ -533,8 +576,8 @@ void Reader::matvec_batch(std::initializer_list<std::pair<const Quantized*, floa
     std::vector<mnet::detail::compute::MatvecQ8_0Job> requests;
     requests.reserve(jobs.size());
     for (const auto& job : jobs) {
-        requests.push_back({job.first->type, job.first->blocks.data(), job.first->rows, row_bytes, job.first->scale,
-                            job.second, job.first->identity});
+        requests.push_back({job.first->type, job.first->data(), job.first->rows, row_bytes, job.first->scale,
+                            job.second, job.first->identity, job.first->region, job.first->region_bytes});
     }
     mnet::detail::compute::matvec_q8_0_batch(requests.data(), requests.size(), first->columns, q80.qs.data(),
                                              q80.d.data());
@@ -555,10 +598,12 @@ bool Reader::ffn_swiglu(const Quantized& gate, const Quantized& up, const Quanti
     const std::uint64_t gate_bytes = gate.columns / info.block_elements * info.block_bytes;
     const std::uint64_t down_bytes = down.columns / info.block_elements * info.block_bytes;
     return mnet::detail::compute::ffn_swiglu_q2_0(
-        {gate.type, gate.blocks.data(), gate.rows, gate_bytes, gate.scale, output, gate.identity},
-        {up.type, up.blocks.data(), up.rows, gate_bytes, up.scale, nullptr, up.identity},
-        {down.type, down.blocks.data(), down.rows, down_bytes, down.scale, output, down.identity}, gate.columns,
-        gate.rows, input, signs, block_size);
+        {gate.type, gate.data(), gate.rows, gate_bytes, gate.scale, output, gate.identity, gate.region,
+         gate.region_bytes},
+        {up.type, up.data(), up.rows, gate_bytes, up.scale, nullptr, up.identity, up.region, up.region_bytes},
+        {down.type, down.data(), down.rows, down_bytes, down.scale, output, down.identity, down.region,
+         down.region_bytes},
+        gate.columns, gate.rows, input, signs, block_size);
 }
 
 bool Reader::attention(const Quantized& q, const Quantized& k, const Quantized& v, const Quantized& out,
@@ -597,10 +642,11 @@ bool Reader::attention(const Quantized& q, const Quantized& k, const Quantized& 
     const std::uint64_t row_bytes = columns / info.block_elements * info.block_bytes;
     const std::uint64_t out_bytes = out.columns / info.block_elements * info.block_bytes;
     mnet::detail::compute::AttentionQ2_0Job job;
-    job.q = {q.type, q.blocks.data(), q.rows, row_bytes, q.scale, nullptr, q.identity};
-    job.k = {k.type, k.blocks.data(), k.rows, row_bytes, k.scale, nullptr, k.identity};
-    job.v = {v.type, v.blocks.data(), v.rows, row_bytes, v.scale, nullptr, v.identity};
-    job.out = {out.type, out.blocks.data(), out.rows, out_bytes, out.scale, result, out.identity};
+    job.q = {q.type, q.data(), q.rows, row_bytes, q.scale, nullptr, q.identity, q.region, q.region_bytes};
+    job.k = {k.type, k.data(), k.rows, row_bytes, k.scale, nullptr, k.identity, k.region, k.region_bytes};
+    job.v = {v.type, v.data(), v.rows, row_bytes, v.scale, nullptr, v.identity, v.region, v.region_bytes};
+    job.out = {out.type, out.data(),   out.rows,   out_bytes,       out.scale,
+               result,   out.identity, out.region, out.region_bytes};
     job.input = params.input;
     job.q_norm = params.q_norm;
     job.k_norm = params.k_norm;
@@ -660,9 +706,12 @@ bool Reader::ssm_block(const Quantized& qkv, const Quantized& gate, const Quanti
     const std::uint64_t row_bytes = qkv.columns / info.block_elements * info.block_bytes;
     const std::uint64_t out_bytes = out.columns / info.block_elements * info.block_bytes;
     mnet::detail::compute::SsmQ2_0Job job;
-    job.qkv = {qkv.type, qkv.blocks.data(), qkv.rows, row_bytes, qkv.scale, nullptr, qkv.identity};
-    job.gate = {gate.type, gate.blocks.data(), gate.rows, row_bytes, gate.scale, nullptr, gate.identity};
-    job.out = {out.type, out.blocks.data(), out.rows, out_bytes, out.scale, result, out.identity};
+    job.qkv = {qkv.type, qkv.data(),   qkv.rows,   row_bytes,       qkv.scale,
+               nullptr,  qkv.identity, qkv.region, qkv.region_bytes};
+    job.gate = {gate.type, gate.data(),   gate.rows,   row_bytes,        gate.scale,
+                nullptr,   gate.identity, gate.region, gate.region_bytes};
+    job.out = {out.type, out.data(),   out.rows,   out_bytes,       out.scale,
+               result,   out.identity, out.region, out.region_bytes};
     job.input = params.input;
     job.raw_input = params.raw_input;
     job.beta_w = params.beta_w;

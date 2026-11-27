@@ -25,6 +25,9 @@ namespace mnet::gguf {
 class Reader {
 public:
     explicit Reader(std::string path);
+    ~Reader();
+    Reader(const Reader&) = delete;
+    Reader& operator=(const Reader&) = delete;
 
     [[nodiscard]] const std::string& path() const { return this->path_; }
     [[nodiscard]] std::uint32_t version() const { return this->version_; }
@@ -63,14 +66,29 @@ public:
     // never materialized (a 16x saving for Q2_0 versus fp32).
     struct Quantized {
         std::uint32_t type = kGgmlF32;
-        std::uint64_t rows = 0;      // output features
-        std::uint64_t columns = 0;   // input features
-        float scale = 1.0F;          // per-expert MoE scale, folded at the output
-        std::uint64_t identity = 0;  // unique per loaded tensor; device memory caches key on it
-        std::vector<std::uint8_t> blocks;
+        std::uint64_t rows = 0;              // output features
+        std::uint64_t columns = 0;           // input features
+        float scale = 1.0F;                  // per-expert MoE scale, folded at the output
+        std::uint64_t identity = 0;          // unique per loaded tensor; device memory caches key on it
+        std::vector<std::uint8_t> blocks;    // owning copy (synthetic callers only)
+        const std::uint8_t* view = nullptr;  // borrowed tensor bytes in the file mapping
+        std::uint64_t view_bytes = 0;
+        const std::uint8_t* region = nullptr;  // mapping base the view points into
+        std::uint64_t region_bytes = 0;
 
-        [[nodiscard]] bool empty() const { return this->blocks.empty(); }
+        [[nodiscard]] const std::uint8_t* data() const {
+            return this->view != nullptr ? this->view : this->blocks.data();
+        }
+        [[nodiscard]] std::uint64_t size() const {
+            return this->view != nullptr ? this->view_bytes : this->blocks.size();
+        }
+        [[nodiscard]] bool empty() const { return this->size() == 0U; }
     };
+
+    // Read-only mapping of the whole file, page aligned, and its length rounded
+    // up to a page. A device backend can alias it instead of copying.
+    [[nodiscard]] const std::uint8_t* mapping() const { return this->mapping_; }
+    [[nodiscard]] std::uint64_t mapping_size() const { return this->mapping_size_; }
 
     [[nodiscard]] Quantized quantized(const TensorInfo& info, std::int32_t expert = -1) const;
 
@@ -163,6 +181,8 @@ private:
 
     std::string path_;
     mutable std::ifstream file_;
+    const std::uint8_t* mapping_ = nullptr;
+    std::uint64_t mapping_size_ = 0;
     std::uint32_t version_ = 0;
     std::uint64_t data_start_ = 0;
     std::vector<TensorInfo> tensors_;

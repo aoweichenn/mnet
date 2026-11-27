@@ -136,13 +136,14 @@ void cpu_matvec(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows
 
 void matvec_q8_0(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
                  std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales, float* out,
-                 std::uint64_t identity) {
+                 std::uint64_t identity, const std::uint8_t* region, std::uint64_t region_bytes) {
     static std::once_flag once;
     std::call_once(once, [] { register_platform_backends(); });
     const MatvecQ8_0Fn backend = backend_slot().load();
     if (backend != nullptr) {
         const auto begin = std::chrono::steady_clock::now();
-        const bool handled = backend(type, data, rows, columns, row_bytes, scale, q8, q8_scales, out, identity);
+        const bool handled =
+            backend(type, data, rows, columns, row_bytes, scale, q8, q8_scales, out, identity, region, region_bytes);
         if (handled) {
             const auto elapsed = std::chrono::steady_clock::now() - begin;
             stats().backend_ns +=
