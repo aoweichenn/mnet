@@ -1054,26 +1054,43 @@ WeightBinding weight_buffer_for(MetalState& s, const MatvecQ8_0Job& job, std::ui
     if (!allow_alias || !aliasing || job.region == nullptr || job.data == nullptr || job.region_bytes == 0U) {
         return owned_weight_buffer(s, job, rows, row_bytes);
     }
-    id<MTLBuffer>& region = s.region_buffers[job.region];
-    if (region == nil) {
-        region = [s.device newBufferWithBytesNoCopy:const_cast<std::uint8_t*>(job.region)
-                                            length:static_cast<NSUInteger>(job.region_bytes)
-                                           options:MTLResourceStorageModeShared
-                                       deallocator:nil];
-        if (region == nil) {
-            if (std::getenv("MNET_METAL_DEBUG") != nullptr) {
-                std::fprintf(stderr, "mnet: metal cannot alias the %llu byte mapping\n",
-                             static_cast<unsigned long long>(job.region_bytes));
-            }
-            s.region_buffers.erase(job.region);
-            return {};
-        }
-    }
-    const auto offset = static_cast<std::uint64_t>(job.data - job.region);
+    // One page-aligned no-copy buffer per tensor. Measured against a single
+    // buffer over the whole 6.7 GB mapping: gated-delta 1.106 -> 0.722 s
+    // (per-layer GPU wait 22.07 -> 14.12 ms), forward 2580 -> 2522 ms, at the
+    // cost of the FFN going 1.269 -> 1.577 s; net faster, and the mapping
+    // buffer is 6.7 GB of address space the driver had to rebind per dispatch.
+    const std::uint64_t key = cache_key(job.identity, job.data) ^ 0x9E3779B97F4A7C15ULL;
+    id<MTLBuffer>& weight_buffer = s.weight_buffers[key];
+    const std::uint64_t page = 16U * 1024U;
+    const auto address = reinterpret_cast<std::uintptr_t>(job.data);
+    const auto region_address = reinterpret_cast<std::uintptr_t>(job.region);
+    const std::uint64_t offset = address - region_address;
     if (offset + bytes > job.region_bytes) {
         return {};
     }
-    return {region, offset};
+    const std::uint64_t aligned = offset / page * page;
+    const std::uint64_t head = offset - aligned;
+    const std::uint64_t length = (head + bytes + page - 1U) / page * page;
+    if (weight_buffer != nil) {
+        if (weight_buffer.length != static_cast<NSUInteger>(length)) {
+            if (std::getenv("MNET_METAL_DEBUG") != nullptr) {
+                std::fprintf(stderr, "mnet: metal alias cache shape mismatch (%lu vs %llu)\n",
+                             static_cast<unsigned long>(weight_buffer.length),
+                             static_cast<unsigned long long>(length));
+            }
+            return {};
+        }
+        return {weight_buffer, head};
+    }
+    weight_buffer = [s.device newBufferWithBytesNoCopy:const_cast<std::uint8_t*>(job.data - head)
+                                                length:static_cast<NSUInteger>(length)
+                                               options:MTLResourceStorageModeShared
+                                           deallocator:nil];
+    if (weight_buffer == nil) {
+        s.weight_buffers.erase(key);
+        return {};
+    }
+    return {weight_buffer, head};
 }
 
 void encode_dispatch(MetalState& s, id<MTLComputeCommandEncoder> encoder, const WeightBinding& weights,
