@@ -101,6 +101,9 @@ add_library(mnet_objs OBJECT
     src/core/log.cpp
     src/core/layer_registry.cpp
     src/core/net.cpp
+    src/gguf/format.cpp
+    src/gguf/kernels.cpp
+    src/gguf/reader.cpp
     src/tokenizer/tokenizer.cpp
     src/tokenizer/bpe_tokenizer.cpp
 )
@@ -118,6 +121,12 @@ target_include_directories(mnet_objs SYSTEM PRIVATE
     $<TARGET_PROPERTY:mlayer::mlayer,INTERFACE_INCLUDE_DIRECTORIES>)
 
 target_compile_options(mnet_objs PRIVATE ${MNET_WARNINGS})
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # The quantised kernels spell out every fused multiply-add themselves; keep
+    # the compiler from contracting the remaining a*b+c expressions so the
+    # library rounds the same on FMA and non-FMA targets.
+    target_compile_options(mnet_objs PRIVATE -ffp-contract=off)
+endif()
 if(mnet_enable_avx2 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     target_compile_options(mnet_objs PRIVATE -mavx2 -mfma)
 endif()
