@@ -1814,6 +1814,43 @@ struct FfnBatchBuffers {
     std::size_t out_capacity = 0;
 };
 
+// True GPU time per fused block, straight from the command buffer's own
+// timestamps. The wall-clock counters below charge a block for waiting on the
+// block before it, which is why their totals exceed the forward; these do not.
+struct GpuBlockProfile {
+    std::uint64_t ns[3] = {0, 0, 0};
+    std::uint64_t calls[3] = {0, 0, 0};
+    ~GpuBlockProfile() {
+        if (std::getenv("MNET_PROFILE") == nullptr || (this->calls[0] + this->calls[1] + this->calls[2]) == 0U) {
+            return;
+        }
+        const char* names[3] = {"ffn", "ssm", "attention"};
+        for (int i = 0; i < 3; ++i) {
+            if (this->calls[i] == 0U) {
+                continue;
+            }
+            std::fprintf(stderr, "mnet: gpu %-9s %8.2f ms total  %6.3f ms per call  %llu calls\n", names[i],
+                         static_cast<double>(this->ns[i]) * 1.0e-6,
+                         static_cast<double>(this->ns[i]) * 1.0e-6 / static_cast<double>(this->calls[i]),
+                         static_cast<unsigned long long>(this->calls[i]));
+        }
+    }
+};
+
+GpuBlockProfile& gpu_block_profile() {
+    static GpuBlockProfile profile;
+    return profile;
+}
+
+void record_gpu_block(int block, id<MTLCommandBuffer> command) {
+    if (std::getenv("MNET_PROFILE") == nullptr || command.GPUStartTime <= 0.0) {
+        return;
+    }
+    GpuBlockProfile& profile = gpu_block_profile();
+    profile.ns[block] += static_cast<std::uint64_t>((command.GPUEndTime - command.GPUStartTime) * 1.0e9);
+    profile.calls[block] += 1U;
+}
+
 // Split of the batched gated-delta call: host preparation (q8 conversion of the
 // layer's activations), weight binding, encoding, the GPU wait and the readback.
 struct SsmBatchProfile {
@@ -3409,6 +3446,7 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
     [encoder endEncoding];
     [command commit];
     [command waitUntilCompleted];
+    record_gpu_block(0, command);
     if (command.status != MTLCommandBufferStatusCompleted) {
         return false;
     }
@@ -3618,6 +3656,9 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     const bool skip_conv = skip_all || skip == "conv";
     const bool skip_scan = skip_all || skip == "scan";
     const bool skip_norm = skip_all || skip == "norm";
+    // The norm phase is two dispatches with very different costs; these split it.
+    const bool skip_gate_norm = skip_norm || skip == "gatenorm";
+    const bool skip_hadamard = skip_norm || skip == "hadamard";
 
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
@@ -3793,7 +3834,7 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
                     threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
         }
     }
-    if (!skip_norm) {
+    if (!skip_gate_norm) {
         [encoder setComputePipelineState:s.gate_norm_multi_pipeline];
         [encoder setBuffer:b.delta offset:0 atIndex:0];
         [encoder setBuffer:b.z offset:0 atIndex:1];
@@ -3806,7 +3847,8 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
         [encoder setBytes:&value_heads32 length:sizeof(value_heads32) atIndex:8];
         [encoder dispatchThreadgroups:MTLSizeMake(value_heads * count, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
-
+    }
+    if (!skip_hadamard) {
         [encoder setComputePipelineState:s.hadamard_multi_pipeline];
         [encoder setBuffer:b.grouped offset:0 atIndex:0];
         [encoder setBuffer:signs_buffer offset:0 atIndex:1];
@@ -3903,6 +3945,7 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     }
     [command commit];
     [command waitUntilCompleted];
+    record_gpu_block(1, command);
     const std::uint64_t profile_wait = now_ns();
     if (command.status != MTLCommandBufferStatusCompleted) {
         return false;
@@ -4053,13 +4096,22 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
         [encoder dispatchThreads:MTLSizeMake((job.columns / 32U) * count, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     }
+    // MNET_ATTN_SKIP=<phase> drops one phase for timing; results are garbage.
+    static const std::string attn_skip =
+        std::getenv("MNET_ATTN_SKIP") != nullptr ? std::string(std::getenv("MNET_ATTN_SKIP")) : std::string();
+    const bool as_all = attn_skip == "all";
+    const bool as_matvec = as_all || attn_skip == "matvec";
+    const bool as_prep = as_all || attn_skip == "prep";
+    const bool as_flash = as_all || attn_skip == "flash";
+    const bool as_out = as_all || attn_skip == "out";
+
     // Widen every token's activation once, then all q, all k and all v matvecs.
     [encoder setComputePipelineState:s.dequant_pipeline];
     [encoder setBuffer:b.q8 offset:0 atIndex:0];
     [encoder setBuffer:b.scales offset:0 atIndex:1];
     [encoder setBuffer:b.wide offset:0 atIndex:2];
     [encoder dispatchThreads:MTLSizeMake(job.columns * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-    if (tiled_mat_mat_enabled(s, count)) {
+    if (!as_matvec && tiled_mat_mat_enabled(s, count)) {
         const std::uint32_t columns32 = static_cast<std::uint32_t>(job.columns);
         const std::uint32_t tokens32 = static_cast<std::uint32_t>(count);
         const std::uint32_t x_stride32 = static_cast<std::uint32_t>(job.columns);
@@ -4089,7 +4141,7 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
                     threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         }
     }
-    for (std::size_t pass = 0; tiled_mat_mat_enabled(s, count) == false && pass < 3U; ++pass) {
+    for (std::size_t pass = 0; !as_matvec && tiled_mat_mat_enabled(s, count) == false && pass < 3U; ++pass) {
         const WeightBinding& weights = pass == 0U ? q_weights : (pass == 1U ? k_weights : v_weights);
         id<MTLBuffer> target = pass == 0U ? b.qfull : (pass == 1U ? b.k_new : b.v_new);
         const std::uint64_t rows = pass == 0U ? 2U * hidden : kv_head_elems;
@@ -4119,7 +4171,7 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
     // Head norms, RoPE, gate sigmoid and the f16 KV append for every token.
     const float hadamard_scale = 1.0F / std::sqrt(static_cast<float>(job.block_size));
     (void)hadamard_scale;
-    if (s.attn_prep_batch_pipeline != nil && s.attn_gate_batch_pipeline != nil &&
+    if (!as_prep && s.attn_prep_batch_pipeline != nil && s.attn_gate_batch_pipeline != nil &&
         s.attn_store_batch_pipeline != nil) {
         // Every token's prep, gate, K append and V store, one dispatch each.
         const std::uint32_t tokens32 = static_cast<std::uint32_t>(count);
@@ -4179,7 +4231,7 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
 
 
     // Each token's attention over the cache up to its own position.
-    const bool flash_batched = s.attn_flash_batch_pipeline != nil;
+    const bool flash_batched = !as_flash && s.attn_flash_batch_pipeline != nil;
     if (flash_batched) {
         const std::uint32_t heads32b = static_cast<std::uint32_t>(heads);
         const std::uint32_t cache32 = static_cast<std::uint32_t>(job.cache_tokens);
@@ -4218,7 +4270,7 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
     }
     // Hadamard and requantisation per token, then the widened activations for
     // every token in one dispatch, then the projections.
-    {
+    if (!as_out) {
         [encoder setComputePipelineState:s.hadamard_multi_pipeline];
         [encoder setBuffer:b.attn offset:0 atIndex:0];
         [encoder setBuffer:signs_buffer offset:0 atIndex:1];
@@ -4229,13 +4281,36 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
         [encoder setBytes:&sign_blocks length:sizeof(sign_blocks) atIndex:5];
         [encoder dispatchThreadgroups:MTLSizeMake((hidden / job.block_size) * count, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(job.block_size, 1, 1)];
-    }
-    [encoder setComputePipelineState:s.dequant_pipeline];
-    [encoder setBuffer:b.act_q8 offset:0 atIndex:0];
-    [encoder setBuffer:b.act_scales offset:0 atIndex:1];
-    [encoder setBuffer:b.wide offset:0 atIndex:2];
-    [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-    {
+        [encoder setComputePipelineState:s.dequant_pipeline];
+        [encoder setBuffer:b.act_q8 offset:0 atIndex:0];
+        [encoder setBuffer:b.act_scales offset:0 atIndex:1];
+        [encoder setBuffer:b.wide offset:0 atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    // The tiled mat-mat reuses one weight tile across all tokens; the scalar
+    // matvec beside it re-reads the whole row for every token, which at 32 tokens
+    // is 32x the weight traffic (37 ms of the forward, log 176).
+    if (tiled_mat_mat_enabled(s, count)) {
+        const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(job.out.row_bytes);
+        const std::uint32_t columns32 = static_cast<std::uint32_t>(hidden);
+        const float scale = job.out.scale;
+        const std::uint32_t rows32 = static_cast<std::uint32_t>(job.out.rows);
+        const std::uint32_t tokens32 = static_cast<std::uint32_t>(count);
+        const std::uint32_t x_stride32 = static_cast<std::uint32_t>(hidden);
+        const std::uint32_t out_stride32 = static_cast<std::uint32_t>(job.out.rows);
+        [encoder setComputePipelineState:tiled_mat_mat_pipeline(s)];
+        [encoder setBuffer:out_weights.buffer offset:static_cast<NSUInteger>(out_weights.offset) atIndex:0];
+        [encoder setBuffer:b.wide offset:0 atIndex:1];
+        [encoder setBuffer:b.out offset:0 atIndex:3];
+        [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
+        [encoder setBytes:&columns32 length:sizeof(columns32) atIndex:5];
+        [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+        [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
+        [encoder setBytes:&tokens32 length:sizeof(tokens32) atIndex:9];
+        [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:10];
+        [encoder setBytes:&out_stride32 length:sizeof(out_stride32) atIndex:11];
+        [encoder dispatchThreadgroups:MTLSizeMake((count + 31U) / 32U, (job.out.rows + 63U) / 64U, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    } else {
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(job.out.row_bytes);
         const std::uint32_t blocks32 = static_cast<std::uint32_t>(hidden / 64U);
         const float scale = job.out.scale;
@@ -4255,9 +4330,11 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
         [encoder dispatchThreadgroups:MTLSizeMake(job.out.rows * count, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(lanes, 1, 1)];
     }
+    }
     [encoder endEncoding];
     [command commit];
     [command waitUntilCompleted];
+    record_gpu_block(2, command);
     if (command.status != MTLCommandBufferStatusCompleted) {
         return false;
     }
