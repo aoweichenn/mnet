@@ -69,12 +69,59 @@ void matvec_q8_0_batch(const MatvecQ8_0Job* jobs, std::size_t count, std::uint64
                                    std::uint64_t columns, std::uint64_t hidden, const float* input,
                                    const std::int32_t* signs, std::uint32_t block_size);
 
+// Fused attention block. One submission covers the q/k/v matvecs, the split of
+// each query row into query and gate halves, per-head RMSNorm, RoPE, the
+// f16-rounded KV append, the online-softmax attention over the whole cache, the
+// sigmoid gate multiply, the model's signed Hadamard over the head vector, the
+// on-device Q8_0 requantisation and the output projection.
+//
+// Layouts (all row-major):
+//   q.rows   = 2 * n_head * head_dim   (head h: query at 2*h*head_dim, gate next)
+//   k.rows   = v.rows = n_head_kv * head_dim
+//   out.rows = n_embd, out columns = n_head * head_dim
+//   k_cache/v_cache: [cache_tokens][n_head_kv][head_dim], already f16-rounded
+//   rope_cos/rope_sin: rope_dims / 2 entries for the current position
+struct AttentionQ2_0Job {
+    MatvecQ8_0Job q;
+    MatvecQ8_0Job k;
+    MatvecQ8_0Job v;
+    MatvecQ8_0Job out;
+    const float* input = nullptr;         // n_embd activation, already Hadamard'ed
+    const float* q_norm = nullptr;        // head_dim
+    const float* k_norm = nullptr;        // head_dim
+    const float* rope_cos = nullptr;      // rope_dims / 2
+    const float* rope_sin = nullptr;      // rope_dims / 2
+    const std::int32_t* signs = nullptr;  // n_head * head_dim
+    float* k_cache = nullptr;
+    float* v_cache = nullptr;
+    float* result = nullptr;    // n_embd
+    std::uint64_t columns = 0;  // n_embd
+    std::uint32_t n_head = 0;
+    std::uint32_t n_head_kv = 0;
+    std::uint32_t head_dim = 0;
+    std::uint32_t rope_dims = 0;
+    std::uint32_t block_size = 0;
+    std::uint32_t cache_tokens = 0;  // tokens already stored, before this one
+    float eps = 0.0F;
+    float attention_scale = 0.0F;
+};
+
+using AttentionQ2_0Fn = bool (*)(const AttentionQ2_0Job& job);
+void set_attention_backend(AttentionQ2_0Fn backend);
+
+// Returns false when the device cannot take the block; the caller then keeps
+// the step-by-step path (which is also the bit-exact reference).
+[[nodiscard]] bool attention_q2_0(const AttentionQ2_0Job& job);
+
 // True when the caller may use the tolerance-level fast paths.
 [[nodiscard]] bool fast_path_enabled();
 
 // The fused FFN block is still being validated; it stays behind this flag so
 // the fast path cannot silently regress.
 [[nodiscard]] bool fused_ffn_enabled();
+
+// Same A/B switch for the fused attention block (MNET_NO_FUSED_ATTN).
+[[nodiscard]] bool fused_attention_enabled();
 
 }  // namespace mnet::detail::compute
 

@@ -85,9 +85,19 @@ Quirk: this llama-bench build prints `ngl 10` in every row even with
   (llama.cpp mul_mv shape), which is ~25% faster but only tolerance-close.
 - `Reader::matvec_batch` fuses independent matvecs that share an activation
   (ffn gate/up, qkv+gate, q/k/v) into one command buffer and one wait.
+- `Reader::ffn_swiglu` (fused FFN) and `Reader::attention` (fused attention)
+  each collapse a whole block into one submission. Both are on by default with
+  `MNET_METAL_FAST=1`; `MNET_NO_FUSED_FFN=1` / `MNET_NO_FUSED_ATTN=1` select
+  the step-by-step block for A/B runs, and `--dump` always uses the steps so
+  the reference dump stays complete.
+- Attention block kernels: `attn_head_prep` (one head per threadgroup: f32
+  RMSNorm with a simdgroup sum + RoPE + optional f16 round on store),
+  `attn_gate_sigmoid`, `attn_store_half` and `attn_flash` (one simdgroup per
+  head, online softmax, value accumulator in registers, `simd_sum` score).
 - Measured Bonsai 27B Q2_0, 32 tokens: CPU 167.7 s (5.24 s/token); Metal
   exact 8.23 s (0.26 s/token, 2371/2371 identical); Metal fast 6.47 s
-  (0.20 s/token, top-5 unchanged, max rel 2e-2).
+  (0.20 s/token, top-5 unchanged, max rel 2e-2); fast + fused FFN + fused
+  attention 5.91-5.99 s.
 - Build dirs: `build-metal` (Metal ON), `build-cpu` (CPU reference) in
   `~/mnet_p4/mnet`. Dumps: `~/mnet_p4/{bonsai_cpu,bonsai_gpu}`.
 

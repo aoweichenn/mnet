@@ -381,7 +381,7 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
     // again, and two tensors must never share it.
     const auto salt = reinterpret_cast<std::uintptr_t>(this);
     result.identity = (info.offset + 0x9E3779B97F4A7C15ULL) * 0x100000001B3ULL ^
-                      (static_cast<std::uint64_t>(expert + 1) * 0xC2B2AE3D27D4EB4FULL) ^ salt;
+                      ((static_cast<std::uint64_t>(expert) + 1U) * 0xC2B2AE3D27D4EB4FULL) ^ salt;
     result.type = info.type;
     result.rows = info.dims.size() >= 2 ? info.dims[1] : 1;
     result.columns = info.dims[0];
@@ -559,6 +559,67 @@ bool Reader::ffn_swiglu(const Quantized& gate, const Quantized& up, const Quanti
         {up.type, up.blocks.data(), up.rows, gate_bytes, up.scale, nullptr, up.identity},
         {down.type, down.blocks.data(), down.rows, down_bytes, down.scale, output, down.identity}, gate.columns,
         gate.rows, input, signs, block_size);
+}
+
+bool Reader::attention(const Quantized& q, const Quantized& k, const Quantized& v, const Quantized& out,
+                       const AttentionParams& params, float* k_cache, float* v_cache, float* result) {
+    if (q.type != kGgmlQ2_0 || k.type != kGgmlQ2_0 || v.type != kGgmlQ2_0 || out.type != kGgmlQ2_0) {
+        return false;
+    }
+    if (params.block_size < 64U || params.block_size > 1024U || (params.block_size & (params.block_size - 1U)) != 0U) {
+        return false;
+    }
+    if (params.input == nullptr || params.q_norm == nullptr || params.k_norm == nullptr || params.rope_cos == nullptr ||
+        params.rope_sin == nullptr || params.signs == nullptr) {
+        return false;
+    }
+    const std::uint64_t heads = params.head_count;
+    const std::uint64_t heads_kv = params.head_count_kv;
+    const std::uint64_t head_dim = params.head_dim;
+    if (heads == 0 || heads_kv == 0 || heads % heads_kv != 0 || head_dim == 0) {
+        return false;
+    }
+    if (params.rope_dims == 0 || (params.rope_dims % 2U) != 0U || params.rope_dims > head_dim) {
+        return false;
+    }
+    if (q.rows != 2 * heads * head_dim || k.rows != heads_kv * head_dim || v.rows != heads_kv * head_dim) {
+        return false;
+    }
+    if (out.rows != q.columns || q.columns != k.columns || q.columns != v.columns || out.columns != heads * head_dim) {
+        return false;
+    }
+    const auto info = type_info(q.type);
+    if (q.columns % info.block_elements != 0 || out.columns % info.block_elements != 0 ||
+        (heads * head_dim) % params.block_size != 0) {
+        return false;
+    }
+    const std::uint64_t columns = q.columns;
+    const std::uint64_t row_bytes = columns / info.block_elements * info.block_bytes;
+    const std::uint64_t out_bytes = out.columns / info.block_elements * info.block_bytes;
+    mnet::detail::compute::AttentionQ2_0Job job;
+    job.q = {q.type, q.blocks.data(), q.rows, row_bytes, q.scale, nullptr, q.identity};
+    job.k = {k.type, k.blocks.data(), k.rows, row_bytes, k.scale, nullptr, k.identity};
+    job.v = {v.type, v.blocks.data(), v.rows, row_bytes, v.scale, nullptr, v.identity};
+    job.out = {out.type, out.blocks.data(), out.rows, out_bytes, out.scale, result, out.identity};
+    job.input = params.input;
+    job.q_norm = params.q_norm;
+    job.k_norm = params.k_norm;
+    job.rope_cos = params.rope_cos;
+    job.rope_sin = params.rope_sin;
+    job.signs = params.signs;
+    job.k_cache = k_cache;
+    job.v_cache = v_cache;
+    job.result = result;
+    job.columns = columns;
+    job.n_head = params.head_count;
+    job.n_head_kv = params.head_count_kv;
+    job.head_dim = params.head_dim;
+    job.rope_dims = params.rope_dims;
+    job.block_size = params.block_size;
+    job.cache_tokens = params.cache_tokens;
+    job.eps = params.eps;
+    job.attention_scale = params.attention_scale;
+    return mnet::detail::compute::attention_q2_0(job);
 }
 
 void Reader::matmul(const Quantized& matrix, const float* input, float* output, std::size_t tokens,

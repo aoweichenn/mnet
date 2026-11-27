@@ -90,6 +90,34 @@ public:
                                          const float* input, const std::int32_t* signs, std::uint32_t block_size,
                                          float* output);
 
+    // Geometry and side inputs of the fused attention block; the weights come
+    // as q/k/v/out matrices. rope_cos/rope_sin hold rope_dims/2 rotations for
+    // the current position. k_cache/v_cache are the f16-valued f32 caches and
+    // grow by one token on success.
+    struct AttentionParams {
+        const float* input = nullptr;   // n_embd, already Hadamard'ed
+        const float* q_norm = nullptr;  // head_dim
+        const float* k_norm = nullptr;  // head_dim
+        const float* rope_cos = nullptr;
+        const float* rope_sin = nullptr;
+        const std::int32_t* signs = nullptr;  // n_head * head_dim
+        std::uint32_t rope_dims = 0;
+        std::uint32_t head_count = 0;
+        std::uint32_t head_count_kv = 0;
+        std::uint32_t head_dim = 0;
+        std::uint32_t block_size = 0;
+        std::uint32_t cache_tokens = 0;
+        float eps = 0.0F;
+        float attention_scale = 0.0F;
+    };
+
+    // Fused attention: q/k/v matvec, head RMSNorm, RoPE, f16 KV append,
+    // online-softmax attention, gate multiply, signed Hadamard and the output
+    // projection in one device submission. False means "run the steps".
+    [[nodiscard]] static bool attention(const Quantized& q, const Quantized& k, const Quantized& v,
+                                        const Quantized& out, const AttentionParams& params, float* k_cache,
+                                        float* v_cache, float* result);
+
     static void matmul(const Quantized& matrix, const float* input, float* output, std::size_t tokens,
                        std::size_t input_stride, std::size_t output_stride);
 

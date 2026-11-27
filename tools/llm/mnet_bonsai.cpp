@@ -206,6 +206,20 @@ void rope_neox(float* head, std::size_t head_dim, std::size_t position, float ba
     (void)head_dim;
 }
 
+// Same rotation factors rope_neox uses, tabulated for the device block. The
+// iterative theta *= theta_scale keeps the values identical to the scalar path.
+void rope_tables(std::size_t position, float base, std::vector<float>& cos_table, std::vector<float>& sin_table) {
+    cos_table.resize(kRopeDims / 2);
+    sin_table.resize(kRopeDims / 2);
+    const float theta_scale = mnet::detail::ggml::powf(base, -2.0F / static_cast<float>(kRopeDims));
+    float theta = static_cast<float>(position);
+    for (std::size_t i = 0; i < kRopeDims / 2; ++i) {
+        cos_table[i] = std::cos(theta);
+        sin_table[i] = std::sin(theta);
+        theta *= theta_scale;
+    }
+}
+
 struct LayerWeights {
     // attention layers
     Reader::Quantized q;
@@ -639,6 +653,40 @@ private:
         auto xh = xn;
         hadamard_forward(xh, signs_embd, this->config_.hadamard_block);
 
+        // One submission for the whole block. `--dump` keeps the step-by-step
+        // path so the reference dump stays complete; it is also what
+        // MNET_NO_FUSED_ATTN selects for A/B runs.
+        if (dump_dir == nullptr && mnet::detail::compute::fast_path_enabled() &&
+            mnet::detail::compute::fused_attention_enabled()) {
+            const auto signs_value = this->reader_.signs_for_width(
+                static_cast<std::uint32_t>(kHeadDim * this->config_.n_head));
+            this->rope_table(position);
+            const std::size_t kv_elems = (state.cache_tokens + 1) * this->config_.n_head_kv * kHeadDim;
+            state.k_cache.resize(kv_elems);
+            state.v_cache.resize(kv_elems);
+            std::vector<float> projected(this->config_.n_embd);
+            Reader::AttentionParams params;
+            params.input = xh.data();
+            params.q_norm = w.q_norm.data();
+            params.k_norm = w.k_norm.data();
+            params.rope_cos = this->rope_cos_.data();
+            params.rope_sin = this->rope_sin_.data();
+            params.signs = signs_value.data();
+            params.rope_dims = static_cast<std::uint32_t>(kRopeDims);
+            params.head_count = static_cast<std::uint32_t>(this->config_.n_head);
+            params.head_count_kv = static_cast<std::uint32_t>(this->config_.n_head_kv);
+            params.head_dim = static_cast<std::uint32_t>(kHeadDim);
+            params.block_size = this->config_.hadamard_block;
+            params.cache_tokens = static_cast<std::uint32_t>(state.cache_tokens);
+            params.eps = this->config_.eps;
+            params.attention_scale = 1.0F / std::sqrt(static_cast<float>(kHeadDim));
+            if (Reader::attention(w.q, w.k, w.v, w.output, params, state.k_cache.data(), state.v_cache.data(),
+                                  projected.data())) {
+                ++state.cache_tokens;
+                return projected;
+            }
+        }
+
         std::vector<float> qfull(w.q.rows);
         std::vector<float> k(w.k.rows);
         std::vector<float> v(w.v.rows);
@@ -773,6 +821,19 @@ private:
     std::vector<LayerState> state_;
     std::vector<float> output_norm_;
     Reader::Quantized output_;
+    std::vector<float> rope_cos_;
+    std::vector<float> rope_sin_;
+    std::size_t rope_position_ = static_cast<std::size_t>(-1);
+
+    // Tabulated RoPE factors for `position`, cached because every attention
+    // layer of one token uses the same rotation.
+    void rope_table(std::size_t position) {
+        if (this->rope_position_ == position) {
+            return;
+        }
+        rope_tables(position, this->config_.rope_base, this->rope_cos_, this->rope_sin_);
+        this->rope_position_ = position;
+    }
 };
 
 }  // namespace
