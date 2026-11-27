@@ -104,6 +104,7 @@ add_library(mnet_objs OBJECT
     src/gguf/format.cpp
     src/gguf/kernels.cpp
     src/gguf/reader.cpp
+    src/tokenizer/bpe.cpp
     src/tokenizer/tokenizer.cpp
     src/tokenizer/bpe_tokenizer.cpp
 )

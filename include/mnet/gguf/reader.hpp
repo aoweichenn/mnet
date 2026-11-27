@@ -9,6 +9,7 @@
 // in src/gguf/reader.cpp; the small accessors stay inline.
 
 #include <cstdint>
+
 #include <fstream>
 #include <istream>
 #include <string>
