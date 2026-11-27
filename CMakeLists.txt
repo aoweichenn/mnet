@@ -104,6 +104,10 @@ add_library(mnet_objs OBJECT
     src/gguf/format.cpp
     src/gguf/kernels.cpp
     src/gguf/reader.cpp
+    src/tts/exact.cpp
+    src/tts/ops.cpp
+    src/tts/reference.cpp
+    src/tts/tensor.cpp
     src/tokenizer/bpe.cpp
     src/tokenizer/tokenizer.cpp
     src/tokenizer/bpe_tokenizer.cpp
