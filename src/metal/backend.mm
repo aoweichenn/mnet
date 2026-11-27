@@ -579,6 +579,81 @@ kernel void attn_head_prep(device const float* src      [[buffer(0)]],
     threadgroup_barrier(mem_flags::mem_threadgroup);
     dst[tgid * head_dim + tid] = half_store != 0u ? float(half(head[tid])) : head[tid];
 }
+kernel void attn_head_prep_batch(device const float* src      [[buffer(0)]],
+                           device const float* norm     [[buffer(1)]],
+                           device const float* cos_t    [[buffer(2)]],
+                           device const float* sin_t    [[buffer(3)]],
+                           device float* dst            [[buffer(4)]],
+                           constant uint& head_dim      [[buffer(5)]],
+                           constant uint& rope_dims     [[buffer(6)]],
+                           constant float& eps          [[buffer(7)]],
+                           constant uint& src_stride    [[buffer(8)]],
+                           constant uint& half_store    [[buffer(9)]],
+                           constant uint& heads         [[buffer(10)]],
+                           constant uint& cos_stride    [[buffer(11)]],
+                           uint tgid                    [[threadgroup_position_in_grid]],
+                           uint tid                     [[thread_position_in_threadgroup]]) {
+    threadgroup float head[kAttentionMaxHeadDim];
+    threadgroup float squares[kAttentionSimdGroups];
+    // One dispatch for every token: tgid covers (token, head).
+    const uint token = tgid / heads;
+    const uint head_index = tgid % heads;
+    const uint slot = token * heads + head_index;
+    const float x = src[(ulong)slot * src_stride + tid];
+    const float partial = simd_sum(x * x);
+    if ((tid & 31u) == 0u) {
+        squares[tid >> 5u] = partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        float total = 0.0f;
+        for (uint i = 0; i < kAttentionSimdGroups; ++i) {
+            total += squares[i];
+        }
+        squares[0] = total / float(head_dim);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float scale = 1.0f / sqrt(squares[0] + eps);
+    head[tid] = (x * scale) * norm[tid];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < rope_dims / 2u) {
+        const float c = cos_t[(ulong)token * cos_stride + tid];
+        const float s = sin_t[(ulong)token * cos_stride + tid];
+        const float x0 = head[tid];
+        const float x1 = head[tid + rope_dims / 2u];
+        head[tid] = x0 * c - x1 * s;
+        head[tid + rope_dims / 2u] = x0 * s + x1 * c;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    dst[(ulong)slot * head_dim + tid] = half_store != 0u ? float(half(head[tid])) : head[tid];
+}
+kernel void attn_gate_sigmoid_batch(device const float* src   [[buffer(0)]],
+                                    device float* dst         [[buffer(1)]],
+                                    constant uint& head_dim   [[buffer(2)]],
+                                    constant uint& per_token  [[buffer(3)]],
+                                    constant uint& tokens     [[buffer(4)]],
+                                    uint gid                  [[thread_position_in_grid]]) {
+    if (gid >= per_token * tokens) {
+        return;
+    }
+    const uint token = gid / per_token;
+    const uint local = gid % per_token;
+    const uint head = local / head_dim;
+    const float x = src[(ulong)token * 2u * per_token + head * 2u * head_dim + head_dim + (local % head_dim)];
+    dst[(ulong)token * per_token + local] = 1.0f / (1.0f + exp(-x));
+}
+
+kernel void attn_store_half_batch(device const float* src  [[buffer(0)]],
+                                  device float* dst        [[buffer(1)]],
+                                  constant uint& per_token [[buffer(2)]],
+                                  constant uint& tokens    [[buffer(3)]],
+                                  uint gid                 [[thread_position_in_grid]]) {
+    if (gid >= per_token * tokens) {
+        return;
+    }
+    dst[gid] = float(half(src[gid]));
+}
+
 
 kernel void attn_gate_sigmoid(device const float* src   [[buffer(0)]],
                               device float* dst         [[buffer(1)]],
@@ -1383,6 +1458,9 @@ struct MetalState {
     id<MTLComputePipelineState> rms_norm_pipeline = nil;
     id<MTLComputePipelineState> residual_add_pipeline = nil;
     id<MTLComputePipelineState> attn_prep_pipeline = nil;
+    id<MTLComputePipelineState> attn_prep_batch_pipeline = nil;
+    id<MTLComputePipelineState> attn_gate_batch_pipeline = nil;
+    id<MTLComputePipelineState> attn_store_batch_pipeline = nil;
     id<MTLComputePipelineState> attn_gate_pipeline = nil;
     id<MTLComputePipelineState> attn_flash_pipeline = nil;
     id<MTLComputePipelineState> attn_flash_batch_pipeline = nil;
@@ -1474,6 +1552,9 @@ void initialise(MetalState& state) {
             return function != nil ? [state.device newComputePipelineStateWithFunction:function error:&error] : nil;
         };
         state.attn_prep_pipeline = pipeline_for("attn_head_prep");
+        state.attn_prep_batch_pipeline = pipeline_for("attn_head_prep_batch");
+        state.attn_gate_batch_pipeline = pipeline_for("attn_gate_sigmoid_batch");
+        state.attn_store_batch_pipeline = pipeline_for("attn_store_half_batch");
         state.attn_gate_pipeline = pipeline_for("attn_gate_sigmoid");
         state.attn_flash_pipeline = pipeline_for("attn_flash");
         state.attn_flash_batch_pipeline = pipeline_for("attn_flash_batch");
@@ -3380,54 +3461,65 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
     // Head norms, RoPE, gate sigmoid and the f16 KV append for every token.
     const float hadamard_scale = 1.0F / std::sqrt(static_cast<float>(job.block_size));
     (void)hadamard_scale;
-    for (std::size_t t = 0; t < count; ++t) {
-        [encoder setComputePipelineState:s.attn_prep_pipeline];
-        [encoder setBuffer:b.qfull offset:static_cast<NSUInteger>(t * 2U * hidden * sizeof(float)) atIndex:0];
+    if (s.attn_prep_batch_pipeline != nil && s.attn_gate_batch_pipeline != nil &&
+        s.attn_store_batch_pipeline != nil) {
+        // Every token's prep, gate, K append and V store, one dispatch each.
+        const std::uint32_t tokens32 = static_cast<std::uint32_t>(count);
+        const std::uint32_t stride_q2 = static_cast<std::uint32_t>(2U * head_dim);
+        const std::uint32_t cos_stride32 = static_cast<std::uint32_t>(2U * half_rope);
+        const std::uint32_t heads32 = static_cast<std::uint32_t>(heads);
+
+        [encoder setComputePipelineState:s.attn_prep_batch_pipeline];
+        [encoder setBuffer:b.qfull offset:0 atIndex:0];
         [encoder setBuffer:norm_tables offset:q_norm_offset * sizeof(float) atIndex:1];
-        [encoder setBuffer:b.tables offset:static_cast<NSUInteger>(t * 2U * half_rope * sizeof(float)) atIndex:2];
-        [encoder setBuffer:b.tables
-                     offset:static_cast<NSUInteger>((t * 2U * half_rope + half_rope) * sizeof(float))
-                    atIndex:3];
-        [encoder setBuffer:b.q offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:4];
+        [encoder setBuffer:b.tables offset:0 atIndex:2];
+        [encoder setBuffer:b.tables offset:static_cast<NSUInteger>(half_rope * sizeof(float)) atIndex:3];
+        [encoder setBuffer:b.q offset:0 atIndex:4];
         [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:5];
         [encoder setBytes:&rope32 length:sizeof(rope32) atIndex:6];
         [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
-        [encoder setBytes:&stride_q length:sizeof(stride_q) atIndex:8];
+        [encoder setBytes:&stride_q2 length:sizeof(stride_q2) atIndex:8];
         [encoder setBytes:&half_store_off length:sizeof(half_store_off) atIndex:9];
-        [encoder dispatchThreadgroups:MTLSizeMake(heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+        [encoder setBytes:&heads32 length:sizeof(heads32) atIndex:10];
+        [encoder setBytes:&cos_stride32 length:sizeof(cos_stride32) atIndex:11];
+        [encoder dispatchThreadgroups:MTLSizeMake(heads * count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
 
-        [encoder setComputePipelineState:s.attn_gate_pipeline];
-        [encoder setBuffer:b.qfull offset:static_cast<NSUInteger>(t * 2U * hidden * sizeof(float)) atIndex:0];
-        [encoder setBuffer:b.gates offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
+        [encoder setComputePipelineState:s.attn_gate_batch_pipeline];
+        [encoder setBuffer:b.qfull offset:0 atIndex:0];
+        [encoder setBuffer:b.gates offset:0 atIndex:1];
         [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:2];
         [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:3];
-        [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        [encoder setBytes:&tokens32 length:sizeof(tokens32) atIndex:4];
+        [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
-        [encoder setComputePipelineState:s.attn_prep_pipeline];
-        [encoder setBuffer:b.k_new offset:static_cast<NSUInteger>(t * kv_head_elems * sizeof(float)) atIndex:0];
+        const std::uint32_t heads_kv32b = static_cast<std::uint32_t>(heads_kv);
+        [encoder setComputePipelineState:s.attn_prep_batch_pipeline];
+        [encoder setBuffer:b.k_new offset:0 atIndex:0];
         [encoder setBuffer:norm_tables offset:k_norm_offset * sizeof(float) atIndex:1];
-        [encoder setBuffer:b.tables offset:static_cast<NSUInteger>(t * 2U * half_rope * sizeof(float)) atIndex:2];
-        [encoder setBuffer:b.tables
-                     offset:static_cast<NSUInteger>((t * 2U * half_rope + half_rope) * sizeof(float))
-                    atIndex:3];
-        [encoder setBuffer:kv
-                     offset:static_cast<NSUInteger>(cached_bytes + t * kv_head_elems * sizeof(float))
-                    atIndex:4];
+        [encoder setBuffer:b.tables offset:0 atIndex:2];
+        [encoder setBuffer:b.tables offset:static_cast<NSUInteger>(half_rope * sizeof(float)) atIndex:3];
+        [encoder setBuffer:kv offset:static_cast<NSUInteger>(cached_bytes) atIndex:4];
         [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:5];
         [encoder setBytes:&rope32 length:sizeof(rope32) atIndex:6];
         [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
         [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:8];
         [encoder setBytes:&half_store_on length:sizeof(half_store_on) atIndex:9];
-        [encoder dispatchThreadgroups:MTLSizeMake(heads_kv, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+        [encoder setBytes:&heads_kv32b length:sizeof(heads_kv32b) atIndex:10];
+        [encoder setBytes:&cos_stride32 length:sizeof(cos_stride32) atIndex:11];
+        [encoder dispatchThreadgroups:MTLSizeMake(heads_kv * count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
 
-        [encoder setComputePipelineState:s.attn_store_pipeline];
-        [encoder setBuffer:b.v_new offset:static_cast<NSUInteger>(t * kv_head_elems * sizeof(float)) atIndex:0];
-        [encoder setBuffer:kv
-                     offset:static_cast<NSUInteger>(kv_plane_bytes + cached_bytes + t * kv_head_elems * sizeof(float))
-                    atIndex:1];
+        [encoder setComputePipelineState:s.attn_store_batch_pipeline];
+        [encoder setBuffer:b.v_new offset:0 atIndex:0];
+        [encoder setBuffer:kv offset:static_cast<NSUInteger>(kv_plane_bytes + cached_bytes) atIndex:1];
         [encoder setBytes:&kv_elems32 length:sizeof(kv_elems32) atIndex:2];
-        [encoder dispatchThreads:MTLSizeMake(kv_head_elems, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        [encoder setBytes:&tokens32 length:sizeof(tokens32) atIndex:3];
+        [encoder dispatchThreads:MTLSizeMake(kv_head_elems * count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     }
+
+
     // Each token's attention over the cache up to its own position.
     const bool flash_batched = s.attn_flash_batch_pipeline != nil;
     if (flash_batched) {
