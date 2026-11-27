@@ -330,6 +330,12 @@ struct Q8_0Blocks {
 [[nodiscard]] inline float dot_iq2_s_q8_k_avx2(const std::uint8_t*, const Q8KBlocks&, std::uint64_t);
 #endif
 
+// hsum of an 8-lane accumulator: ((l0+l4)+(l2+l6)) + ((l1+l5)+(l3+l7)),
+// the same reduction the AVX2 kernels use, available on every architecture.
+[[nodiscard]] inline float hsum_float_8(const float* lanes) {
+    return ((lanes[0] + lanes[4]) + (lanes[2] + lanes[6])) + ((lanes[1] + lanes[5]) + (lanes[3] + lanes[7]));
+}
+
 [[nodiscard]] inline float dot_q6_k_q8_k(const std::uint8_t* data, const Q8KBlocks& q8, std::uint64_t blocks) {
 #if defined(__AVX2__) && defined(__FMA__)
     return dot_q6_k_q8_k_avx2(data, q8, blocks);
@@ -369,14 +375,10 @@ struct Q8_0Blocks {
             q += 16;
         }
         for (int l = 0; l < 8; ++l) {
-            sums[l] += d * static_cast<float>(aux32[l]);
+            sums[l] = std::fma(d, static_cast<float>(aux32[l]), sums[l]);
         }
     }
-    float total = 0.0F;
-    for (const float value : sums) {
-        total += value;
-    }
-    return total;
+    return hsum_float_8(sums);
 #endif
 }
 
@@ -434,12 +436,6 @@ struct Q8_0Blocks {
     float value = 0.0F;
     std::memcpy(&value, &wide, sizeof(value));
     return value;
-}
-
-// hsum of an 8-lane accumulator: ((l0+l4)+(l2+l6)) + ((l1+l5)+(l3+l7)),
-// the same reduction the AVX2 kernels use, available on every architecture.
-[[nodiscard]] inline float hsum_float_8(const float* lanes) {
-    return ((lanes[0] + lanes[4]) + (lanes[2] + lanes[6])) + ((lanes[1] + lanes[5]) + (lanes[3] + lanes[7]));
 }
 
 #if defined(__AVX2__) && defined(__FMA__)

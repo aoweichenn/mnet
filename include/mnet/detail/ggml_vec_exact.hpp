@@ -19,6 +19,11 @@ namespace mnet::detail {
     return ((lanes[0] + lanes[4]) + (lanes[2] + lanes[6])) + ((lanes[1] + lanes[5]) + (lanes[3] + lanes[7]));
 }
 
+// The two reduction trees llama.cpp uses for an 8-lane vector.
+[[nodiscard]] inline float ggml_hsum8_hadd(const float* lanes) {
+    return ((lanes[0] + lanes[4]) + (lanes[1] + lanes[5])) + ((lanes[2] + lanes[6]) + (lanes[3] + lanes[7]));
+}
+
 [[nodiscard]] inline bool ggml_abs_gt(float value, float limit) {
     // _mm256_cmp_ps(andnot(-0.0f, value), limit, _CMP_GT_OQ): ordered compare,
     // so NaN compares false.
@@ -75,16 +80,14 @@ namespace mnet::detail {
     for (std::size_t l = 0; l < 8; ++l) {
         lanes[l] = (sums[0][l] + sums[2][l]) + (sums[1][l] + sums[3][l]);
     }
-    float total = ggml_hsum8(lanes);
-    const std::size_t tail = size - aligned;
-    const std::size_t rounded = tail - tail % 4;
-    std::size_t i = aligned;
-    for (std::size_t k = 0; k < rounded; ++k, ++i) {
+    // ggml_vec_dot_f32 reduces with _mm_hadd_ps twice, which is a different
+    // tree from the hsum used by the quantised dots.
+    float total = ggml_hsum8_hadd(lanes);
+    // The leftover path materialises each product and adds it, which is what
+    // ggml_vec_dot_f32 does (and keeps the result independent of contraction).
+    for (std::size_t i = aligned; i < size; ++i) {
         volatile float product = x[i] * y[i];
         total += product;
-    }
-    for (; i < size; ++i) {
-        total = std::fma(x[i], y[i], total);
     }
     return total;
 }
