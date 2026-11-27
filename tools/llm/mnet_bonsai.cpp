@@ -467,8 +467,7 @@ private:
         const auto signs_hidden = this->reader_.signs_for_width(static_cast<std::uint32_t>(this->config_.n_ff));
         std::vector<float> down(this->config_.n_embd);
         bool fused = false;
-        if (dump_dir == nullptr && mnet::detail::compute::fast_path_enabled() &&
-            mnet::detail::compute::fused_ffn_enabled()) {
+        if (mnet::detail::compute::fast_path_enabled() && mnet::detail::compute::fused_ffn_enabled()) {
             fused = Reader::ffn_swiglu(w.ffn_gate, w.ffn_up, w.ffn_down, ph.data(), signs_hidden.data(),
                                        this->config_.hadamard_block, down.data());
         }

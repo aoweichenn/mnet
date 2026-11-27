@@ -17,8 +17,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 namespace mnet::detail::compute {
@@ -134,14 +136,15 @@ kernel void sign_scale(device const float* in  [[buffer(0)]],
 
 // Normalised in-place Hadamard over one 256-value block, same butterfly order
 // as the CPU fwht (a+b, a-b per stage), one threadgroup of 256 threads.
-kernel void fwht256(device float* data          [[buffer(0)]],
-                    uint tgid                   [[threadgroup_position_in_grid]],
-                    uint lane                   [[thread_position_in_threadgroup]]) {
-    threadgroup float v[256];
-    const uint base = tgid * 256u;
+kernel void fwht_block(device float* data       [[buffer(0)]],
+                       constant uint& block_size [[buffer(1)]],
+                       uint tgid                 [[threadgroup_position_in_grid]],
+                       uint lane                 [[thread_position_in_threadgroup]]) {
+    threadgroup float v[1024];
+    const uint base = tgid * block_size;
     v[lane] = data[base + lane];
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint len = 1u; len < 256u; len <<= 1u) {
+    for (uint len = 1u; len < block_size; len <<= 1u) {
         if ((lane & len) == 0u) {
             const float a = v[lane];
             const float b = v[lane + len];
@@ -228,7 +231,7 @@ void initialise(MetalState& state) {
     if (sign_scale_function != nil) {
         state.sign_scale_pipeline = [state.device newComputePipelineStateWithFunction:sign_scale_function error:&error];
     }
-    id<MTLFunction> fwht_function = library != nil ? [library newFunctionWithName:@"fwht256"] : nil;
+    id<MTLFunction> fwht_function = library != nil ? [library newFunctionWithName:@"fwht_block"] : nil;
     if (fwht_function != nil) {
         state.fwht_pipeline = [state.device newComputePipelineStateWithFunction:fwht_function error:&error];
     }
@@ -397,7 +400,7 @@ bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const Matvec
         s.fwht_pipeline == nil) {
         return false;
     }
-    if (block_size != 256U) {
+    if (block_size < 64U || block_size > 1024U || (block_size & (block_size - 1U)) != 0U) {
         return false;
     }
     if (gate.type != 42U || up.type != 42U || down.type != 42U) {
@@ -456,6 +459,8 @@ bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const Matvec
     [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:3];
     [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
+    const bool skip_hadamard = std::getenv("MNET_FFN_SKIP_HADAMARD") != nullptr;
+    if (!skip_hadamard) {
     [encoder setComputePipelineState:s.sign_scale_pipeline];
     [encoder setBuffer:act_buffer offset:0 atIndex:0];
     [encoder setBuffer:signs_buffer offset:0 atIndex:1];
@@ -465,10 +470,14 @@ bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const Matvec
     [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:4];
     [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
-    [encoder setComputePipelineState:s.fwht_pipeline];
-    [encoder setBuffer:act_buffer offset:0 atIndex:0];
-    [encoder dispatchThreadgroups:MTLSizeMake(hidden / block_size, 1, 1)
-            threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
+    if (std::getenv("MNET_FFN_SKIP_FWHT") == nullptr) {
+        [encoder setComputePipelineState:s.fwht_pipeline];
+        [encoder setBuffer:act_buffer offset:0 atIndex:0];
+        [encoder setBytes:&block_size length:sizeof(block_size) atIndex:1];
+        [encoder dispatchThreadgroups:MTLSizeMake(hidden / block_size, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
+    }
+    }
 
     [encoder setComputePipelineState:s.quantize_pipeline];
     [encoder setBuffer:act_buffer offset:0 atIndex:0];
@@ -485,6 +494,21 @@ bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const Matvec
         return false;
     }
     std::memcpy(down.out, out_buffer.contents, static_cast<std::size_t>(down.rows) * sizeof(float));
+    if (const char* dir = std::getenv("MNET_FFN_DEBUG_DIR"); dir != nullptr) {
+        const std::string prefix(dir);
+        const auto write = [&](const char* name, const void* data, std::size_t bytes) {
+            if (std::FILE* file = std::fopen((prefix + "/" + name).c_str(), "wb")) {
+                std::fwrite(data, 1, bytes, file);
+                std::fclose(file);
+            }
+        };
+        write("gpu-gate.f32", gate_buffer.contents, static_cast<std::size_t>(hidden) * sizeof(float));
+        write("gpu-up.f32", up_buffer.contents, static_cast<std::size_t>(hidden) * sizeof(float));
+        write("gpu-act.f32", act_buffer.contents, static_cast<std::size_t>(hidden) * sizeof(float));
+        write("gpu-actq8.bin", act_q8_buffer.contents, static_cast<std::size_t>(hidden));
+        write("gpu-actscale.f32", act_scale_buffer.contents, static_cast<std::size_t>(hidden / 32U) * sizeof(float));
+        write("gpu-out.f32", out_buffer.contents, static_cast<std::size_t>(down.rows) * sizeof(float));
+    }
     return true;
 }
 

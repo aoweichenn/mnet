@@ -169,8 +169,10 @@ bool fast_path_enabled() {
 }
 
 bool fused_ffn_enabled() {
-    static const bool enabled = std::getenv("MNET_METAL_FUSED_FFN") != nullptr;
-    return enabled;
+    // On by default with the fast path; MNET_NO_FUSED_FFN forces the
+    // step-by-step block for A/B tests.
+    static const bool disabled = std::getenv("MNET_NO_FUSED_FFN") != nullptr;
+    return !disabled;
 }
 
 }  // namespace mnet::detail::compute

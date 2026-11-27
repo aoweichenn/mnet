@@ -542,7 +542,8 @@ void Reader::matvec_batch(std::initializer_list<std::pair<const Quantized*, floa
 
 bool Reader::ffn_swiglu(const Quantized& gate, const Quantized& up, const Quantized& down, const float* input,
                         const std::int32_t* signs, std::uint32_t block_size, float* output) {
-    if (gate.type != kGgmlQ2_0 || up.type != kGgmlQ2_0 || down.type != kGgmlQ2_0 || block_size != 256U) {
+    if (gate.type != kGgmlQ2_0 || up.type != kGgmlQ2_0 || down.type != kGgmlQ2_0 || block_size < 64U ||
+        block_size > 1024U || (block_size & (block_size - 1U)) != 0U) {
         return false;
     }
     const auto info = type_info(gate.type);
