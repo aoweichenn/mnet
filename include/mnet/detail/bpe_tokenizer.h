@@ -80,7 +80,7 @@ private:
 
     bool use_byte_encoder_ = false;
     std::vector<std::uint32_t> byte_encoder_;
-    std::map<std::uint32_t, uint8_t> byte_decoder_;
+    std::map<std::uint32_t, std::uint8_t> byte_decoder_;
 
     mutable std::unordered_map<std::string, std::vector<std::string>> bpe_cache_;
     mutable std::mutex cache_mu_;

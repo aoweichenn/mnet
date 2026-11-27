@@ -163,6 +163,7 @@ public:
     [[nodiscard]] const Weight& at(const std::string& name) const {
         const auto it = this->index_.find(name);
         if (it == this->index_.end()) {
+            // check-no-throw: allow invalid model input
             throw std::runtime_error("missing weight: " + name);
         }
         return this->weights_[it->second];

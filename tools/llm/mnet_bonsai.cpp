@@ -770,7 +770,7 @@ private:
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(std::int32_t argc, char** argv) {
     try {
         if (argc < 4) {
             std::fprintf(stderr,
@@ -789,7 +789,7 @@ int main(int argc, char** argv) {
         std::string text;
         std::string save_state_path;
         std::string load_state_path;
-        for (int i = 4; i + 1 < argc; i += 2) {
+        for (std::int32_t i = 4; i + 1 < argc; i += 2) {
             const std::string flag = argv[i];
             if (flag == "--start-pos") {
                 start_pos = std::stoul(argv[i + 1]);

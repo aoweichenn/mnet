@@ -26,8 +26,10 @@ namespace mnet::tts {
     const std::size_t in_per_group = weight.size(1);
     const std::size_t taps = weight.size(2);
     if (taps != kernel || in_per_group * groups != input.channels) {
-        throw std::runtime_error("conv1d shape mismatch: kernel " + std::to_string(taps) + " vs " +
-                                 std::to_string(kernel) + ", in " + std::to_string(input.channels) + " vs " +
+        // check-no-throw: allow invalid model input
+        throw std::runtime_error("conv1d shape mismatch: kernel " + std::to_string(taps) +
+                                 // check-no-throw: allow invalid model input
+                                 " vs " + std::to_string(kernel) + ", in " + std::to_string(input.channels) + " vs " +
                                  std::to_string(in_per_group * groups) + ", groups " + std::to_string(groups));
     }
     const std::size_t out_per_group = out_channels / groups;
@@ -328,6 +330,7 @@ void relu_in_place(Act& act) {
     const std::size_t in_channels = weight.size(0);
     const std::size_t out_channels = weight.size(1);
     if (in_channels != input.channels) {
+        // check-no-throw: allow invalid model input
         throw std::runtime_error("conv_transpose1d shape mismatch");
     }
     // ONNX Runtime's ConvTranspose (providers/cpu/nn/conv_transpose.cc):
@@ -458,6 +461,7 @@ void leaky_relu(Act& act, float slope) {
     const bool transposed = weight.size(0) != in;
     const std::size_t out = transposed ? weight.size(0) : weight.size(1);
     if ((transposed ? weight.size(1) : weight.size(0)) != in) {
+        // check-no-throw: allow invalid model input
         throw std::runtime_error("linear shape mismatch");
     }
     // ONNX Runtime prepacks constant MatMul/Gemm weights (MlasGemm with

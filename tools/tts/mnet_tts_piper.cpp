@@ -530,7 +530,7 @@ struct Config {
 
 namespace mnet_tts {
 
-[[nodiscard]] int run_piper(const TtsOptions& opt, const Weights& weights) {
+[[nodiscard]] std::int32_t run_piper(const TtsOptions& opt, const Weights& weights) {
     Reference ref;
     if (!opt.ref_dir.empty()) {
         ref.load(opt.ref_dir);

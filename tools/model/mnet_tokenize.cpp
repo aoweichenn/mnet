@@ -12,7 +12,7 @@
 #include <mnet/gguf.hpp>
 #include <mnet/tokenizer/bpe.hpp>
 
-int main(int argc, char** argv) {
+int main(std::int32_t argc, char** argv) {
     try {
         if (argc < 3) {
             std::fprintf(stderr, "usage: mnet_tokenize MODEL.gguf -p TEXT | -f FILE | --stdin [--decode IDS]\n");
@@ -23,7 +23,7 @@ int main(int argc, char** argv) {
         std::string text;
         std::vector<std::int32_t> decode_ids;
         bool decode = false;
-        for (int i = 2; i < argc; ++i) {
+        for (std::int32_t i = 2; i < argc; ++i) {
             const std::string arg = argv[i];
             if (arg == "-p" && i + 1 < argc) {
                 text = argv[++i];
@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
             }
         }
         bool words = false;
-        for (int i = 2; i < argc; ++i) {
+        for (std::int32_t i = 2; i < argc; ++i) {
             if (std::string(argv[i]) == "--words") {
                 words = true;
             }

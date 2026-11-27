@@ -146,7 +146,7 @@ inline void swiglu(float* out, const float* gate, const float* up, std::size_t s
         }
         return std::numeric_limits<float>::quiet_NaN();
     }
-    int exponent = 0;                                       // check-types: allow std::frexp takes int*
+    std::int32_t exponent = 0;                              // check-types: allow std::frexp takes int*
     const float mantissa = std::frexp(value, &exponent);    // [0.5, 1)
     const float t = (mantissa - 1.0F) / (mantissa + 1.0F);  // |t| <= 1/3
     const float t2 = t * t;
@@ -181,7 +181,7 @@ inline void swiglu(float* out, const float* gate, const float* up, std::size_t s
     if (value <= 0.0) {
         return value == 0.0 ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::quiet_NaN();
     }
-    int exponent = 0;  // check-types: allow std::frexp takes int*
+    std::int32_t exponent = 0;  // check-types: allow std::frexp takes int*
     const double mantissa = std::frexp(value, &exponent);
     const double t = (mantissa - 1.0) / (mantissa + 1.0);
     const double t2 = t * t;

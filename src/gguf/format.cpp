@@ -57,7 +57,7 @@ bool& ggml_tinyblas_batch() {
     }
 }
 
-[[nodiscard]] int nearest_int(float value) {
+[[nodiscard]] std::int32_t nearest_int(float value) {
     // The barrier keeps the compiler from contracting the caller's `x * id` into
     // an fma with the +12582912 below: that would round the product+offset once
     // instead of rounding the product first, which flips exact .5 ties.
@@ -65,7 +65,7 @@ bool& ggml_tinyblas_batch() {
     const float val = rounded_input + 12582912.0F;
     std::uint32_t bits = 0;
     std::memcpy(&bits, &val, sizeof(bits));
-    return static_cast<int>(bits & 0x007FFFFFU) - 0x00400000;
+    return static_cast<std::int32_t>(bits & 0x007FFFFFU) - 0x00400000;
 }
 
 [[nodiscard]] std::uint16_t float_to_half(float value) {
@@ -116,7 +116,7 @@ bool& ggml_tinyblas_batch() {
         const float iscale = -127.0F / max;
         const float d = 1.0F / iscale;
         for (std::size_t j = 0; j < 256; ++j) {
-            int q = nearest_int(iscale * input[base + j]);
+            std::int32_t q = nearest_int(iscale * input[base + j]);
             q = std::min(127, q);
             out[base + j] = static_cast<float>(q) * d;
         }
@@ -200,12 +200,12 @@ bool& ggml_tinyblas_batch() {
         }
         const float iscale = -127.0F / max;
         for (std::size_t j = 0; j < 256; ++j) {
-            int q = nearest_int(iscale * input[b * 256 + j]);
+            std::int32_t q = nearest_int(iscale * input[b * 256 + j]);
             q = std::min(127, q);
             out.qs[b * 256 + j] = static_cast<std::int8_t>(q);
         }
         for (std::size_t g = 0; g < 16; ++g) {
-            int sum = 0;
+            std::int32_t sum = 0;
             for (std::size_t j = 0; j < 16; ++j) {
                 sum += out.qs[b * 256 + g * 16 + j];
             }
@@ -294,11 +294,11 @@ bool& ggml_tinyblas_batch() {
     if (exponent == 0) {
         return static_cast<float>(mantissa) * (1.0F / 512.0F);
     }
-    return std::ldexp(1.0F + static_cast<float>(mantissa) / 8.0F, static_cast<int>(exponent) - 7);
+    return std::ldexp(1.0F + static_cast<float>(mantissa) / 8.0F, static_cast<std::int32_t>(exponent) - 7);
 }
 
-void get_scale_min_k4(int j, const std::uint8_t* q, std::uint8_t& d, std::uint8_t& m) {
-    const auto byte = [q](int index) { return static_cast<std::uint32_t>(q[index]); };
+void get_scale_min_k4(std::int32_t j, const std::uint8_t* q, std::uint8_t& d, std::uint8_t& m) {
+    const auto byte = [q](std::int32_t index) { return static_cast<std::uint32_t>(q[index]); };
     if (j < 4) {
         d = static_cast<std::uint8_t>(byte(j) & 63U);
         m = static_cast<std::uint8_t>(byte(j + 4) & 63U);

@@ -422,7 +422,7 @@ std::string ctc_decode(const mnet::Mat& out, const std::vector<std::string>& dic
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(std::int32_t argc, char** argv) {
     std::string det_param;
     std::string det_bin;
     std::string rec_param;

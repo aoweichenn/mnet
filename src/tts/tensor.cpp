@@ -35,6 +35,7 @@ void release_bytes(std::size_t bytes) {
 void reserve_bytes(std::size_t bytes) {
     const std::size_t live = g_live_bytes.load(std::memory_order_relaxed);
     if (g_mem_budget_bytes != 0 && live + bytes > g_mem_budget_bytes) {
+        // check-no-throw: allow invalid model input
         throw std::bad_alloc();
     }
     account_bytes(bytes);

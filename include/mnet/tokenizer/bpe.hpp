@@ -27,7 +27,7 @@ namespace mnet::bpe {
 enum class PreTokenizer { Qwen35, Gpt4o };
 
 [[nodiscard]] inline std::uint32_t utf8_decode(std::string_view text, std::size_t& offset) {
-    const auto byte = static_cast<unsigned char>(text[offset]);
+    const auto byte = static_cast<std::uint8_t>(text[offset]);
     if (byte < 0x80U) {
         ++offset;
         return byte;
@@ -52,7 +52,7 @@ enum class PreTokenizer { Qwen35, Gpt4o };
         return byte;
     }
     for (std::size_t i = 1; i < length; ++i) {
-        const auto next = static_cast<unsigned char>(text[offset + i]);
+        const auto next = static_cast<std::uint8_t>(text[offset + i]);
         if ((next & 0xC0U) != 0x80U) {
             ++offset;
             return byte;

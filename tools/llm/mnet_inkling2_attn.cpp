@@ -177,7 +177,7 @@ void clip_rows(std::vector<float>& values, const std::vector<float>& scale, std:
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(std::int32_t argc, char** argv) {
     try {
         if (argc < 4) {
             std::fprintf(stderr,
@@ -195,7 +195,7 @@ int main(int argc, char** argv) {
         std::string input_path;
         std::string bank_path;
         std::string bank_out_path;
-        for (int i = 4; i + 1 < argc; i += 2) {
+        for (std::int32_t i = 4; i + 1 < argc; i += 2) {
             if (std::string(argv[i]) == "--layer") {
                 layer = std::stoul(argv[i + 1]);
             } else if (std::string(argv[i]) == "--input") {

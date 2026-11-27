@@ -463,9 +463,9 @@ void snake_inplace(Act& act, const Weight& alpha) {
 // ONNX Runtime's radix-2 FFT (core/providers/cpu/signal/dft.cc, fft_radix2):
 // bit-reversed input, `V` holds the bit-reversed twiddles, and the inverse
 // transform reuses the forward table and only scales by 1/N.
-std::size_t ort_bit_reverse(std::size_t index, unsigned bits) {
+std::size_t ort_bit_reverse(std::size_t index, std::uint32_t bits) {
     std::size_t result = 0;
-    for (unsigned b = 0; b < bits; ++b) {
+    for (std::uint32_t b = 0; b < bits; ++b) {
         result = (result << 1U) | (index & 1U);
         index >>= 1U;
     }
@@ -474,14 +474,14 @@ std::size_t ort_bit_reverse(std::size_t index, unsigned bits) {
 
 void ort_fft(std::complex<float>* out, const std::complex<float>* in, std::size_t length,
              const std::vector<std::complex<float>>& v, bool inverse) {
-    unsigned bits = 0;
+    std::uint32_t bits = 0;
     while ((static_cast<std::size_t>(1) << bits) < length) {
         ++bits;
     }
     for (std::size_t i = 0; i < length; ++i) {
         out[i] = in[ort_bit_reverse(i, bits)];
     }
-    unsigned current_bits = 0;
+    std::uint32_t current_bits = 0;
     for (std::size_t span = 2; span <= length; span <<= 1U) {
         const std::size_t mid = span >> 1U;
         ++current_bits;
@@ -659,7 +659,7 @@ private:
 
 namespace mnet_tts {
 
-[[nodiscard]] int run_kokoro(const TtsOptions& opt, const Weights& weights) {
+[[nodiscard]] std::int32_t run_kokoro(const TtsOptions& opt, const Weights& weights) {
     Reference kokoro_ref;
     if (!opt.ref_dir.empty()) {
         kokoro_ref.load(opt.ref_dir);
@@ -888,7 +888,7 @@ namespace mnet_tts {
     std::vector<float> frame_mask(static_cast<std::size_t>(frame_total), 1.0F);
     Act f0_values;
     Act n_values;
-    for (int head = 0; head < 2; ++head) {
+    for (std::int32_t head = 0; head < 2; ++head) {
         const std::string name = head == 0 ? "F0" : "N";
         Act head_act = shared;
         const std::string divs[3] = {"Div_2", "Div_4", "Div_2"};

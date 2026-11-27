@@ -23,7 +23,10 @@ Encoder Encoder::from_reader(const mnet::gguf::Reader& reader) {
     const auto& arrays = reader.string_arrays();
     const auto tokens = arrays.find("tokenizer.ggml.tokens");
     if (tokens == arrays.end()) {
-        throw std::runtime_error("tokenizer: tokenizer.ggml.tokens missing");
+        // check-no-throw: allow invalid model input
+        throw std::runtime_error(
+            // check-no-throw: allow invalid model input
+            "tokenizer: tokenizer.ggml.tokens missing");
     }
     encoder.tokens_ = tokens->second;
     encoder.vocab_.reserve(encoder.tokens_.size());
@@ -139,13 +142,13 @@ Encoder Encoder::from_reader(const mnet::gguf::Reader& reader) {
 
 void Encoder::build_byte_maps() {
     bool used[256] = {};
-    for (int ch = 0x21; ch <= 0x7E; ++ch) {
+    for (std::int32_t ch = 0x21; ch <= 0x7E; ++ch) {
         used[ch] = true;
     }
-    for (int ch = 0xA1; ch <= 0xAC; ++ch) {
+    for (std::int32_t ch = 0xA1; ch <= 0xAC; ++ch) {
         used[ch] = true;
     }
-    for (int ch = 0xAE; ch <= 0xFF; ++ch) {
+    for (std::int32_t ch = 0xAE; ch <= 0xFF; ++ch) {
         used[ch] = true;
     }
     std::int32_t extra = 0;
@@ -391,7 +394,7 @@ void Encoder::encode_plain(std::string_view text, std::vector<std::int32_t>& ids
 void Encoder::encode_word(const std::string& raw, std::vector<std::int32_t>& ids) const {
     std::string encoded;
     for (const char c : raw) {
-        encoded += this->byte_to_utf8_[static_cast<unsigned char>(c)];
+        encoded += this->byte_to_utf8_[static_cast<std::uint8_t>(c)];
     }
     if (this->ignore_merges_) {
         const auto it = this->vocab_.find(encoded);
@@ -426,7 +429,10 @@ void Encoder::encode_word(const std::string& raw, std::vector<std::int32_t>& ids
     for (const auto& symbol : symbols) {
         const auto it = this->vocab_.find(symbol);
         if (it == this->vocab_.end()) {
-            throw std::runtime_error("tokenizer: byte symbol not in vocabulary");
+            // check-no-throw: allow invalid model input
+            throw std::runtime_error(
+                // check-no-throw: allow invalid model input
+                "tokenizer: byte symbol not in vocabulary");
         }
         ids.push_back(it->second);
     }

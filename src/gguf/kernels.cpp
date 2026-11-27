@@ -80,12 +80,12 @@ namespace mnet::gguf {
         }
         std::uint32_t sumi[8] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
         std::size_t is = 0;
-        for (int j = 0; j < 2; ++j) {
+        for (std::int32_t j = 0; j < 2; ++j) {
             const std::uint8_t* ql1 = ql + static_cast<std::size_t>(j) * 64U;
             const std::uint8_t* ql2 = ql1 + 32U;
             const std::uint8_t* qhb = qh + static_cast<std::size_t>(j) * 32U;
             const std::int8_t* q8b = q + static_cast<std::size_t>(j) * 128U;
-            for (int group = 0; group < 4; ++group) {
+            for (std::int32_t group = 0; group < 4; ++group) {
                 std::int32_t p16[16];
                 for (std::size_t idx = 0; idx < 32; ++idx) {
                     std::uint8_t low4;
@@ -452,7 +452,7 @@ namespace mnet::gguf {
         std::uint16_t sh = static_cast<std::uint16_t>(block[2] | (static_cast<std::uint16_t>(block[3]) << 8U));
         __m256i sumi1 = _mm256_setzero_si256();
         __m256i sumi2 = _mm256_setzero_si256();
-        for (int ib = 0; ib < 8; ib += 2) {
+        for (std::int32_t ib = 0; ib < 8; ib += 2) {
             const __m128i q4bits_1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(qs));
             qs += 16;
             const __m128i q4bits_2 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(qs));
@@ -469,8 +469,8 @@ namespace mnet::gguf {
                                         _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(q4bits_2, 4), m4b)), 1);
             const __m256i p16_1 = mul_add_epi8_avx2(q4b_1, q8b_1);
             const __m256i p16_2 = mul_add_epi8_avx2(q4b_2, q8b_2);
-            const int16_t ls1 = static_cast<int16_t>(((block[4 + ib / 2] & 0x0F) | ((sh << 4) & 0x30)) - 32);
-            const int16_t ls2 = static_cast<int16_t>(((block[4 + ib / 2] >> 4) | ((sh << 2) & 0x30)) - 32);
+            const std::int16_t ls1 = static_cast<std::int16_t>(((block[4 + ib / 2] & 0x0F) | ((sh << 4) & 0x30)) - 32);
+            const std::int16_t ls2 = static_cast<std::int16_t>(((block[4 + ib / 2] >> 4) | ((sh << 2) & 0x30)) - 32);
             sh = static_cast<std::uint16_t>(sh >> 4);
             sumi1 = _mm256_add_epi32(_mm256_madd_epi16(p16_1, _mm256_set1_epi16(ls1)), sumi1);
             sumi2 = _mm256_add_epi32(_mm256_madd_epi16(p16_2, _mm256_set1_epi16(ls2)), sumi2);
@@ -518,7 +518,7 @@ namespace mnet::gguf {
     return hsum_float_8_avx2(accum);
 }
 
-[[nodiscard]] static __m128i iq_scale_shuffle_avx2(int index) {
+[[nodiscard]] static __m128i iq_scale_shuffle_avx2(std::int32_t index) {
     alignas(16) static constexpr std::uint8_t kShuffle[128] = {
         0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  1,  1,  1,  1,  1,  1,  2,  2,  2,  2,  2,  2,  2,  2,  3,  3,
         3,  3,  3,  3,  3,  3,  4,  4,  4,  4,  4,  4,  4,  4,  5,  5,  5,  5,  5,  5,  5,  5,  6,  6,  6,  6,
@@ -545,8 +545,8 @@ namespace mnet::gguf {
         const __m256i scales16 = _mm256_cvtepi8_epi16(scales);
         const __m256i q8sclsub = _mm256_slli_epi32(_mm256_madd_epi16(q8sums, scales16), 5);
         __m256i sumi = _mm256_setzero_si256();
-        int is = 0;
-        for (int j = 0; j < 2; ++j) {
+        std::int32_t is = 0;
+        for (std::int32_t j = 0; j < 2; ++j) {
             const __m256i q4bits1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ql));
             ql += 32;
             const __m256i q4bits2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ql));
@@ -600,18 +600,18 @@ namespace mnet::gguf {
         const std::uint8_t* qs = block + 2;
         const auto* qh = reinterpret_cast<const std::uint16_t*>(block + 34);
         __m256i sumi = _mm256_setzero_si256();
-        int sumi1 = 0;
-        for (int ib = 0; ib < 8; ib += 2) {
+        std::int32_t sumi1 = 0;
+        for (std::int32_t ib = 0; ib < 8; ib += 2) {
             const __m256i q1b_1 =
-                _mm256_set_epi64x(static_cast<long long>(detail::kIq1sGrid[qs[3] | ((qh[ib] >> 1) & 0x700)]),
-                                  static_cast<long long>(detail::kIq1sGrid[qs[2] | ((qh[ib] << 2) & 0x700)]),
-                                  static_cast<long long>(detail::kIq1sGrid[qs[1] | ((qh[ib] << 5) & 0x700)]),
-                                  static_cast<long long>(detail::kIq1sGrid[qs[0] | ((qh[ib] << 8) & 0x700)]));
+                _mm256_set_epi64x(static_cast<std::int64_t>(detail::kIq1sGrid[qs[3] | ((qh[ib] >> 1) & 0x700)]),
+                                  static_cast<std::int64_t>(detail::kIq1sGrid[qs[2] | ((qh[ib] << 2) & 0x700)]),
+                                  static_cast<std::int64_t>(detail::kIq1sGrid[qs[1] | ((qh[ib] << 5) & 0x700)]),
+                                  static_cast<std::int64_t>(detail::kIq1sGrid[qs[0] | ((qh[ib] << 8) & 0x700)]));
             const __m256i q1b_2 =
-                _mm256_set_epi64x(static_cast<long long>(detail::kIq1sGrid[qs[7] | ((qh[ib + 1] >> 1) & 0x700)]),
-                                  static_cast<long long>(detail::kIq1sGrid[qs[6] | ((qh[ib + 1] << 2) & 0x700)]),
-                                  static_cast<long long>(detail::kIq1sGrid[qs[5] | ((qh[ib + 1] << 5) & 0x700)]),
-                                  static_cast<long long>(detail::kIq1sGrid[qs[4] | ((qh[ib + 1] << 8) & 0x700)]));
+                _mm256_set_epi64x(static_cast<std::int64_t>(detail::kIq1sGrid[qs[7] | ((qh[ib + 1] >> 1) & 0x700)]),
+                                  static_cast<std::int64_t>(detail::kIq1sGrid[qs[6] | ((qh[ib + 1] << 2) & 0x700)]),
+                                  static_cast<std::int64_t>(detail::kIq1sGrid[qs[5] | ((qh[ib + 1] << 5) & 0x700)]),
+                                  static_cast<std::int64_t>(detail::kIq1sGrid[qs[4] | ((qh[ib + 1] << 8) & 0x700)]));
             qs += 8;
             const __m256i q8b_1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q));
             q += 32;
@@ -654,7 +654,7 @@ namespace mnet::gguf {
         const std::int8_t* q = q8.qs.data() + i * 256;
         __m256i sumi1 = _mm256_setzero_si256();
         __m256i sumi2 = _mm256_setzero_si256();
-        for (int ib = 0; ib < 8; ib += 2) {
+        for (std::int32_t ib = 0; ib < 8; ib += 2) {
             const __m256i q8_1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q));
             q += 32;
             const __m256i q8_2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q));
@@ -663,22 +663,22 @@ namespace mnet::gguf {
             std::memcpy(aux32, q2, sizeof(aux32));
             q2 += 8;
             const auto* aux8 = reinterpret_cast<const std::uint8_t*>(aux32);
-            const __m256i grid_1 = _mm256_set_epi64x(static_cast<long long>(detail::kIq2xxsGrid[aux8[3]]),
-                                                     static_cast<long long>(detail::kIq2xxsGrid[aux8[2]]),
-                                                     static_cast<long long>(detail::kIq2xxsGrid[aux8[1]]),
-                                                     static_cast<long long>(detail::kIq2xxsGrid[aux8[0]]));
-            const __m256i grid_2 = _mm256_set_epi64x(static_cast<long long>(detail::kIq2xxsGrid[aux8[11]]),
-                                                     static_cast<long long>(detail::kIq2xxsGrid[aux8[10]]),
-                                                     static_cast<long long>(detail::kIq2xxsGrid[aux8[9]]),
-                                                     static_cast<long long>(detail::kIq2xxsGrid[aux8[8]]));
-            const __m256i s2_1 = _mm256_set_epi64x(static_cast<long long>(signs64[(aux32[1] >> 21) & 127U]),
-                                                   static_cast<long long>(signs64[(aux32[1] >> 14) & 127U]),
-                                                   static_cast<long long>(signs64[(aux32[1] >> 7) & 127U]),
-                                                   static_cast<long long>(signs64[aux32[1] & 127U]));
-            const __m256i s2_2 = _mm256_set_epi64x(static_cast<long long>(signs64[(aux32[3] >> 21) & 127U]),
-                                                   static_cast<long long>(signs64[(aux32[3] >> 14) & 127U]),
-                                                   static_cast<long long>(signs64[(aux32[3] >> 7) & 127U]),
-                                                   static_cast<long long>(signs64[aux32[3] & 127U]));
+            const __m256i grid_1 = _mm256_set_epi64x(static_cast<std::int64_t>(detail::kIq2xxsGrid[aux8[3]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xxsGrid[aux8[2]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xxsGrid[aux8[1]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xxsGrid[aux8[0]]));
+            const __m256i grid_2 = _mm256_set_epi64x(static_cast<std::int64_t>(detail::kIq2xxsGrid[aux8[11]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xxsGrid[aux8[10]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xxsGrid[aux8[9]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xxsGrid[aux8[8]]));
+            const __m256i s2_1 = _mm256_set_epi64x(static_cast<std::int64_t>(signs64[(aux32[1] >> 21) & 127U]),
+                                                   static_cast<std::int64_t>(signs64[(aux32[1] >> 14) & 127U]),
+                                                   static_cast<std::int64_t>(signs64[(aux32[1] >> 7) & 127U]),
+                                                   static_cast<std::int64_t>(signs64[aux32[1] & 127U]));
+            const __m256i s2_2 = _mm256_set_epi64x(static_cast<std::int64_t>(signs64[(aux32[3] >> 21) & 127U]),
+                                                   static_cast<std::int64_t>(signs64[(aux32[3] >> 14) & 127U]),
+                                                   static_cast<std::int64_t>(signs64[(aux32[3] >> 7) & 127U]),
+                                                   static_cast<std::int64_t>(signs64[aux32[3] & 127U]));
             const __m256i q8s_1 = _mm256_sign_epi8(q8_1, s2_1);
             const __m256i q8s_2 = _mm256_sign_epi8(q8_2, s2_2);
             const __m256i dot1 = _mm256_maddubs_epi16(grid_1, q8s_1);
@@ -725,12 +725,12 @@ namespace mnet::gguf {
         const std::int8_t* q = q8.qs.data() + i * 256;
         std::uint64_t aux64 = 0;
         std::memcpy(&aux64, block + 66, 8);
-        __m128i stmp = _mm_set1_epi64x(static_cast<long long>(aux64));
+        __m128i stmp = _mm_set1_epi64x(static_cast<std::int64_t>(aux64));
         stmp = _mm_unpacklo_epi8(_mm_and_si128(stmp, m4), _mm_and_si128(_mm_srli_epi16(stmp, 4), m4));
         const __m128i scales = _mm_add_epi8(_mm_slli_epi16(stmp, 1), m1);
         __m256i sumi1 = _mm256_setzero_si256();
         __m256i sumi2 = _mm256_setzero_si256();
-        for (int ib = 0; ib < 8; ib += 4) {
+        for (std::int32_t ib = 0; ib < 8; ib += 4) {
             const __m256i q2_data = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q2));
             q2 += 16;
             const __m256i aux_gindex = _mm256_and_si256(q2_data, m511);
@@ -748,22 +748,22 @@ namespace mnet::gguf {
             q += 32;
             const __m256i q8_4 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q));
             q += 32;
-            const __m256i grid_1 = _mm256_set_epi64x(static_cast<long long>(detail::kIq2xsGrid[gindex[3]]),
-                                                     static_cast<long long>(detail::kIq2xsGrid[gindex[2]]),
-                                                     static_cast<long long>(detail::kIq2xsGrid[gindex[1]]),
-                                                     static_cast<long long>(detail::kIq2xsGrid[gindex[0]]));
-            const __m256i grid_2 = _mm256_set_epi64x(static_cast<long long>(detail::kIq2xsGrid[gindex[7]]),
-                                                     static_cast<long long>(detail::kIq2xsGrid[gindex[6]]),
-                                                     static_cast<long long>(detail::kIq2xsGrid[gindex[5]]),
-                                                     static_cast<long long>(detail::kIq2xsGrid[gindex[4]]));
-            const __m256i grid_3 = _mm256_set_epi64x(static_cast<long long>(detail::kIq2xsGrid[gindex[11]]),
-                                                     static_cast<long long>(detail::kIq2xsGrid[gindex[10]]),
-                                                     static_cast<long long>(detail::kIq2xsGrid[gindex[9]]),
-                                                     static_cast<long long>(detail::kIq2xsGrid[gindex[8]]));
-            const __m256i grid_4 = _mm256_set_epi64x(static_cast<long long>(detail::kIq2xsGrid[gindex[15]]),
-                                                     static_cast<long long>(detail::kIq2xsGrid[gindex[14]]),
-                                                     static_cast<long long>(detail::kIq2xsGrid[gindex[13]]),
-                                                     static_cast<long long>(detail::kIq2xsGrid[gindex[12]]));
+            const __m256i grid_1 = _mm256_set_epi64x(static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[3]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[2]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[1]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[0]]));
+            const __m256i grid_2 = _mm256_set_epi64x(static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[7]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[6]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[5]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[4]]));
+            const __m256i grid_3 = _mm256_set_epi64x(static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[11]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[10]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[9]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[8]]));
+            const __m256i grid_4 = _mm256_set_epi64x(static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[15]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[14]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[13]]),
+                                                     static_cast<std::int64_t>(detail::kIq2xsGrid[gindex[12]]));
             const __m128i full_signs_l = _mm256_castsi256_si128(full_sign_bits);
             const __m128i full_signs_h = _mm256_extractf128_si256(full_sign_bits, 1);
             const __m256i full_signs_1 = _mm256_inserti128_si256(_mm256_castsi128_si256(full_signs_l), full_signs_l, 1);
@@ -811,34 +811,40 @@ namespace mnet::gguf {
         const std::int8_t* q = q8.qs.data() + i * 256;
         __m256i sumi1 = _mm256_setzero_si256();
         __m256i sumi2 = _mm256_setzero_si256();
-        for (int ib = 0; ib < 8; ib += 2) {
+        for (std::int32_t ib = 0; ib < 8; ib += 2) {
             const __m256i q8_1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q));
             q += 32;
             const __m256i q8_2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q));
             q += 32;
-            const __m256i grid_1 = _mm256_set_epi32(
-                static_cast<int>(detail::kIq3xxsGrid[q3[7]]), static_cast<int>(detail::kIq3xxsGrid[q3[6]]),
-                static_cast<int>(detail::kIq3xxsGrid[q3[5]]), static_cast<int>(detail::kIq3xxsGrid[q3[4]]),
-                static_cast<int>(detail::kIq3xxsGrid[q3[3]]), static_cast<int>(detail::kIq3xxsGrid[q3[2]]),
-                static_cast<int>(detail::kIq3xxsGrid[q3[1]]), static_cast<int>(detail::kIq3xxsGrid[q3[0]]));
+            const __m256i grid_1 = _mm256_set_epi32(static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[7]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[6]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[5]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[4]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[3]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[2]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[1]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[0]]));
             q3 += 8;
-            const __m256i grid_2 = _mm256_set_epi32(
-                static_cast<int>(detail::kIq3xxsGrid[q3[7]]), static_cast<int>(detail::kIq3xxsGrid[q3[6]]),
-                static_cast<int>(detail::kIq3xxsGrid[q3[5]]), static_cast<int>(detail::kIq3xxsGrid[q3[4]]),
-                static_cast<int>(detail::kIq3xxsGrid[q3[3]]), static_cast<int>(detail::kIq3xxsGrid[q3[2]]),
-                static_cast<int>(detail::kIq3xxsGrid[q3[1]]), static_cast<int>(detail::kIq3xxsGrid[q3[0]]));
+            const __m256i grid_2 = _mm256_set_epi32(static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[7]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[6]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[5]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[4]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[3]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[2]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[1]]),
+                                                    static_cast<std::int32_t>(detail::kIq3xxsGrid[q3[0]]));
             q3 += 8;
             std::uint32_t aux32[2] = {};
             std::memcpy(aux32, gas, sizeof(aux32));
             gas += 8;
-            const __m256i s2_1 = _mm256_set_epi64x(static_cast<long long>(signs64[(aux32[0] >> 21) & 127U]),
-                                                   static_cast<long long>(signs64[(aux32[0] >> 14) & 127U]),
-                                                   static_cast<long long>(signs64[(aux32[0] >> 7) & 127U]),
-                                                   static_cast<long long>(signs64[aux32[0] & 127U]));
-            const __m256i s2_2 = _mm256_set_epi64x(static_cast<long long>(signs64[(aux32[1] >> 21) & 127U]),
-                                                   static_cast<long long>(signs64[(aux32[1] >> 14) & 127U]),
-                                                   static_cast<long long>(signs64[(aux32[1] >> 7) & 127U]),
-                                                   static_cast<long long>(signs64[aux32[1] & 127U]));
+            const __m256i s2_1 = _mm256_set_epi64x(static_cast<std::int64_t>(signs64[(aux32[0] >> 21) & 127U]),
+                                                   static_cast<std::int64_t>(signs64[(aux32[0] >> 14) & 127U]),
+                                                   static_cast<std::int64_t>(signs64[(aux32[0] >> 7) & 127U]),
+                                                   static_cast<std::int64_t>(signs64[aux32[0] & 127U]));
+            const __m256i s2_2 = _mm256_set_epi64x(static_cast<std::int64_t>(signs64[(aux32[1] >> 21) & 127U]),
+                                                   static_cast<std::int64_t>(signs64[(aux32[1] >> 14) & 127U]),
+                                                   static_cast<std::int64_t>(signs64[(aux32[1] >> 7) & 127U]),
+                                                   static_cast<std::int64_t>(signs64[aux32[1] & 127U]));
             const __m256i q8s_1 = _mm256_sign_epi8(q8_1, s2_1);
             const __m256i q8s_2 = _mm256_sign_epi8(q8_2, s2_2);
             const __m256i dot1 = _mm256_maddubs_epi16(grid_1, q8s_1);
@@ -893,27 +899,28 @@ namespace mnet::gguf {
         std::memcpy(&aux64, block + 74, 8);
         const __m128i scales8 = _mm_add_epi8(
             _mm_slli_epi16(
-                _mm_and_si128(_mm_set_epi64x(static_cast<long long>(aux64 >> 4), static_cast<long long>(aux64)), m4),
+                _mm_and_si128(_mm_set_epi64x(static_cast<std::int64_t>(aux64 >> 4), static_cast<std::int64_t>(aux64)),
+                              m4),
                 1),
             m1);
         const __m256i scales16 = _mm256_cvtepi8_epi16(scales8);
         __m256i sumi1 = _mm256_setzero_si256();
         __m256i sumi2 = _mm256_setzero_si256();
-        for (int ib = 0; ib < 8; ib += 2) {
+        for (std::int32_t ib = 0; ib < 8; ib += 2) {
             const __m256i q8_1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q));
             q += 32;
             const __m256i q8_2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q));
             q += 32;
             const __m256i grid_1 =
-                _mm256_set_epi64x(static_cast<long long>(detail::kIq2sGrid[qs[3] | ((qh[ib] << 2) & 0x300)]),
-                                  static_cast<long long>(detail::kIq2sGrid[qs[2] | ((qh[ib] << 4) & 0x300)]),
-                                  static_cast<long long>(detail::kIq2sGrid[qs[1] | ((qh[ib] << 6) & 0x300)]),
-                                  static_cast<long long>(detail::kIq2sGrid[qs[0] | ((qh[ib] << 8) & 0x300)]));
+                _mm256_set_epi64x(static_cast<std::int64_t>(detail::kIq2sGrid[qs[3] | ((qh[ib] << 2) & 0x300)]),
+                                  static_cast<std::int64_t>(detail::kIq2sGrid[qs[2] | ((qh[ib] << 4) & 0x300)]),
+                                  static_cast<std::int64_t>(detail::kIq2sGrid[qs[1] | ((qh[ib] << 6) & 0x300)]),
+                                  static_cast<std::int64_t>(detail::kIq2sGrid[qs[0] | ((qh[ib] << 8) & 0x300)]));
             const __m256i grid_2 =
-                _mm256_set_epi64x(static_cast<long long>(detail::kIq2sGrid[qs[7] | ((qh[ib + 1] << 2) & 0x300)]),
-                                  static_cast<long long>(detail::kIq2sGrid[qs[6] | ((qh[ib + 1] << 4) & 0x300)]),
-                                  static_cast<long long>(detail::kIq2sGrid[qs[5] | ((qh[ib + 1] << 6) & 0x300)]),
-                                  static_cast<long long>(detail::kIq2sGrid[qs[4] | ((qh[ib + 1] << 8) & 0x300)]));
+                _mm256_set_epi64x(static_cast<std::int64_t>(detail::kIq2sGrid[qs[7] | ((qh[ib + 1] << 2) & 0x300)]),
+                                  static_cast<std::int64_t>(detail::kIq2sGrid[qs[6] | ((qh[ib + 1] << 4) & 0x300)]),
+                                  static_cast<std::int64_t>(detail::kIq2sGrid[qs[5] | ((qh[ib + 1] << 6) & 0x300)]),
+                                  static_cast<std::int64_t>(detail::kIq2sGrid[qs[4] | ((qh[ib + 1] << 8) & 0x300)]));
             qs += 8;
             __m256i aux256 = _mm256_set1_epi32(signs[0] | (static_cast<std::uint32_t>(signs[1]) << 16U));
             aux256 = _mm256_and_si256(_mm256_shuffle_epi8(aux256, mask1), mask2);
@@ -956,8 +963,9 @@ namespace mnet::gguf {
             const std::uint8_t* q = block + 2 + k * 8U;
             for (std::size_t j = 0; j < 8; ++j) {
                 const std::uint8_t byte = q[j];
-                const int lane = (((byte >> 0) & 3) - 1) * qy[j * 4U + 0U] + (((byte >> 2) & 3) - 1) * qy[j * 4U + 1U] +
-                                 (((byte >> 4) & 3) - 1) * qy[j * 4U + 2U] + (((byte >> 6) & 3) - 1) * qy[j * 4U + 3U];
+                const std::int32_t lane =
+                    (((byte >> 0) & 3) - 1) * qy[j * 4U + 0U] + (((byte >> 2) & 3) - 1) * qy[j * 4U + 1U] +
+                    (((byte >> 4) & 3) - 1) * qy[j * 4U + 2U] + (((byte >> 6) & 3) - 1) * qy[j * 4U + 3U];
                 acc[j] = std::fma(d, static_cast<float>(lane), acc[j]);
             }
         }
@@ -997,12 +1005,13 @@ namespace mnet::gguf {
             // pairs; real Q8_0 codes stay in [-127, 127] so this only matters
             // for synthetic data containing -128.
             const auto pair = [&](std::size_t k0) {
-                const int sum =
-                    static_cast<int>(static_cast<std::int8_t>(block[2U + j * 4U + k0])) * qy[j * 4U + k0] +
-                    static_cast<int>(static_cast<std::int8_t>(block[2U + j * 4U + k0 + 1U])) * qy[j * 4U + k0 + 1U];
+                const std::int32_t sum =
+                    static_cast<std::int32_t>(static_cast<std::int8_t>(block[2U + j * 4U + k0])) * qy[j * 4U + k0] +
+                    static_cast<std::int32_t>(static_cast<std::int8_t>(block[2U + j * 4U + k0 + 1U])) *
+                        qy[j * 4U + k0 + 1U];
                 return std::min(32767, std::max(-32768, sum));
             };
-            const int lane = pair(0) + pair(2);
+            const std::int32_t lane = pair(0) + pair(2);
             acc[j] = std::fma(d, static_cast<float>(lane), acc[j]);
         }
     }
@@ -1030,7 +1039,7 @@ namespace mnet::gguf {
         const std::int8_t* q = q8.qs.data() + b * 256U;
         std::uint32_t sumi1[8] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
         std::uint32_t sumi2[8] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
-        for (int ib = 0; ib < 8; ib += 2) {
+        for (std::int32_t ib = 0; ib < 8; ib += 2) {
             const std::int8_t* q8_1 = q;
             q += 32;
             const std::int8_t* q8_2 = q;
@@ -1104,7 +1113,7 @@ namespace mnet::gguf {
         }
         std::uint32_t sumi1[8] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
         std::uint32_t sumi2[8] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
-        for (int ib = 0; ib < 8; ib += 4) {
+        for (std::int32_t ib = 0; ib < 8; ib += 4) {
             std::uint16_t codes[16];
             std::memcpy(codes, q2, sizeof(codes));
             q2 += 16;
@@ -1121,7 +1130,7 @@ namespace mnet::gguf {
                 full_signs[2U * i] = static_cast<std::uint8_t>(static_cast<std::uint8_t>(partial & 0xFFU) | odd_lo);
                 full_signs[2U * i + 1U] = static_cast<std::uint8_t>(static_cast<std::uint8_t>(partial >> 8U) | odd_hi);
             }
-            for (int group = 0; group < 4; ++group) {
+            for (std::int32_t group = 0; group < 4; ++group) {
                 std::uint8_t grid[32];
                 for (std::size_t k = 0; k < 4; ++k) {
                     const std::uint16_t index =
@@ -1233,7 +1242,7 @@ namespace mnet::gguf {
         const std::int8_t* q = q8.qs.data() + b * 256U;
         std::int32_t sumi1[8] = {0, 0, 0, 0, 0, 0, 0, 0};
         std::int32_t sumi2[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-        for (int it = 0; it < 4; ++it) {
+        for (std::int32_t it = 0; it < 4; ++it) {
             const std::int8_t* q8_1 = q;
             q += 32;
             const std::int8_t* q8_2 = q;
@@ -1296,7 +1305,7 @@ namespace mnet::gguf {
         const std::int8_t* q = q8.qs.data() + b * 256U;
         std::uint16_t sh = static_cast<std::uint16_t>(block[2] | (static_cast<std::uint16_t>(block[3]) << 8U));
         std::uint32_t sumi[8] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
-        for (int ib = 0; ib < 8; ib += 2) {
+        for (std::int32_t ib = 0; ib < 8; ib += 2) {
             const std::uint8_t* q4bits_1 = qs;
             qs += 16U;
             const std::uint8_t* q4bits_2 = qs;
@@ -1400,27 +1409,27 @@ namespace mnet::gguf {
         std::int32_t lane[8] = {};
         std::int32_t sums[8] = {};
         std::int32_t mins[8] = {};
-        for (int g = 0; g < 8; ++g) {
+        for (std::int32_t g = 0; g < 8; ++g) {
             std::uint8_t scale = 0;
             std::uint8_t mn = 0;
             get_scale_min_k4(g, block + 4, scale, mn);
             mins[g] = mn;
             sums[g] = static_cast<std::int32_t>(bsums[2 * g]) + static_cast<std::int32_t>(bsums[2 * g + 1]);
             const std::uint8_t* bytes = qs + 32 * (g / 2);
-            for (int l = 0; l < 8; ++l) {
+            for (std::int32_t l = 0; l < 8; ++l) {
                 std::int32_t partial = 0;
-                for (int k = 0; k < 4; ++k) {
+                for (std::int32_t k = 0; k < 4; ++k) {
                     const std::uint8_t byte = bytes[4 * l + k];
-                    const int nibble = (g & 1) == 0 ? (byte & 0x0FU) : (byte >> 4U);
+                    const std::int32_t nibble = (g & 1) == 0 ? (byte & 0x0FU) : (byte >> 4U);
                     partial += nibble * y[g * 32 + 4 * l + k];
                 }
                 lane[l] += static_cast<std::int32_t>(scale) * partial;
             }
         }
-        for (int l = 0; l < 8; ++l) {
+        for (std::int32_t l = 0; l < 8; ++l) {
             acc[l] = std::fma(d, static_cast<float>(lane[l]), acc[l]);
         }
-        for (int i = 0; i < 4; ++i) {
+        for (std::int32_t i = 0; i < 4; ++i) {
             const std::int32_t prod = mins[2 * i] * sums[2 * i] + mins[2 * i + 1] * sums[2 * i + 1];
             acc_m[i] = std::fma(dmin, static_cast<float>(prod), acc_m[i]);
         }
@@ -1450,17 +1459,17 @@ namespace mnet::gguf {
             -dy * half_to_float(static_cast<std::uint16_t>(block[2] | (static_cast<std::uint16_t>(block[3]) << 8U)));
         std::int32_t lane[8] = {};
         std::int32_t minima[4] = {};
-        for (int g = 0; g < 8; ++g) {
+        for (std::int32_t g = 0; g < 8; ++g) {
             std::uint8_t scale = 0;
             std::uint8_t mn = 0;
             get_scale_min_k4(g, block + 4, scale, mn);
             const std::uint8_t* bytes = qs + 32 * (g / 2);
-            for (int l = 0; l < 8; ++l) {
+            for (std::int32_t l = 0; l < 8; ++l) {
                 std::int32_t partial = 0;
-                for (int k = 0; k < 4; ++k) {
+                for (std::int32_t k = 0; k < 4; ++k) {
                     const std::uint8_t byte = bytes[4 * l + k];
-                    const int nibble = (g & 1) == 0 ? (byte & 0x0FU) : (byte >> 4U);
-                    const int bit = (qh[4 * l + k] >> g) & 1;
+                    const std::int32_t nibble = (g & 1) == 0 ? (byte & 0x0FU) : (byte >> 4U);
+                    const std::int32_t bit = (qh[4 * l + k] >> g) & 1;
                     partial += (nibble + 16 * bit) * y[g * 32 + 4 * l + k];
                 }
                 lane[l] += static_cast<std::int32_t>(scale) * partial;
@@ -1468,7 +1477,7 @@ namespace mnet::gguf {
             minima[g / 2] += static_cast<std::int32_t>(mn) *
                              (static_cast<std::int32_t>(bsums[2 * g]) + static_cast<std::int32_t>(bsums[2 * g + 1]));
         }
-        for (int l = 0; l < 8; ++l) {
+        for (std::int32_t l = 0; l < 8; ++l) {
             acc[l] = std::fma(d, static_cast<float>(lane[l]), acc[l]);
         }
         const std::int32_t prod = (minima[0] + minima[1]) + (minima[2] + minima[3]);
@@ -1499,15 +1508,15 @@ namespace mnet::gguf {
             dy * half_to_float(static_cast<std::uint16_t>(block[2] | (static_cast<std::uint16_t>(block[3]) << 8U)));
         std::int32_t isum = 0;
         std::int32_t imin = 0;
-        for (int g = 0; g < 8; ++g) {
+        for (std::int32_t g = 0; g < 8; ++g) {
             std::uint8_t scale = 0;
             std::uint8_t mn = 0;
             get_scale_min_k4(g, block + 4, scale, mn);
             const std::uint8_t* bytes = block + 16 + 32 * (g / 2);
             std::int32_t partial = 0;
-            for (int l = 0; l < 32; ++l) {
+            for (std::int32_t l = 0; l < 32; ++l) {
                 const std::uint8_t byte = bytes[l];
-                const int nibble = (g & 1) == 0 ? (byte & 0x0FU) : (byte >> 4U);
+                const std::int32_t nibble = (g & 1) == 0 ? (byte & 0x0FU) : (byte >> 4U);
                 partial += nibble * y[g * 32 + l];
             }
             isum += static_cast<std::int32_t>(scale) * partial;

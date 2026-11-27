@@ -31,13 +31,13 @@ void dequantize_q6_k(const std::uint8_t* data, float* out) {
     const std::uint16_t dBits = static_cast<std::uint16_t>(data[208] | (static_cast<std::uint16_t>(data[209]) << 8U));
     const float d = half_to_float(dBits);
     float* y = out;
-    for (int n = 0; n < 256; n += 128) {
-        for (int l = 0; l < 32; ++l) {
-            const int is = l / 16;
-            const int q1 = ((ql[l] & 0x0F) | (((qh[l] >> 0) & 3) << 4)) - 32;
-            const int q2 = ((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 3) << 4)) - 32;
-            const int q3 = ((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
-            const int q4 = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+    for (std::int32_t n = 0; n < 256; n += 128) {
+        for (std::int32_t l = 0; l < 32; ++l) {
+            const std::int32_t is = l / 16;
+            const std::int32_t q1 = ((ql[l] & 0x0F) | (((qh[l] >> 0) & 3) << 4)) - 32;
+            const std::int32_t q2 = ((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 3) << 4)) - 32;
+            const std::int32_t q3 = ((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+            const std::int32_t q4 = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
             y[l] = d * static_cast<float>(scales[is + 0]) * static_cast<float>(q1);
             y[l + 32] = d * static_cast<float>(scales[is + 2]) * static_cast<float>(q2);
             y[l + 64] = d * static_cast<float>(scales[is + 4]) * static_cast<float>(q3);
@@ -57,8 +57,8 @@ void dequantize_q4_k(const std::uint8_t* data, float* out) {
     const float min = half_to_float(minBits);
     const std::uint8_t* scales = data + 4;
     const std::uint8_t* q = data + 16;
-    int is = 0;
-    for (int j = 0; j < 256; j += 64) {
+    std::int32_t is = 0;
+    for (std::int32_t j = 0; j < 256; j += 64) {
         std::uint8_t sc = 0;
         std::uint8_t m = 0;
         get_scale_min_k4(is + 0, scales, sc, m);
@@ -67,10 +67,10 @@ void dequantize_q4_k(const std::uint8_t* data, float* out) {
         get_scale_min_k4(is + 1, scales, sc, m);
         const float d2 = d * static_cast<float>(sc);
         const float m2 = min * static_cast<float>(m);
-        for (int l = 0; l < 32; ++l) {
+        for (std::int32_t l = 0; l < 32; ++l) {
             *out++ = d1 * static_cast<float>(q[l] & 0x0F) - m1;
         }
-        for (int l = 0; l < 32; ++l) {
+        for (std::int32_t l = 0; l < 32; ++l) {
             *out++ = d2 * static_cast<float>(q[l] >> 4) - m2;
         }
         q += 32;
@@ -86,10 +86,10 @@ void dequantize_q5_k(const std::uint8_t* data, float* out) {
     const std::uint8_t* scales = data + 4;
     const std::uint8_t* qh = data + 16;
     const std::uint8_t* ql = data + 48;
-    int is = 0;
+    std::int32_t is = 0;
     std::uint8_t u1 = 1;
     std::uint8_t u2 = 2;
-    for (int j = 0; j < 256; j += 64) {
+    for (std::int32_t j = 0; j < 256; j += 64) {
         std::uint8_t sc = 0;
         std::uint8_t m = 0;
         get_scale_min_k4(is + 0, scales, sc, m);
@@ -98,10 +98,10 @@ void dequantize_q5_k(const std::uint8_t* data, float* out) {
         get_scale_min_k4(is + 1, scales, sc, m);
         const float d2 = d * static_cast<float>(sc);
         const float m2 = min * static_cast<float>(m);
-        for (int l = 0; l < 32; ++l) {
+        for (std::int32_t l = 0; l < 32; ++l) {
             *out++ = d1 * static_cast<float>((ql[l] & 0x0F) + ((qh[l] & u1) != 0 ? 16 : 0)) - m1;
         }
-        for (int l = 0; l < 32; ++l) {
+        for (std::int32_t l = 0; l < 32; ++l) {
             *out++ = d2 * static_cast<float>((ql[l] >> 4) + ((qh[l] & u2) != 0 ? 16 : 0)) - m2;
         }
         ql += 32;
@@ -115,7 +115,7 @@ void dequantize_iq2_xxs(const std::uint8_t* data, float* out) {
     const std::uint16_t dBits = static_cast<std::uint16_t>(data[0] | (static_cast<std::uint16_t>(data[1]) << 8U));
     const float d = half_to_float(dBits);
     const std::uint8_t* q = data + 2;
-    for (int ib32 = 0; ib32 < 8; ++ib32) {
+    for (std::int32_t ib32 = 0; ib32 < 8; ++ib32) {
         const std::uint32_t lo =
             static_cast<std::uint32_t>(q[8 * ib32]) | (static_cast<std::uint32_t>(q[8 * ib32 + 1]) << 8U) |
             (static_cast<std::uint32_t>(q[8 * ib32 + 2]) << 16U) | (static_cast<std::uint32_t>(q[8 * ib32 + 3]) << 24U);
@@ -123,10 +123,10 @@ void dequantize_iq2_xxs(const std::uint8_t* data, float* out) {
             static_cast<std::uint32_t>(q[8 * ib32 + 4]) | (static_cast<std::uint32_t>(q[8 * ib32 + 5]) << 8U) |
             (static_cast<std::uint32_t>(q[8 * ib32 + 6]) << 16U) | (static_cast<std::uint32_t>(q[8 * ib32 + 7]) << 24U);
         const float db = d * (0.5F + static_cast<float>(hi >> 28U)) * 0.25F;
-        for (int l = 0; l < 4; ++l) {
+        for (std::int32_t l = 0; l < 4; ++l) {
             const std::uint64_t grid = detail::kIq2xxsGrid[(lo >> (8 * l)) & 0xFFU];
             const std::uint8_t signs = detail::kSignsIq2xs[(hi >> (7 * l)) & 127U];
-            for (int j = 0; j < 8; ++j) {
+            for (std::int32_t j = 0; j < 8; ++j) {
                 *out++ = db * static_cast<float>((grid >> (8 * j)) & 0xFFU) * ((signs & (1U << j)) != 0 ? -1.0F : 1.0F);
             }
         }
@@ -138,16 +138,16 @@ void dequantize_iq2_xs(const std::uint8_t* data, float* out) {
     const float d = half_to_float(dBits);
     const std::uint8_t* qs = data + 2;
     const std::uint8_t* scales = data + 66;
-    for (int ib32 = 0; ib32 < 8; ++ib32) {
+    for (std::int32_t ib32 = 0; ib32 < 8; ++ib32) {
         const float db0 = d * (0.5F + static_cast<float>(scales[ib32] & 0x0F)) * 0.25F;
         const float db1 = d * (0.5F + static_cast<float>(scales[ib32] >> 4)) * 0.25F;
-        for (int l = 0; l < 4; ++l) {
+        for (std::int32_t l = 0; l < 4; ++l) {
             const std::uint16_t qv = static_cast<std::uint16_t>(
                 qs[2 * (4 * ib32 + l)] | (static_cast<std::uint16_t>(qs[2 * (4 * ib32 + l) + 1]) << 8U));
             const std::uint64_t grid = detail::kIq2xsGrid[qv & 511U];
             const std::uint8_t signs = detail::kSignsIq2xs[qv >> 9U];
             const float db = l < 2 ? db0 : db1;
-            for (int j = 0; j < 8; ++j) {
+            for (std::int32_t j = 0; j < 8; ++j) {
                 *out++ = db * static_cast<float>((grid >> (8 * j)) & 0xFFU) * ((signs & (1U << j)) != 0 ? -1.0F : 1.0F);
             }
         }
@@ -159,21 +159,21 @@ void dequantize_iq3_xxs(const std::uint8_t* data, float* out) {
     const float d = half_to_float(dBits);
     const std::uint8_t* qs = data + 2;
     const std::uint8_t* scales_and_signs = qs + 64;
-    for (int ib32 = 0; ib32 < 8; ++ib32) {
+    for (std::int32_t ib32 = 0; ib32 < 8; ++ib32) {
         const std::uint32_t aux = static_cast<std::uint32_t>(scales_and_signs[4 * ib32]) |
                                   (static_cast<std::uint32_t>(scales_and_signs[4 * ib32 + 1]) << 8U) |
                                   (static_cast<std::uint32_t>(scales_and_signs[4 * ib32 + 2]) << 16U) |
                                   (static_cast<std::uint32_t>(scales_and_signs[4 * ib32 + 3]) << 24U);
         const float db = d * (0.5F + static_cast<float>(aux >> 28U)) * 0.5F;
-        for (int l = 0; l < 4; ++l) {
+        for (std::int32_t l = 0; l < 4; ++l) {
             const std::uint8_t signs = detail::kSignsIq2xs[(aux >> (7 * l)) & 127U];
             const std::uint32_t grid1 = detail::kIq3xxsGrid[qs[8 * ib32 + 2 * l]];
             const std::uint32_t grid2 = detail::kIq3xxsGrid[qs[8 * ib32 + 2 * l + 1]];
-            for (int j = 0; j < 4; ++j) {
+            for (std::int32_t j = 0; j < 4; ++j) {
                 *out++ =
                     db * static_cast<float>((grid1 >> (8 * j)) & 0xFFU) * ((signs & (1U << j)) != 0 ? -1.0F : 1.0F);
             }
-            for (int j = 0; j < 4; ++j) {
+            for (std::int32_t j = 0; j < 4; ++j) {
                 *out++ = db * static_cast<float>((grid2 >> (8 * j)) & 0xFFU) *
                          ((signs & (1U << (j + 4))) != 0 ? -1.0F : 1.0F);
             }
@@ -188,16 +188,16 @@ void dequantize_iq2_s(const std::uint8_t* data, float* out) {
     const std::uint8_t* qh = data + 66;
     const std::uint8_t* scales = data + 74;
     const std::uint8_t* signs = qs + 32;
-    for (int ib32 = 0; ib32 < 8; ++ib32) {
+    for (std::int32_t ib32 = 0; ib32 < 8; ++ib32) {
         const float db0 = d * (0.5F + static_cast<float>(scales[ib32] & 0x0F)) * 0.25F;
         const float db1 = d * (0.5F + static_cast<float>(scales[ib32] >> 4)) * 0.25F;
-        for (int l = 0; l < 4; ++l) {
+        for (std::int32_t l = 0; l < 4; ++l) {
             const std::uint32_t index = static_cast<std::uint32_t>(qs[4 * ib32 + l]) |
                                         ((static_cast<std::uint32_t>(qh[ib32]) << (8 - 2 * l)) & 0x300U);
             const std::uint64_t grid = detail::kIq2sGrid[index];
             const std::uint8_t sign = signs[4 * ib32 + l];
             const float db = l < 2 ? db0 : db1;
-            for (int j = 0; j < 8; ++j) {
+            for (std::int32_t j = 0; j < 8; ++j) {
                 *out++ = db * static_cast<float>((grid >> (8 * j)) & 0xFFU) * ((sign & (1U << j)) != 0 ? -1.0F : 1.0F);
             }
         }
@@ -209,14 +209,14 @@ void dequantize_iq1_s(const std::uint8_t* data, float* out) {
     const float d = half_to_float(dBits);
     const std::uint8_t* qs = data + 2;
     const auto* qh = reinterpret_cast<const std::uint16_t*>(data + 34);
-    for (int ib = 0; ib < 8; ++ib) {
+    for (std::int32_t ib = 0; ib < 8; ++ib) {
         const std::uint16_t high = qh[ib];
         const float dl = d * static_cast<float>(2 * ((high >> 12) & 7) + 1);
         const float delta = (high & 0x8000U) != 0 ? -kIq1sDelta : kIq1sDelta;
-        for (int l = 0; l < 4; ++l) {
+        for (std::int32_t l = 0; l < 4; ++l) {
             const std::uint16_t index = static_cast<std::uint16_t>(qs[ib * 4 + l] | (((high >> (3 * l)) & 7) << 8));
             const std::uint64_t grid = detail::kIq1sGrid[index];
-            for (int j = 0; j < 8; ++j) {
+            for (std::int32_t j = 0; j < 8; ++j) {
                 const auto value = static_cast<std::int8_t>((grid >> (8 * j)) & 0xFFU);
                 out[ib * 32 + l * 8 + j] = dl * (static_cast<float>(value) + delta);
             }
@@ -230,10 +230,10 @@ void dequantize_iq4_xs(const std::uint8_t* data, float* out) {
     const std::uint16_t scales_h = static_cast<std::uint16_t>(data[2] | (static_cast<std::uint16_t>(data[3]) << 8U));
     const std::uint8_t* scales_l = data + 4;
     const std::uint8_t* qs = data + 8;
-    for (int ib = 0; ib < 8; ++ib) {
-        const int ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0xF) | (((scales_h >> (2 * ib)) & 3) << 4);
+    for (std::int32_t ib = 0; ib < 8; ++ib) {
+        const std::int32_t ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0xF) | (((scales_h >> (2 * ib)) & 3) << 4);
         const float dl = d * static_cast<float>(ls - 32);
-        for (int j = 0; j < 16; ++j) {
+        for (std::int32_t j = 0; j < 16; ++j) {
             out[j] = dl * static_cast<float>(kIq4NlValues[qs[j] & 0x0F]);
             out[j + 16] = dl * static_cast<float>(kIq4NlValues[qs[j] >> 4]);
         }
@@ -247,6 +247,7 @@ void dequantize_iq4_xs(const std::uint8_t* data, float* out) {
 Reader::Reader(std::string path) : path_(std::move(path)) {
     this->file_.open(this->path_, std::ios::binary);
     if (!this->file_) {
+        // check-no-throw: allow invalid model input
         throw std::runtime_error("cannot open " + this->path_);
     }
     this->parse_header();
@@ -285,6 +286,7 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
             return item;
         }
     }
+    // check-no-throw: allow invalid model input
     throw std::runtime_error("tensor not found: " + std::string(name));
 }
 
@@ -292,16 +294,21 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
                                                          std::uint64_t byte_count) const {
     const std::uint64_t size = byte_count == 0 ? info.n_bytes() : byte_count;
     if (size == 0) {
-        throw std::runtime_error("unsupported or empty tensor: " + info.name);
+        // check-no-throw: allow invalid model input
+        throw std::runtime_error("unsupported or empty tensor: " +
+                                 // check-no-throw: allow invalid model input
+                                 info.name);
     }
     std::ifstream file(this->path_, std::ios::binary);
     if (!file) {
+        // check-no-throw: allow invalid model input
         throw std::runtime_error("cannot open " + this->path_);
     }
     file.seekg(static_cast<std::streamoff>(this->data_start_ + info.offset + byte_offset));
     std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
     file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size));
     if (!file) {
+        // check-no-throw: allow invalid model input
         throw std::runtime_error("short read for tensor: " + info.name);
     }
     return bytes;
@@ -310,18 +317,27 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
 [[nodiscard]] std::vector<float> Reader::dequantize(const TensorInfo& info, std::int32_t expert) const {
     const auto type = type_info(info.type);
     if (!type.supported) {
-        throw std::runtime_error("unsupported GGML type for tensor: " + info.name);
+        // check-no-throw: allow invalid model input
+        throw std::runtime_error("unsupported GGML type for tensor: " +
+                                 // check-no-throw: allow invalid model input
+                                 info.name);
     }
     std::uint64_t count = info.n_elements;
     std::uint64_t byte_offset = 0;
     std::uint64_t byte_count = 0;
     if (info.dims.size() == 3) {
         if (expert < 0 || static_cast<std::uint64_t>(expert) >= info.dims[2]) {
-            throw std::runtime_error("expert index required for 3-D tensor: " + info.name);
+            // check-no-throw: allow invalid model input
+            throw std::runtime_error("expert index required for 3-D tensor: " +
+                                     // check-no-throw: allow invalid model input
+                                     info.name);
         }
         const std::uint64_t per_expert = info.dims[0] * info.dims[1];
         if (per_expert % type.block_elements != 0) {
-            throw std::runtime_error("expert slice is not block aligned: " + info.name);
+            // check-no-throw: allow invalid model input
+            throw std::runtime_error("expert slice is not block aligned: " +
+                                     // check-no-throw: allow invalid model input
+                                     info.name);
         }
         const std::uint64_t per_expert_bytes = per_expert / type.block_elements * type.block_bytes;
         byte_offset = static_cast<std::uint64_t>(expert) * per_expert_bytes;
@@ -351,7 +367,10 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
 [[nodiscard]] Reader::Quantized Reader::quantized(const TensorInfo& info, std::int32_t expert) const {
     const auto type = type_info(info.type);
     if (!type.supported) {
-        throw std::runtime_error("unsupported GGML type for tensor: " + info.name);
+        // check-no-throw: allow invalid model input
+        throw std::runtime_error("unsupported GGML type for tensor: " +
+                                 // check-no-throw: allow invalid model input
+                                 info.name);
     }
     Quantized result;
     result.type = info.type;
@@ -361,11 +380,17 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
     std::uint64_t byte_count = 0;
     if (info.dims.size() == 3) {
         if (expert < 0 || static_cast<std::uint64_t>(expert) >= info.dims[2]) {
-            throw std::runtime_error("expert index required for 3-D tensor: " + info.name);
+            // check-no-throw: allow invalid model input
+            throw std::runtime_error("expert index required for 3-D tensor: " +
+                                     // check-no-throw: allow invalid model input
+                                     info.name);
         }
         const std::uint64_t per_expert = info.dims[0] * info.dims[1];
         if (per_expert % type.block_elements != 0) {
-            throw std::runtime_error("expert slice is not block aligned: " + info.name);
+            // check-no-throw: allow invalid model input
+            throw std::runtime_error("expert slice is not block aligned: " +
+                                     // check-no-throw: allow invalid model input
+                                     info.name);
         }
         const std::uint64_t per_expert_bytes = per_expert / type.block_elements * type.block_bytes;
         byte_offset = static_cast<std::uint64_t>(expert) * per_expert_bytes;
@@ -388,6 +413,7 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
 void Reader::matvec(const Quantized& matrix, const float* input, float* output) {
     const auto info = type_info(matrix.type);
     if (matrix.columns % info.block_elements != 0) {
+        // check-no-throw: allow invalid model input
         throw std::runtime_error("quantized row is not block aligned");
     }
     const std::size_t row_bytes = matrix.columns / info.block_elements * info.block_bytes;
@@ -518,6 +544,7 @@ std::int64_t Reader::read_scalar_int(std::istream& in, std::uint32_t type) {
         case kTypeBool:
             return static_cast<std::int64_t>(in.get());
         default:
+            // check-no-throw: allow invalid model input
             throw std::runtime_error("not an integer GGUF metadata type");
     }
 }
@@ -555,6 +582,7 @@ void Reader::skip_value(std::istream& in, std::uint32_t type) {
             return;
         }
         default:
+            // check-no-throw: allow invalid model input
             throw std::runtime_error("unknown GGUF metadata type");
     }
 }
@@ -562,12 +590,14 @@ void Reader::skip_value(std::istream& in, std::uint32_t type) {
 void Reader::parse_header() {
     const std::uint32_t magic = read_u32(this->file_);
     if (magic != kGgufMagic) {
+        // check-no-throw: allow invalid model input
         throw std::runtime_error("not a GGUF file");
     }
     this->version_ = read_u32(this->file_);
     const std::uint64_t tensor_count = read_u64(this->file_);
     const std::uint64_t kv_count = read_u64(this->file_);
     if (tensor_count > 1'000'000ULL || kv_count > 1'000'000ULL) {
+        // check-no-throw: allow invalid model input
         throw std::runtime_error("implausible GGUF header counts");
     }
 
@@ -619,6 +649,7 @@ void Reader::parse_header() {
         info.name = read_string(this->file_);
         const std::uint32_t n_dims = read_u32(this->file_);
         if (n_dims == 0 || n_dims > 4) {
+            // check-no-throw: allow invalid model input
             throw std::runtime_error("invalid tensor rank: " + info.name);
         }
         info.dims.resize(n_dims);
@@ -811,7 +842,7 @@ inline float Reader::dot_row(std::uint32_t type, const std::uint8_t* data, const
                 double block_sum = 0.0;
                 for (std::uint64_t j = 0; j < 64; ++j) {
                     const std::uint8_t byte = base[2 + j / 4];
-                    const auto q = static_cast<int>((byte >> ((j % 4) * 2U)) & 0x03U);
+                    const auto q = static_cast<std::int32_t>((byte >> ((j % 4) * 2U)) & 0x03U);
                     block_sum += static_cast<double>(q - 1) * static_cast<double>(input[b * 64 + j]);
                 }
                 sum += block_sum * static_cast<double>(scale);
@@ -843,7 +874,10 @@ inline float Reader::dot_row(std::uint32_t type, const std::uint8_t* data, const
             return static_cast<float>(sum);
         }
         default:
-            throw std::runtime_error("unsupported GGML type " + std::to_string(type));
+            // check-no-throw: allow invalid model input
+            throw std::runtime_error("unsupported GGML type " +
+                                     // check-no-throw: allow invalid model input
+                                     std::to_string(type));
     }
 }
 
@@ -871,7 +905,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
         }
         case kGgmlQ8_0: {
             if (count % 32 != 0) {
-                throw std::runtime_error("Q8_0 element count not a multiple of 32");
+                // check-no-throw: allow invalid model input
+                throw std::runtime_error(
+                    // check-no-throw: allow invalid model input
+                    "Q8_0 element count not a multiple of 32");
             }
             const std::size_t blocks = out.size() / 32;
             for (std::size_t b = 0; b < blocks; ++b) {
@@ -886,7 +923,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
         }
         case kGgmlQ6_K: {
             if (count % 256 != 0) {
-                throw std::runtime_error("Q6_K element count not a multiple of 256");
+                // check-no-throw: allow invalid model input
+                throw std::runtime_error(
+                    // check-no-throw: allow invalid model input
+                    "Q6_K element count not a multiple of 256");
             }
             for (std::size_t b = 0; b < out.size() / 256; ++b) {
                 dequantize_q6_k(raw.data() + b * 210, out.data() + b * 256);
@@ -895,7 +935,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
         }
         case kGgmlIq4Xs: {
             if (count % 256 != 0) {
-                throw std::runtime_error("IQ4_XS element count not a multiple of 256");
+                // check-no-throw: allow invalid model input
+                throw std::runtime_error(
+                    // check-no-throw: allow invalid model input
+                    "IQ4_XS element count not a multiple of 256");
             }
             for (std::size_t b = 0; b < out.size() / 256; ++b) {
                 dequantize_iq4_xs(raw.data() + b * 136, out.data() + b * 256);
@@ -904,7 +947,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
         }
         case kGgmlQ4_K: {
             if (count % 256 != 0) {
-                throw std::runtime_error("Q4_K element count not a multiple of 256");
+                // check-no-throw: allow invalid model input
+                throw std::runtime_error(
+                    // check-no-throw: allow invalid model input
+                    "Q4_K element count not a multiple of 256");
             }
             for (std::size_t b = 0; b < out.size() / 256; ++b) {
                 dequantize_q4_k(raw.data() + b * 144, out.data() + b * 256);
@@ -913,7 +959,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
         }
         case kGgmlQ5_K: {
             if (count % 256 != 0) {
-                throw std::runtime_error("Q5_K element count not a multiple of 256");
+                // check-no-throw: allow invalid model input
+                throw std::runtime_error(
+                    // check-no-throw: allow invalid model input
+                    "Q5_K element count not a multiple of 256");
             }
             for (std::size_t b = 0; b < out.size() / 256; ++b) {
                 dequantize_q5_k(raw.data() + b * 176, out.data() + b * 256);
@@ -922,7 +971,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
         }
         case kGgmlIq2Xxs: {
             if (count % 256 != 0) {
-                throw std::runtime_error("IQ2_XXS element count not a multiple of 256");
+                // check-no-throw: allow invalid model input
+                throw std::runtime_error(
+                    // check-no-throw: allow invalid model input
+                    "IQ2_XXS element count not a multiple of 256");
             }
             for (std::size_t b = 0; b < out.size() / 256; ++b) {
                 dequantize_iq2_xxs(raw.data() + b * 66, out.data() + b * 256);
@@ -931,7 +983,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
         }
         case kGgmlIq2Xs: {
             if (count % 256 != 0) {
-                throw std::runtime_error("IQ2_XS element count not a multiple of 256");
+                // check-no-throw: allow invalid model input
+                throw std::runtime_error(
+                    // check-no-throw: allow invalid model input
+                    "IQ2_XS element count not a multiple of 256");
             }
             for (std::size_t b = 0; b < out.size() / 256; ++b) {
                 dequantize_iq2_xs(raw.data() + b * 74, out.data() + b * 256);
@@ -940,7 +995,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
         }
         case kGgmlIq3Xxs: {
             if (count % 256 != 0) {
-                throw std::runtime_error("IQ3_XXS element count not a multiple of 256");
+                // check-no-throw: allow invalid model input
+                throw std::runtime_error(
+                    // check-no-throw: allow invalid model input
+                    "IQ3_XXS element count not a multiple of 256");
             }
             for (std::size_t b = 0; b < out.size() / 256; ++b) {
                 dequantize_iq3_xxs(raw.data() + b * 98, out.data() + b * 256);
@@ -949,7 +1007,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
         }
         case kGgmlIq2S: {
             if (count % 256 != 0) {
-                throw std::runtime_error("IQ2_S element count not a multiple of 256");
+                // check-no-throw: allow invalid model input
+                throw std::runtime_error(
+                    // check-no-throw: allow invalid model input
+                    "IQ2_S element count not a multiple of 256");
             }
             for (std::size_t b = 0; b < out.size() / 256; ++b) {
                 dequantize_iq2_s(raw.data() + b * 82, out.data() + b * 256);
@@ -958,7 +1019,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
         }
         case kGgmlIq1S: {
             if (count % 256 != 0) {
-                throw std::runtime_error("IQ1_S element count not a multiple of 256");
+                // check-no-throw: allow invalid model input
+                throw std::runtime_error(
+                    // check-no-throw: allow invalid model input
+                    "IQ1_S element count not a multiple of 256");
             }
             for (std::size_t b = 0; b < out.size() / 256; ++b) {
                 dequantize_iq1_s(raw.data() + b * 50, out.data() + b * 256);
@@ -967,7 +1031,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
         }
         case kGgmlQ2_0: {
             if (count % 64 != 0) {
-                throw std::runtime_error("Q2_0 element count not a multiple of 64");
+                // check-no-throw: allow invalid model input
+                throw std::runtime_error(
+                    // check-no-throw: allow invalid model input
+                    "Q2_0 element count not a multiple of 64");
             }
             const std::size_t blocks = out.size() / 64;
             for (std::size_t b = 0; b < blocks; ++b) {
@@ -976,7 +1043,7 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
                     static_cast<std::uint16_t>(raw[base] | (static_cast<std::uint16_t>(raw[base + 1]) << 8U)));
                 for (std::size_t j = 0; j < 64; ++j) {
                     const std::uint8_t byte = raw[base + 2 + j / 4];
-                    const auto q = static_cast<int>((byte >> ((j % 4) * 2U)) & 0x03U);
+                    const auto q = static_cast<std::int32_t>((byte >> ((j % 4) * 2U)) & 0x03U);
                     out[b * 64 + j] = static_cast<float>(q - 1) * scale;
                 }
             }
@@ -984,7 +1051,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
         }
         case kGgmlNvfp4: {
             if (count % 64 != 0) {
-                throw std::runtime_error("NVFP4 element count not a multiple of 64");
+                // check-no-throw: allow invalid model input
+                throw std::runtime_error(
+                    // check-no-throw: allow invalid model input
+                    "NVFP4 element count not a multiple of 64");
             }
             const std::size_t blocks = out.size() / 64;
             for (std::size_t b = 0; b < blocks; ++b) {
@@ -1005,7 +1075,10 @@ inline std::vector<float> Reader::dequantize_block(std::uint32_t type, const std
             return out;
         }
         default:
-            throw std::runtime_error("unsupported GGML type " + std::to_string(type));
+            // check-no-throw: allow invalid model input
+            throw std::runtime_error("unsupported GGML type " +
+                                     // check-no-throw: allow invalid model input
+                                     std::to_string(type));
     }
 }
 

@@ -3,6 +3,7 @@
 
 #include <mnet/core/net.hpp>
 
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -344,7 +345,7 @@ struct NetPrivate final : public mgraph::ExecutionBackend<Layer, Mat, Option> {
 
 std::size_t default_memory_budget_bytes() {
     if (const char* env = std::getenv("MNET_MAX_MEM_MB")) {
-        const long long mb = std::atoll(env);
+        const std::int64_t mb = std::atoll(env);
         return mb > 0 ? static_cast<std::size_t>(mb) * 1024U * 1024U : 0;
     }
 #if defined(__linux__)
@@ -354,10 +355,10 @@ std::size_t default_memory_budget_bytes() {
     if (file != nullptr) {
         char line[256];
         while (std::fgets(line, sizeof(line), file) != nullptr) {
-            unsigned long long kb = 0;
-            if (std::sscanf(line, "MemTotal: %llu kB", &kb) == 1 && kb > 0) {
+            std::uint64_t kb = 0;
+            if (std::sscanf(line, "MemTotal: %" SCNu64 " kB", &kb) == 1 && kb > 0) {
                 std::fclose(file);
-                return static_cast<std::size_t>(kb / 2U) * 1024U;
+                return (kb / 2U) * 1024U;
             }
         }
         std::fclose(file);
@@ -603,7 +604,7 @@ std::int32_t Net::load_model(const char* bin_path) {
     // check the file size up front: a model that cannot fit must fail here,
     // not after the kernel has already started swapping/killing.
     if (std::fseek(file, 0, SEEK_END) == 0) {
-        const long size = std::ftell(file);
+        const std::int64_t size = std::ftell(file);
         std::rewind(file);
         if (size > 0) {
             const auto weights = static_cast<std::size_t>(size);
@@ -626,8 +627,11 @@ std::int32_t Net::load_model(const char* bin_path) {
         for (std::size_t i = 0; i < this->d->layers.size(); ++i) {
             ret = this->d->layers[i]->load_model(model_bin);
             if (std::getenv("MNET_TRACE_BIN") != nullptr) {
-                const long pos = std::ftell(file);
-                std::fprintf(stderr, "[binload] %zu %s %ld\n", i, this->d->layer_types[i].c_str(), pos);
+                const std::int64_t pos = std::ftell(file);
+                char trace[256];
+                std::snprintf(trace, sizeof(trace), "[binload] %zu %s %" PRId64 "\n", i,
+                              this->d->layer_types[i].c_str(), pos);
+                detail::write_diagnostic(std::string(trace));
             }
             if (ret != 0) {
                 const std::string& type = this->d->layer_types[i];

@@ -1,6 +1,7 @@
 // Copyright 2026 mcnn authors
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include <cinttypes>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -50,13 +51,14 @@ void print_info(const mnet::gguf::Reader& reader, bool print_tensors) {
     std::printf("arch       : %s\n", arch == strings.end() ? "?" : arch->second.c_str());
     std::printf("tensors    : %zu\n", reader.tensors().size());
     std::printf("metadata   : %zu strings, %zu integers\n", strings.size(), reader.integers().size());
-    std::printf("data_start : %llu\n", static_cast<unsigned long long>(reader.data_start()));
+    std::printf("data_start : %" PRIu64 "\n", reader.data_start());
     if (print_tensors) {
         for (const auto& tensor : reader.tensors()) {
             const auto info = mnet::gguf::type_info(tensor.type);
-            std::printf("%-44s %-8.*s [", tensor.name.c_str(), static_cast<int>(info.name.size()), info.name.data());
+            std::printf("%-44s %-8.*s [", tensor.name.c_str(), static_cast<std::int32_t>(info.name.size()),
+                        info.name.data());
             for (std::size_t i = 0; i < tensor.dims.size(); ++i) {
-                std::printf("%s%llu", i == 0 ? "" : "x", static_cast<unsigned long long>(tensor.dims[i]));
+                std::printf("%s%" PRIu64 "", i == 0 ? "" : "x", tensor.dims[i]);
             }
             std::printf("]\n");
         }
@@ -76,8 +78,7 @@ std::int32_t run_matmul(const mnet::gguf::Reader& reader, const std::string& ten
     }
     const std::vector<float> input = read_floats(input_path);
     if (input.size() != input_dim) {
-        std::fprintf(stderr, "input has %zu floats, tensor expects %llu\n", input.size(),
-                     static_cast<unsigned long long>(input_dim));
+        std::fprintf(stderr, "input has %zu floats, tensor expects %" PRIu64 "\n", input.size(), input_dim);
         return 2;
     }
     std::vector<float> output(output_dim, 0.0F);
@@ -92,9 +93,9 @@ std::int32_t run_matmul(const mnet::gguf::Reader& reader, const std::string& ten
     write_floats(output_path, output);
     const auto end = std::chrono::steady_clock::now();
     const double ms = std::chrono::duration<double, std::milli>(end - start).count();
-    std::printf("%s: %.*s [%llu, %llu] expert=%d -> %s (%.2f ms)\n", tensor.name.c_str(),
-                static_cast<int>(type.name.size()), type.name.data(), static_cast<unsigned long long>(input_dim),
-                static_cast<unsigned long long>(output_dim), expert, output_path.c_str(), ms);
+    std::printf("%s: %.*s [%" PRIu64 ", %" PRIu64 "] expert=%d -> %s (%.2f ms)\n", tensor.name.c_str(),
+                static_cast<std::int32_t>(type.name.size()), type.name.data(), input_dim, output_dim, expert,
+                output_path.c_str(), ms);
     return 0;
 }
 
@@ -106,8 +107,7 @@ std::int32_t run_matmul_quantized(const mnet::gguf::Reader& reader, const std::s
     const std::size_t output_dim = info.dims.size() >= 2 ? info.dims[1] : 1;
     const std::vector<float> input = read_floats(input_path);
     if (input.size() != input_dim) {
-        std::fprintf(stderr, "input has %zu floats, tensor expects %llu\n", input.size(),
-                     static_cast<unsigned long long>(input_dim));
+        std::fprintf(stderr, "input has %zu floats, tensor expects %" PRIu64 "\n", input.size(), input_dim);
         return 2;
     }
     const auto start = std::chrono::steady_clock::now();
@@ -118,9 +118,9 @@ std::int32_t run_matmul_quantized(const mnet::gguf::Reader& reader, const std::s
     const auto end = std::chrono::steady_clock::now();
     const double ms = std::chrono::duration<double, std::milli>(end - start).count();
     const auto bytes = weights.blocks.size();
-    std::printf("%s: %.*s [%llu, %llu] expert=%d quantized=%zu bytes -> %s (%.2f ms)\n", info.name.c_str(),
-                static_cast<int>(type.name.size()), type.name.data(), static_cast<unsigned long long>(input_dim),
-                static_cast<unsigned long long>(output_dim), expert, bytes, output_path.c_str(), ms);
+    std::printf("%s: %.*s [%" PRIu64 ", %" PRIu64 "] expert=%d quantized=%zu bytes -> %s (%.2f ms)\n",
+                info.name.c_str(), static_cast<std::int32_t>(type.name.size()), type.name.data(), input_dim, output_dim,
+                expert, bytes, output_path.c_str(), ms);
     return 0;
 }
 
@@ -187,8 +187,8 @@ void hadamard_sign(std::vector<float>& values, const std::vector<std::int32_t>& 
     return value / (1.0F + std::exp(-value));
 }
 
-int run_bonsai_ffn(const mnet::gguf::Reader& reader, std::int32_t layer, const std::string& input_path,
-                   const std::string& output_path) {
+std::int32_t run_bonsai_ffn(const mnet::gguf::Reader& reader, std::int32_t layer, const std::string& input_path,
+                            const std::string& output_path) {
     const std::string prefix = "blk." + std::to_string(layer) + ".";
     const auto& gate_info = reader.tensor(prefix + "ffn_gate.weight");
     const auto in_dim = static_cast<std::size_t>(gate_info.dims[0]);
@@ -244,7 +244,7 @@ int run_bonsai_ffn(const mnet::gguf::Reader& reader, std::int32_t layer, const s
 }
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(std::int32_t argc, char** argv) {
     try {
         if (argc < 3) {
             std::fprintf(stderr,
@@ -274,7 +274,7 @@ int main(int argc, char** argv) {
             raw_file.read(reinterpret_cast<char*>(raw.data()), size);
             const auto values = mnet::gguf::Reader::dequantize_block(type, raw, count);
             write_floats(argv[5], values);
-            std::printf("dequant-raw type=%u n=%llu -> %s\n", type, static_cast<unsigned long long>(count), argv[5]);
+            std::printf("dequant-raw type=%u n=%" PRIu64 " -> %s\n", type, count, argv[5]);
             return 0;
         }
         mnet::gguf::Reader reader(argv[2]);

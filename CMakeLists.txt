@@ -106,7 +106,6 @@ add_library(mnet_objs OBJECT
     src/gguf/reader.cpp
     src/tts/exact.cpp
     src/tts/ops.cpp
-    src/tts/reference.cpp
     src/tts/tensor.cpp
     src/tokenizer/bpe.cpp
     src/tokenizer/tokenizer.cpp
@@ -256,7 +255,8 @@ if(PROJECT_IS_TOP_LEVEL)
     target_link_libraries(mnet_tokenize PRIVATE mnet::mnet)
     target_compile_options(mnet_tokenize PRIVATE ${MNET_WARNINGS})
 
-    add_executable(mnet_tts tools/tts/mnet_tts.cpp tools/tts/mnet_tts_piper.cpp tools/tts/mnet_tts_kokoro.cpp)
+    add_executable(mnet_tts tools/tts/mnet_tts.cpp tools/tts/mnet_tts_piper.cpp tools/tts/mnet_tts_kokoro.cpp
+                          tools/tts/reference.cpp)
     target_link_libraries(mnet_tts PRIVATE mnet::mnet)
     target_include_directories(mnet_tts PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
     target_compile_options(mnet_tts PRIVATE ${MNET_WARNINGS})

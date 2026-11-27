@@ -61,9 +61,9 @@ static std::int64_t read_vmhwm_kb() {
     return 0;
 }
 
-int main(int argc, char** argv) {
+int main(std::int32_t argc, char** argv) {
     bool allow_empty = false;
-    long long max_mem_mb = 0;
+    std::int64_t max_mem_mb = 0;
     std::string dump_out;
     std::string extract_name;
     // --input NAME FILE WxHxC, repeatable: feed real data instead of the sine fill.

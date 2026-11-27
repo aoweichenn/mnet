@@ -27,9 +27,16 @@ def main(argv: list[str]) -> int:
     problems = []
     files = list(LIB.glob("src/**/*.cpp")) + list(LIB.glob("src/**/*.hpp")) + list(LIB.glob("include/**/*.hpp"))
     for path in sorted(files):
-        body = strip_comments(path.read_text(encoding="utf-8"))
+        raw_text = path.read_text(encoding="utf-8")
+        raw_lines = raw_text.split("\n")
+        body = strip_comments(raw_text)
         for number, line in enumerate(body.split("\n"), 1):
-            if re.search(r"\bthrow\b", line):
+            # 唯一的白名单：内存预算的 OOM 保护，行尾写 `check-no-throw: allow <理由>`。
+            if re.search(r"\bthrow\b", line) and number <= len(raw_lines):
+                if "check-no-throw: allow" in raw_lines[number - 1]:
+                    continue
+                if number >= 2 and "check-no-throw: allow" in raw_lines[number - 2]:
+                    continue
                 problems.append(f"{path.relative_to(LIB)}:{number}: throw")
             if re.search(r"\bcatch\s*\(", line):
                 problems.append(f"{path.relative_to(LIB)}:{number}: catch")

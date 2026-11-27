@@ -128,7 +128,7 @@ void l2_normalize_head(float* data, std::size_t size, float eps) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(std::int32_t argc, char** argv) {
     try {
         if (argc < 5) {
             std::fprintf(stderr, "usage: mnet_bonsai_block MODEL.gguf LAYER INPUT.bin OUTPUT.bin\n");

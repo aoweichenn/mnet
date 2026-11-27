@@ -338,7 +338,7 @@ static std::int64_t read_status_kb(const char* key) {
 }
 #endif
 
-int main(int argc, char** argv) {
+int main(std::int32_t argc, char** argv) {
     std::string model_dir;
     std::string prompt = "Hello";
     std::int32_t threads = 4;
@@ -347,7 +347,7 @@ int main(int argc, char** argv) {
     bool fast_int4 = false;
     bool int8_kv = false;
     std::int32_t kv_capacity = 0;
-    long long max_mem_mb = 0;
+    std::int64_t max_mem_mb = 0;
     std::int32_t prefill_chunk = 512;
     for (std::int32_t i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {

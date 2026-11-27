@@ -121,9 +121,9 @@ struct TtsOptions {
 }
 
 // Piper/VITS path (tools/tts/mnet_tts_piper.cpp).
-[[nodiscard]] int run_piper(const TtsOptions& opt, const mnet::tts::Weights& weights);
+[[nodiscard]] std::int32_t run_piper(const TtsOptions& opt, const mnet::tts::Weights& weights);
 
 // Kokoro/StyleTTS2 path (tools/tts/mnet_tts_kokoro.cpp).
-[[nodiscard]] int run_kokoro(const TtsOptions& opt, const mnet::tts::Weights& weights);
+[[nodiscard]] std::int32_t run_kokoro(const TtsOptions& opt, const mnet::tts::Weights& weights);
 
 }  // namespace mnet_tts

@@ -882,7 +882,7 @@ private:
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(std::int32_t argc, char** argv) {
     try {
         if (argc < 3) {
             std::fprintf(stderr, "usage: mnet_inkling2 MODEL.gguf TOKEN_ID... [--dump DIR] [--text TEXT] [--kv-f32]\n");
@@ -894,7 +894,7 @@ int main(int argc, char** argv) {
         // llama.cpp's default KV cache type is F16; match it unless --kv-f32.
         bool kv_f16 = true;
         std::vector<std::int32_t> tokens;
-        for (int i = 2; i < argc; ++i) {
+        for (std::int32_t i = 2; i < argc; ++i) {
             const std::string arg = argv[i];
             if (arg == "--dump" && i + 1 < argc) {
                 dump_dir = argv[++i];

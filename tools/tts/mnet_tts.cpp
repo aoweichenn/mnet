@@ -9,6 +9,7 @@
 //
 // Reference dumps come from tools/dump_piper_reference.py (deterministic noise).
 
+#include <cinttypes>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -24,9 +25,9 @@
 
 namespace {
 
-[[nodiscard]] static int run_tts(int argc, char** argv) {
+[[nodiscard]] static std::int32_t run_tts(std::int32_t argc, char** argv) {
     mnet_tts::TtsOptions opt;
-    for (int i = 1; i < argc; ++i) {
+    for (std::int32_t i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--model" && i + 1 < argc) {
             opt.model_dir = argv[++i];
@@ -78,9 +79,9 @@ namespace {
                 if (mnet::tts::g_profile_calls[i] == 0) {
                     continue;
                 }
-                std::printf("  %-15s %8.3f s  %6llu calls  %7.3f ms/call\n", kNames[i],
+                std::printf("  %-15s %8.3f s  %6" PRIu64 " calls  %7.3f ms/call\n", kNames[i],
                             static_cast<double>(mnet::tts::g_profile_ns[i]) * 1.0e-9,
-                            static_cast<unsigned long long>(mnet::tts::g_profile_calls[i]),
+                            static_cast<std::uint64_t>(mnet::tts::g_profile_calls[i]),
                             static_cast<double>(mnet::tts::g_profile_ns[i]) * 1.0e-6 /
                                 static_cast<double>(mnet::tts::g_profile_calls[i]));
             }
@@ -107,11 +108,11 @@ namespace {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(std::int32_t argc, char** argv) {
     // MNET_MAX_MEM_MB budgets the parameter blob plus the live activations;
     // an over-budget run fails cleanly instead of thrashing.
     if (const char* env = std::getenv("MNET_MAX_MEM_MB")) {
-        const unsigned long megabytes = std::strtoul(env, nullptr, 10);
+        const std::uint64_t megabytes = std::strtoul(env, nullptr, 10);
         if (megabytes > 0) {
             mnet::tts::g_mem_budget_bytes = static_cast<std::size_t>(megabytes) * 1024ULL * 1024ULL;
         }
