@@ -1536,12 +1536,11 @@ inline bool& ggml_tinyblas_batch() {
             q += 32;
             const std::int8_t* q8b_2 = q;
             q += 32;
-            const std::int32_t ls1 =
-                static_cast<std::int32_t>(((block[4U + static_cast<std::size_t>(ib) / 2U] & 0x0FU) |
-                                           ((sh << 4) & 0x30U)) - 32U);
-            const std::int32_t ls2 =
-                static_cast<std::int32_t>(((block[4U + static_cast<std::size_t>(ib) / 2U] >> 4U) |
-                                           ((sh << 2) & 0x30U)) - 32U);
+            const std::uint32_t high_bits = static_cast<std::uint32_t>(sh);
+            const std::int32_t ls1 = static_cast<std::int32_t>(
+                ((block[4U + static_cast<std::size_t>(ib) / 2U] & 0x0FU) | ((high_bits << 4U) & 0x30U)) - 32U);
+            const std::int32_t ls2 = static_cast<std::int32_t>(
+                ((block[4U + static_cast<std::size_t>(ib) / 2U] >> 4U) | ((high_bits << 2U) & 0x30U)) - 32U);
             sh = static_cast<std::uint16_t>(sh >> 4U);
             std::int32_t v1[32];
             std::int32_t v2[32];
