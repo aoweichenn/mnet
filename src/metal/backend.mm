@@ -464,13 +464,16 @@ kernel void ssm_scan(device const float* q            [[buffer(0)]],
     for (uint i = 0; i < head_dim; ++i) {
         sh[i * head_dim + tid] *= decay;
     }
+    // Note: four accumulators here (splitting the 128-long fma chain) measured
+    // within noise (ssm 1.37-1.38 s vs 1.39-1.41 s) and changed the fifth
+    // top-5 token, so the single chain stays.
     float d = 0.0f;
     for (uint i = 0; i < head_dim; ++i) {
         d = fma(kh[i], sh[i * head_dim + tid], d);
     }
-    d = (vh[tid] - d) * b;
+    const float delta_coefficient = (vh[tid] - d) * b;
     for (uint i = 0; i < head_dim; ++i) {
-        sh[i * head_dim + tid] = fma(kh[i], d, sh[i * head_dim + tid]);
+        sh[i * head_dim + tid] = fma(kh[i], delta_coefficient, sh[i * head_dim + tid]);
     }
     float acc = 0.0f;
     for (uint i = 0; i < head_dim; ++i) {
@@ -763,10 +766,10 @@ WeightBinding owned_weight_buffer(MetalState& s, const MatvecQ8_0Job& job, std::
 }
 
 WeightBinding weight_buffer_for(MetalState& s, const MatvecQ8_0Job& job, std::uint64_t rows,
-                                std::uint64_t row_bytes) {
+                                std::uint64_t row_bytes, bool allow_alias) {
     const std::uint64_t bytes = rows * row_bytes;
     static const bool aliasing = std::getenv("MNET_NO_ALIAS") == nullptr;
-    if (!aliasing || job.region == nullptr || job.data == nullptr || job.region_bytes == 0U) {
+    if (!allow_alias || !aliasing || job.region == nullptr || job.data == nullptr || job.region_bytes == 0U) {
         return owned_weight_buffer(s, job, rows, row_bytes);
     }
     id<MTLBuffer>& region = s.region_buffers[job.region];
@@ -876,7 +879,7 @@ bool matvec_batch(const MatvecQ8_0Job* jobs, std::size_t count, std::uint64_t co
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     std::uint64_t offset = 0;
     for (std::size_t i = 0; i < count; ++i) {
-        const WeightBinding weight_buffer = weight_buffer_for(s, jobs[i], jobs[i].rows, jobs[i].row_bytes);
+        const WeightBinding weight_buffer = weight_buffer_for(s, jobs[i], jobs[i].rows, jobs[i].row_bytes, true);
         if (weight_buffer.buffer == nil) {
             [encoder endEncoding];
             [command commit];
@@ -946,6 +949,34 @@ std::uint64_t now_ns() {
             .count());
 }
 
+// Same split for the gated-delta block, so the alias and state costs can be
+// attributed: host prep, weight binding, encoding, then the GPU wait.
+struct SsmProfile {
+    std::uint64_t prep_ns = 0;
+    std::uint64_t weights_ns = 0;
+    std::uint64_t encode_ns = 0;
+    std::uint64_t wait_ns = 0;
+    std::uint64_t calls = 0;
+    ~SsmProfile() {
+        if (std::getenv("MNET_PROFILE") == nullptr || this->calls == 0U) {
+            return;
+        }
+        const auto per_call = [&](std::uint64_t ns) {
+            return static_cast<double>(ns) * 1.0e-6 / static_cast<double>(this->calls);
+        };
+        char line[256];
+        std::snprintf(line, sizeof(line), "mnet: ssm per call  prep %.3f  weights %.3f  encode %.3f  wait %.3f ms\n",
+                      per_call(this->prep_ns), per_call(this->weights_ns), per_call(this->encode_ns),
+                      per_call(this->wait_ns));
+        mnet::detail::write_diagnostic(std::string(line));
+    }
+};
+
+SsmProfile& ssm_profile() {
+    static SsmProfile profile;
+    return profile;
+}
+
 // gate/up matvec -> SwiGLU -> on-device Q8_0 -> down matvec, one submission.
 bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const MatvecQ8_0Job& down, std::uint64_t columns,
                 std::uint64_t hidden, const float* input, const std::int32_t* signs, std::uint32_t block_size) {
@@ -994,9 +1025,9 @@ bool ffn_swiglu(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const Matvec
 
     const std::uint64_t profile_copy = now_ns();
     const std::size_t cache_before = s.weight_buffers.size();
-    const WeightBinding gate_weights = weight_buffer_for(s, gate, gate.rows, gate.row_bytes);
-    const WeightBinding up_weights = weight_buffer_for(s, up, up.rows, up.row_bytes);
-    const WeightBinding down_weights = weight_buffer_for(s, down, down.rows, down.row_bytes);
+    const WeightBinding gate_weights = weight_buffer_for(s, gate, gate.rows, gate.row_bytes, true);
+    const WeightBinding up_weights = weight_buffer_for(s, up, up.rows, up.row_bytes, true);
+    const WeightBinding down_weights = weight_buffer_for(s, down, down.rows, down.row_bytes, true);
     if (gate_weights.buffer == nil || up_weights.buffer == nil || down_weights.buffer == nil) {
         return false;
     }
@@ -1152,10 +1183,10 @@ bool attention(const AttentionQ2_0Job& job) {
     }
     std::memcpy(b.signs.contents, job.signs, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
 
-    const WeightBinding q_weights = weight_buffer_for(s, job.q, job.q.rows, job.q.row_bytes);
-    const WeightBinding k_weights = weight_buffer_for(s, job.k, job.k.rows, job.k.row_bytes);
-    const WeightBinding v_weights = weight_buffer_for(s, job.v, job.v.rows, job.v.row_bytes);
-    const WeightBinding out_weights = weight_buffer_for(s, job.out, job.out.rows, job.out.row_bytes);
+    const WeightBinding q_weights = weight_buffer_for(s, job.q, job.q.rows, job.q.row_bytes, true);
+    const WeightBinding k_weights = weight_buffer_for(s, job.k, job.k.rows, job.k.row_bytes, true);
+    const WeightBinding v_weights = weight_buffer_for(s, job.v, job.v.rows, job.v.row_bytes, true);
+    const WeightBinding out_weights = weight_buffer_for(s, job.out, job.out.rows, job.out.row_bytes, true);
     if (q_weights.buffer == nil || k_weights.buffer == nil || v_weights.buffer == nil ||
         out_weights.buffer == nil) {
         return false;
@@ -1330,6 +1361,7 @@ bool ssm_block(const SsmQ2_0Job& job) {
     if (job.qkv.type != 42U || job.gate.type != 42U || job.out.type != 42U) {
         return false;
     }
+    const std::uint64_t ssm_prep_start = now_ns();
     const std::uint64_t head_dim = job.head_dim;
     const std::uint64_t key_heads = job.key_heads;
     const std::uint64_t value_heads = job.value_heads;
@@ -1381,12 +1413,19 @@ bool ssm_block(const SsmQ2_0Job& job) {
     }
     std::memcpy(b.signs.contents, job.signs, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
 
-    const WeightBinding qkv_weights = weight_buffer_for(s, job.qkv, job.qkv.rows, job.qkv.row_bytes);
-    const WeightBinding gate_weights = weight_buffer_for(s, job.gate, job.gate.rows, job.gate.row_bytes);
-    const WeightBinding out_weights = weight_buffer_for(s, job.out, job.out.rows, job.out.row_bytes);
+    const std::uint64_t ssm_bind = now_ns();
+    // Aliasing hurts this block specifically (its scan is latency bound, so
+    // weight reads through the mapping land on the critical path: 0.871 vs
+    // 0.561 ms of GPU wait per call). Copying only this block back was measured
+    // worse overall (3.60 s vs 3.41 s) because 1.9 GB of device copies push the
+    // FFN's file pages out of the page cache, so everything aliases.
+    const WeightBinding qkv_weights = weight_buffer_for(s, job.qkv, job.qkv.rows, job.qkv.row_bytes, true);
+    const WeightBinding gate_weights = weight_buffer_for(s, job.gate, job.gate.rows, job.gate.row_bytes, true);
+    const WeightBinding out_weights = weight_buffer_for(s, job.out, job.out.rows, job.out.row_bytes, true);
     if (qkv_weights.buffer == nil || gate_weights.buffer == nil || out_weights.buffer == nil) {
         return false;
     }
+    const std::uint64_t ssm_weights = now_ns();
 
     // Resident state, seeded from the caller's vectors on first use.
     const std::uint64_t window_floats = static_cast<std::uint64_t>(job.conv_kernel) * conv_dim;
@@ -1551,7 +1590,17 @@ bool ssm_block(const SsmQ2_0Job& job) {
                     act_scales, out_buffer);
     [encoder endEncoding];
     [command commit];
+    const std::uint64_t ssm_encode = now_ns();
     [command waitUntilCompleted];
+    const std::uint64_t ssm_wait = now_ns();
+    {
+        SsmProfile& profile = ssm_profile();
+        profile.prep_ns += ssm_bind - ssm_prep_start;
+        profile.weights_ns += ssm_weights - ssm_bind;
+        profile.encode_ns += ssm_encode - ssm_weights;
+        profile.wait_ns += ssm_wait - ssm_encode;
+        ++profile.calls;
+    }
     if (command.status != MTLCommandBufferStatusCompleted) {
         return false;
     }
