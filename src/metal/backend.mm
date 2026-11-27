@@ -2175,12 +2175,15 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
     // From eight tokens on, one threadgroup computes a 64-row x 32-token tile
     // with the matrix unit, so each weight is decoded once for the batch. Below
     // that the per-token matvec has the better occupancy.
-    // Opt-in: the tiled path changes the fp32 summation order, which is a
-    // ~1e-6 difference per projection and ~4e-3 in the final logits after 64
-    // layers - the same order of magnitude as the existing fast path's error.
-    // MNET_MAT_MAT=1 tiles gate/up and down, =2 tiles gate/up only.
+    // The tiled path changes the fp32 summation order: ~1e-6 per projection,
+    // ~4e-3 in the final logits after 64 layers. It is the default because that
+    // is still closer to the CPU reference than the scalar fast path
+    // (3.944e-3 vs 4.754e-3), but it can reorder a near-tie: the reference's
+    // 5th and 6th logits are 5.6e-4 apart (normalised) and this path swaps
+    // them. MNET_MAT_MAT=0 restores the bit-identical scalar path, =2 tiles
+    // gate/up only.
     const char* mat_mat = std::getenv("MNET_MAT_MAT");
-    const int mat_mat_mode = mat_mat != nullptr ? std::atoi(mat_mat) : 0;
+    const int mat_mat_mode = mat_mat != nullptr ? std::atoi(mat_mat) : 1;
     const bool tiled = mat_mat_mode > 0 && s.mat_mat_pipeline != nil && count >= 8U;
     const bool tiled_down = mat_mat_mode == 1 && tiled;
     if (tiled) {
