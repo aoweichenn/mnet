@@ -387,6 +387,86 @@ kernel void attn_flash(device const float* q         [[buffer(0)]],
         out[tgid * head_dim + first + j] = (acc[j] * inv) * gate[tgid * head_dim + first + j];
     }
 }
+// Same as hadamard_quantize, but `sign_blocks` tells it how many Hadamard
+// blocks one token has, so a dispatch can cover several tokens whose slabs are
+// contiguous.
+kernel void hadamard_quantize_multi(device const float* in     [[buffer(0)]],
+                                    device const int* signs     [[buffer(1)]],
+                                    device char* qs             [[buffer(2)]],
+                                    device float* scales        [[buffer(3)]],
+                                    constant uint& block_size   [[buffer(4)]],
+                                    constant uint& sign_blocks  [[buffer(5)]],
+                                    uint tgid                   [[threadgroup_position_in_grid]],
+                                    uint lane                   [[thread_position_in_threadgroup]]) {
+    threadgroup float values[1024];
+    const uint base = tgid * block_size;
+    const uint sign_base = (tgid % sign_blocks) * block_size;
+    const float scale = 1.0f / sqrt(float(block_size));
+    values[lane] = (in[base + lane] * float(signs[sign_base + lane])) * scale;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint len = 1u; len < block_size; len <<= 1u) {
+        if ((lane & len) == 0u) {
+            const float a = values[lane];
+            const float b = values[lane + len];
+            values[lane] = a + b;
+            values[lane + len] = a - b;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane < block_size / 32u) {
+        const uint offset = lane * 32u;
+        float amax = 0.0f;
+        for (uint j = 0; j < 32u; ++j) {
+            amax = fmax(amax, fabs(values[offset + j]));
+        }
+        const float id = amax != 0.0f ? 127.0f / amax : 0.0f;
+        for (uint j = 0; j < 32u; ++j) {
+            qs[base + offset + j] = char(rint(values[offset + j] * id));
+        }
+        scales[(base + offset) / 32u] = float(half(amax / 127.0f));
+    }
+}
+
+// Same as ssm_gate_norm, with `heads` (value heads per token) telling it how to
+// split the threadgroup index into (token, head).
+kernel void ssm_gate_norm_multi(device const float* delta    [[buffer(0)]],
+                                device const float* z        [[buffer(1)]],
+                                device const float* norm     [[buffer(2)]],
+                                device float* out            [[buffer(3)]],
+                                constant uint& head_dim      [[buffer(4)]],
+                                constant uint& key_heads     [[buffer(5)]],
+                                constant uint& heads_per_key [[buffer(6)]],
+                                constant float& eps          [[buffer(7)]],
+                                constant uint& heads         [[buffer(8)]],
+                                uint tgid                    [[threadgroup_position_in_grid]],
+                                uint tid                     [[thread_position_in_threadgroup]]) {
+    threadgroup float squares[kAttentionSimdGroups];
+    const float x = delta[tgid * head_dim + tid];
+    const float partial = simd_sum(x * x);
+    if ((tid & 31u) == 0u) {
+        squares[tid >> 5u] = partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        float total = 0.0f;
+        const uint groups = (head_dim + 31u) / 32u;
+        for (uint i = 0; i < groups; ++i) {
+            total += squares[i];
+        }
+        squares[0] = total / float(head_dim);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float scale = 1.0f / sqrt(squares[0] + eps);
+    const float zh = z[tgid * head_dim + tid];
+    const float activated = zh / (1.0f + exp(-zh));
+    const uint head = tgid % heads;
+    const uint token = tgid / heads;
+    const uint key_head = head % key_heads;
+    const uint rep = head / key_heads;
+    const uint dst_head = rep + heads_per_key * key_head;
+    out[(token * heads + dst_head) * head_dim + tid] = ((x * scale) * norm[tid]) * activated;
+}
+
 // ---- gated delta-rule (SSM) block ---------------------------------------
 
 // beta/alpha projection rows: one simdgroup per row, simd_sum reduction.
@@ -730,6 +810,8 @@ struct MetalState {
     id<MTLBuffer> up_buffer = nil;
     id<MTLBuffer> signs_buffer = nil;
     id<MTLComputePipelineState> hadamard_quantize_pipeline = nil;
+    id<MTLComputePipelineState> hadamard_multi_pipeline = nil;
+    id<MTLComputePipelineState> gate_norm_multi_pipeline = nil;
     id<MTLComputePipelineState> attn_prep_pipeline = nil;
     id<MTLComputePipelineState> attn_gate_pipeline = nil;
     id<MTLComputePipelineState> attn_flash_pipeline = nil;
@@ -827,6 +909,8 @@ void initialise(MetalState& state) {
         state.ssm_scan_pipeline = pipeline_for("ssm_scan");
         state.ssm_gate_norm_pipeline = pipeline_for("ssm_gate_norm");
         state.dequant_pipeline = pipeline_for("q8_0_dequantize");
+        state.hadamard_multi_pipeline = pipeline_for("hadamard_quantize_multi");
+        state.gate_norm_multi_pipeline = pipeline_for("ssm_gate_norm_multi");
         if (state.attn_flash_pipeline == nil && std::getenv("MNET_METAL_DEBUG") != nullptr) {
             std::fprintf(stderr, "mnet: metal attention pipeline failed: %s\n", [[error description] UTF8String]);
         }
@@ -1848,46 +1932,54 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
             [encoder dispatchThreadgroups:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         }
     }
-    // Each token: swiglu, then the signed Hadamard and requantisation.
-    for (std::size_t t = 0; t < count; ++t) {
+    // SwiGLU and the Hadamard/requantisation are element-wise over the whole
+    // per-token slab, so one dispatch each covers every token.
+    {
+        const std::uint32_t slab = static_cast<std::uint32_t>(hidden * count);
         [encoder setComputePipelineState:s.swiglu_pipeline];
-        [encoder setBuffer:b.gate offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
-        [encoder setBuffer:b.up offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
-        [encoder setBuffer:b.act offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:2];
-        const std::uint32_t hidden32 = static_cast<std::uint32_t>(hidden);
-        [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:3];
-        [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        [encoder setBuffer:b.gate offset:0 atIndex:0];
+        [encoder setBuffer:b.up offset:0 atIndex:1];
+        [encoder setBuffer:b.act offset:0 atIndex:2];
+        [encoder setBytes:&slab length:sizeof(slab) atIndex:3];
+        [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
-        [encoder setComputePipelineState:s.hadamard_quantize_pipeline];
-        [encoder setBuffer:b.act offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
+        [encoder setComputePipelineState:s.hadamard_multi_pipeline];
+        [encoder setBuffer:b.act offset:0 atIndex:0];
         [encoder setBuffer:signs_buffer offset:0 atIndex:1];
-        [encoder setBuffer:b.act_q8 offset:static_cast<NSUInteger>(t * hidden) atIndex:2];
-        [encoder setBuffer:b.act_scales offset:static_cast<NSUInteger>(t * (hidden / 32U) * sizeof(float)) atIndex:3];
-        [encoder setBytes:&block32 length:sizeof(block32) atIndex:4];
-        [encoder dispatchThreadgroups:MTLSizeMake(hidden / block_size, 1, 1)
+        [encoder setBuffer:b.act_q8 offset:0 atIndex:2];
+        [encoder setBuffer:b.act_scales offset:0 atIndex:3];
+        [encoder setBytes:&block_size length:sizeof(block_size) atIndex:4];
+        const std::uint32_t sign_blocks = static_cast<std::uint32_t>(hidden / block_size);
+        [encoder setBytes:&sign_blocks length:sizeof(sign_blocks) atIndex:5];
+        [encoder dispatchThreadgroups:MTLSizeMake((hidden / block_size) * count, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
     }
-    // Every down matvec.
-    for (std::size_t t = 0; t < count; ++t) {
-        [encoder setComputePipelineState:s.dequant_pipeline];
-        [encoder setBuffer:b.act_q8 offset:static_cast<NSUInteger>(t * hidden) atIndex:0];
-        [encoder setBuffer:b.act_scales offset:static_cast<NSUInteger>(t * (hidden / 32U) * sizeof(float)) atIndex:1];
-        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:2];
-        [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-
-        [encoder setComputePipelineState:s.fast_f32_pipeline];
-        [encoder setBuffer:down_weights.buffer offset:static_cast<NSUInteger>(down_weights.offset) atIndex:0];
-        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
-        [encoder setBuffer:b.out offset:static_cast<NSUInteger>(t * columns * sizeof(float)) atIndex:3];
+    // The down matvec's activation is widened for every token in one dispatch,
+    // then projected in one dispatch.
+    [encoder setComputePipelineState:s.dequant_pipeline];
+    [encoder setBuffer:b.act_q8 offset:0 atIndex:0];
+    [encoder setBuffer:b.act_scales offset:0 atIndex:1];
+    [encoder setBuffer:b.wide offset:0 atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    {
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(first.down.row_bytes);
         const std::uint32_t blocks32 = static_cast<std::uint32_t>(hidden / 64U);
         const float scale = first.down.scale;
         const std::uint32_t lanes = 32U;
+        const std::uint32_t rows32 = static_cast<std::uint32_t>(columns);
+        const std::uint32_t x_stride32 = static_cast<std::uint32_t>(hidden);
+        [encoder setComputePipelineState:s.fast_f32_multi_pipeline];
+        [encoder setBuffer:down_weights.buffer offset:static_cast<NSUInteger>(down_weights.offset) atIndex:0];
+        [encoder setBuffer:b.wide offset:0 atIndex:1];
+        [encoder setBuffer:b.out offset:0 atIndex:3];
         [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
         [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
         [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
         [encoder setBytes:&lanes length:sizeof(lanes) atIndex:7];
-        [encoder dispatchThreadgroups:MTLSizeMake(columns, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
+        [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:9];
+        [encoder dispatchThreadgroups:MTLSizeMake(columns * count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     }
     [encoder endEncoding];
     [command commit];
@@ -2199,28 +2291,29 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
         [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
 
     }
-    for (std::size_t t = 0; t < count; ++t) {
-        if (skip_norm) {
-            continue;
-        }
-        [encoder setComputePipelineState:s.ssm_gate_norm_pipeline];
-        [encoder setBuffer:b.delta offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
-        [encoder setBuffer:b.z offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
+    if (!skip_norm) {
+        [encoder setComputePipelineState:s.gate_norm_multi_pipeline];
+        [encoder setBuffer:b.delta offset:0 atIndex:0];
+        [encoder setBuffer:b.z offset:0 atIndex:1];
         [encoder setBuffer:layer.side offset:norm_offset * sizeof(float) atIndex:2];
-        [encoder setBuffer:b.grouped offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:3];
+        [encoder setBuffer:b.grouped offset:0 atIndex:3];
         [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:4];
         [encoder setBytes:&key_heads32 length:sizeof(key_heads32) atIndex:5];
         [encoder setBytes:&heads_per_key32 length:sizeof(heads_per_key32) atIndex:6];
         [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
-        [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+        [encoder setBytes:&value_heads32 length:sizeof(value_heads32) atIndex:8];
+        [encoder dispatchThreadgroups:MTLSizeMake(value_heads * count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
 
-        [encoder setComputePipelineState:s.hadamard_quantize_pipeline];
-        [encoder setBuffer:b.grouped offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
+        [encoder setComputePipelineState:s.hadamard_multi_pipeline];
+        [encoder setBuffer:b.grouped offset:0 atIndex:0];
         [encoder setBuffer:signs_buffer offset:0 atIndex:1];
-        [encoder setBuffer:b.act_q8 offset:static_cast<NSUInteger>(t * hidden) atIndex:2];
-        [encoder setBuffer:b.act_scales offset:static_cast<NSUInteger>(t * (hidden / 32U) * sizeof(float)) atIndex:3];
+        [encoder setBuffer:b.act_q8 offset:0 atIndex:2];
+        [encoder setBuffer:b.act_scales offset:0 atIndex:3];
         [encoder setBytes:&block32 length:sizeof(block32) atIndex:4];
-        [encoder dispatchThreadgroups:MTLSizeMake(hidden / job.block_size, 1, 1)
+        const std::uint32_t sign_blocks = static_cast<std::uint32_t>(hidden / job.block_size);
+        [encoder setBytes:&sign_blocks length:sizeof(sign_blocks) atIndex:5];
+        [encoder dispatchThreadgroups:MTLSizeMake((hidden / job.block_size) * count, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(job.block_size, 1, 1)];
     }
     // The output projections are independent across tokens; running them after
@@ -2411,16 +2504,21 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
         const float scale = pass == 0U ? job.q.scale : (pass == 1U ? job.k.scale : job.v.scale);
         const std::uint32_t blocks32 = static_cast<std::uint32_t>(job.columns / 64U);
         const std::uint32_t lanes = 32U;
-        for (std::size_t t = 0; t < count; ++t) {
-            [encoder setComputePipelineState:s.fast_f32_pipeline];
+        {
+            const std::uint32_t rows32 = static_cast<std::uint32_t>(rows);
+            const std::uint32_t x_stride32 = static_cast<std::uint32_t>(job.columns);
+            [encoder setComputePipelineState:s.fast_f32_multi_pipeline];
             [encoder setBuffer:weights.buffer offset:static_cast<NSUInteger>(weights.offset) atIndex:0];
-            [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:1];
-            [encoder setBuffer:target offset:static_cast<NSUInteger>(t * rows * sizeof(float)) atIndex:3];
+            [encoder setBuffer:b.wide offset:0 atIndex:1];
+            [encoder setBuffer:target offset:0 atIndex:3];
             [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
             [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
             [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
             [encoder setBytes:&lanes length:sizeof(lanes) atIndex:7];
-            [encoder dispatchThreadgroups:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
+            [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:9];
+            [encoder dispatchThreadgroups:MTLSizeMake(rows * count, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         }
     }
     // Head norms, RoPE, gate sigmoid and the f16 KV append for every token.
@@ -2492,14 +2590,16 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
     }
     // Hadamard and requantisation per token, then the widened activations for
     // every token in one dispatch, then the projections.
-    for (std::size_t t = 0; t < count; ++t) {
-        [encoder setComputePipelineState:s.hadamard_quantize_pipeline];
-        [encoder setBuffer:b.attn offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
+    {
+        [encoder setComputePipelineState:s.hadamard_multi_pipeline];
+        [encoder setBuffer:b.attn offset:0 atIndex:0];
         [encoder setBuffer:signs_buffer offset:0 atIndex:1];
-        [encoder setBuffer:b.act_q8 offset:static_cast<NSUInteger>(t * hidden) atIndex:2];
-        [encoder setBuffer:b.act_scales offset:static_cast<NSUInteger>(t * (hidden / 32U) * sizeof(float)) atIndex:3];
+        [encoder setBuffer:b.act_q8 offset:0 atIndex:2];
+        [encoder setBuffer:b.act_scales offset:0 atIndex:3];
         [encoder setBytes:&block32 length:sizeof(block32) atIndex:4];
-        [encoder dispatchThreadgroups:MTLSizeMake(hidden / job.block_size, 1, 1)
+        const std::uint32_t sign_blocks = static_cast<std::uint32_t>(hidden / job.block_size);
+        [encoder setBytes:&sign_blocks length:sizeof(sign_blocks) atIndex:5];
+        [encoder dispatchThreadgroups:MTLSizeMake((hidden / job.block_size) * count, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(job.block_size, 1, 1)];
     }
     [encoder setComputePipelineState:s.dequant_pipeline];
@@ -2507,20 +2607,25 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
     [encoder setBuffer:b.act_scales offset:0 atIndex:1];
     [encoder setBuffer:b.wide offset:0 atIndex:2];
     [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-    for (std::size_t t = 0; t < count; ++t) {
-        [encoder setComputePipelineState:s.fast_f32_pipeline];
-        [encoder setBuffer:out_weights.buffer offset:static_cast<NSUInteger>(out_weights.offset) atIndex:0];
-        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
-        [encoder setBuffer:b.out offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:3];
+    {
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(job.out.row_bytes);
         const std::uint32_t blocks32 = static_cast<std::uint32_t>(hidden / 64U);
         const float scale = job.out.scale;
         const std::uint32_t lanes = 32U;
+        const std::uint32_t rows32 = static_cast<std::uint32_t>(job.out.rows);
+        const std::uint32_t x_stride32 = static_cast<std::uint32_t>(hidden);
+        [encoder setComputePipelineState:s.fast_f32_multi_pipeline];
+        [encoder setBuffer:out_weights.buffer offset:static_cast<NSUInteger>(out_weights.offset) atIndex:0];
+        [encoder setBuffer:b.wide offset:0 atIndex:1];
+        [encoder setBuffer:b.out offset:0 atIndex:3];
         [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
         [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
         [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
         [encoder setBytes:&lanes length:sizeof(lanes) atIndex:7];
-        [encoder dispatchThreadgroups:MTLSizeMake(job.out.rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
+        [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:9];
+        [encoder dispatchThreadgroups:MTLSizeMake(job.out.rows * count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     }
     [encoder endEncoding];
     [command commit];
