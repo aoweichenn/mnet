@@ -100,6 +100,11 @@ Quirk: this llama-bench build prints `ngl 10` in every row even with
   identity, stored **transposed inside a head** so the scan's passes are
   coalesced and barrier free. `--dump` and `--save-state/--load-state` force
   the step-by-step path because the device does not hand the state back.
+- Weights are **aliased from an mmap of the GGUF**, not copied: `Reader` maps
+  the file read-only and `Quantized` borrows views (`data()`/`size()`), and the
+  Metal backend creates one `newBufferWithBytesNoCopy` over the mapping,
+  binding tensors with `setBuffer:offset:`. `MNET_NO_ALIAS=1` restores the copy
+  path for A/B. Do not prefault the mapping (measured slower).
 - `MNET_PROFILE=1` prints the per-section CPU seconds of a forward; it is how
   each remaining hotspot got located. `MNET_COMPUTE_STATS=1` prints the
   device-side split (matvec / fused ffn / fused attn / fused ssm).
@@ -111,7 +116,7 @@ Quirk: this llama-bench build prints `ngl 10` in every row even with
   rejected (accumulator dependency chain, rows per threadgroup).
 - Measured Bonsai 27B Q2_0, 32 tokens: CPU 167.7 s (5.24 s/token); Metal
   exact 8.23-8.48 s (2371/2371 identical); Metal fast + fused FFN + fused
-  attention + fused SSM 4.50 s (-40% vs the CPU build's per-token cost
+  attention + fused SSM 3.40 s (no-copy weights) (-40% vs the CPU build's per-token cost
   would be 5.24 s/token, i.e. ~30x faster); normalized max logit diff vs
   the CPU build 4.8e-3, top-5 unchanged.
 - Build dirs: `build-metal` (Metal ON), `build-cpu` (CPU reference) in
