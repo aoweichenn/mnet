@@ -320,6 +320,17 @@ public:
         }
     }
 
+    // Drop the sequence state (KV length and the recurrent state) so the next
+    // forward starts from position 0. The benchmark loops use this: without it a
+    // repeated forward keeps growing the KV cache and attention slows down by
+    // ~18 ms per pass even though the compute does not change (log 134).
+    void reset_session() {
+        for (auto& layer : this->state_) {
+            layer.cache_tokens = 0;
+        }
+        this->init_state(this->config_.n_layer);
+    }
+
     void save_state(const std::string& path) const {
         std::ofstream file(path, std::ios::binary);
         if (!file) {
@@ -1257,6 +1268,7 @@ int main(std::int32_t argc, char** argv) {
         // preparation, so this is what an amortised number looks like.
         std::vector<double> repeat_ms;
         for (std::size_t r = 1; r < repeat; ++r) {
+            model.reset_session();
             auto again = input_hidden;
             const auto t0 = std::chrono::steady_clock::now();
             auto out = model.forward(std::move(again), positions, "", false);
