@@ -67,10 +67,19 @@ kernel void q2_0_mat_mat_f16(device const uchar* w        [[buffer(0)]],
             }
         }
         // Activations: one tile of the batch, transposed to [token][k].
-        for (uint idx = tiitg; idx < NR1 * NK; idx += 128u) {
-            const uint tok = idx / NK;
-            const uint k = idx % NK;
-            sb[idx] = (tok < tok_count && k0 + k < columns) ? half(x[(ulong)(tok0 + tok) * x_stride + k0 + k]) : half(0.0f);
+        // Four consecutive columns per thread, loaded as one 16-byte vector and
+        // stored as one half4. The scalar version (one float per thread per
+        // iteration) was the kernel's whole bottleneck: with the tiles left
+        // static, the same loop runs at 5.85 TFLOP/s instead of 1.76
+        // (benchmarks/metal/q2_0_mat_mat_bench.mm).
+        for (uint idx = tiitg; idx < NR1 * (NK / 4u); idx += 128u) {
+            const uint tok = idx / (NK / 4u);
+            const uint k = (idx % (NK / 4u)) * 4u;
+            float4 v = float4(0.0f, 0.0f, 0.0f, 0.0f);
+            if (tok < tok_count && k0 + k + 3u < columns) {
+                v = *reinterpret_cast<device const float4*>(x + (ulong)(tok0 + tok) * x_stride + k0 + k);
+            }
+            *reinterpret_cast<threadgroup half4*>(sb + tok * NK + k) = half4(v.x, v.y, v.z, v.w);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -194,7 +203,6 @@ kernel void q2_0_mat_mat_f16_static(device const uchar* w        [[buffer(0)]],
         }
     }
 }
-
 )MSL";
 
 namespace {
