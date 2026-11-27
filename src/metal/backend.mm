@@ -442,6 +442,13 @@ kernel void ssm_l2norm(device float* data            [[buffer(0)]],
 // thread `j` owning output component j. The state is held transposed
 // (state[i * head_dim + j]) so every thread reads and writes consecutive
 // addresses. There is no cross-thread dependency, so no barrier is needed.
+//
+// A column-tiled variant that loads each 32-column state tile into threadgroup
+// memory once (decay, key dot, update and query dot on the resident tile, so
+// the 64 KB per-head state is read and written once instead of four times and
+// twice) was measured: ssm 1.420-1.422 s and GPU wait 0.871-0.873 ms per call,
+// identical to this version. The block is not state-traffic bound, so the
+// simpler single-pass form stays.
 kernel void ssm_scan(device const float* q            [[buffer(0)]],
                      device const float* k            [[buffer(1)]],
                      device const float* v            [[buffer(2)]],
@@ -464,9 +471,6 @@ kernel void ssm_scan(device const float* q            [[buffer(0)]],
     for (uint i = 0; i < head_dim; ++i) {
         sh[i * head_dim + tid] *= decay;
     }
-    // Note: four accumulators here (splitting the 128-long fma chain) measured
-    // within noise (ssm 1.37-1.38 s vs 1.39-1.41 s) and changed the fifth
-    // top-5 token, so the single chain stays.
     float d = 0.0f;
     for (uint i = 0; i < head_dim; ++i) {
         d = fma(kh[i], sh[i * head_dim + tid], d);
@@ -737,8 +741,6 @@ struct WeightBinding {
 // into device memory; the per-tensor offset is applied when the kernel is
 // encoded. Tensors that arrive as owned vectors (synthetic callers) keep the
 // copy path.
-WeightBinding weight_buffer_for(MetalState& s, const MatvecQ8_0Job& job, std::uint64_t rows,
-                                std::uint64_t row_bytes);
 WeightBinding owned_weight_buffer(MetalState& s, const MatvecQ8_0Job& job, std::uint64_t rows,
                                   std::uint64_t row_bytes) {
     const std::uint64_t bytes = rows * row_bytes;
@@ -1503,13 +1505,27 @@ bool ssm_block(const SsmQ2_0Job& job) {
     const std::uint32_t k_offset = static_cast<std::uint32_t>(key_heads * head_dim);
     const std::uint32_t v_offset = static_cast<std::uint32_t>(2U * key_heads * head_dim);
 
+    // MNET_SSM_SKIP=<phase> drops one phase for timing; results are garbage.
+    static const std::string skip =
+        std::getenv("MNET_SSM_SKIP") != nullptr ? std::string(std::getenv("MNET_SSM_SKIP")) : std::string();
+    const bool skip_all = skip == "all";
+    const bool only_matvec = skip == "onlymatvec";
+    const bool skip_matvec = skip_all || skip == "matvec";
+    const bool skip_gate = skip_all || only_matvec || skip == "gate";
+    const bool skip_conv = skip_all || only_matvec || skip == "conv";
+    const bool skip_scan = skip_all || only_matvec || skip == "scan";
+    const bool skip_norm = skip_all || only_matvec || skip == "norm";
+
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    if (!skip_matvec) {
     encode_dispatch(s, encoder, qkv_weights, job.qkv.rows, job.columns, job.qkv.row_bytes, job.qkv.scale,
                     static_cast<std::uint64_t>(ring32) * conv_dim, b.q8, b.scales, layer.window);
     encode_dispatch(s, encoder, gate_weights, job.gate.rows, job.columns, job.gate.row_bytes, job.gate.scale, 0, b.q8,
                     b.scales, b.z);
+    }
 
+    if (!skip_gate) {
     [encoder setComputePipelineState:s.ssm_rows_pipeline];
     [encoder setBuffer:layer.side offset:beta_offset * sizeof(float) atIndex:0];
     [encoder setBuffer:b.activation offset:0 atIndex:1];
@@ -1525,7 +1541,9 @@ bool ssm_block(const SsmQ2_0Job& job) {
     [encoder setBuffer:b.gates offset:static_cast<NSUInteger>(value_heads) * sizeof(float) atIndex:4];
     [encoder setBytes:&value_heads32 length:sizeof(value_heads32) atIndex:5];
     [encoder dispatchThreads:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    }
 
+    if (!skip_conv) {
     [encoder setComputePipelineState:s.ssm_conv_pipeline];
     [encoder setBuffer:layer.window offset:0 atIndex:0];
     [encoder setBuffer:layer.side offset:conv_w_offset * sizeof(float) atIndex:1];
@@ -1540,7 +1558,9 @@ bool ssm_block(const SsmQ2_0Job& job) {
     [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:1];
     [encoder setBytes:&eps length:sizeof(eps) atIndex:2];
     [encoder dispatchThreadgroups:MTLSizeMake(2U * key_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+    }
 
+    if (!skip_scan) {
     [encoder setComputePipelineState:s.ssm_scan_pipeline];
     [encoder setBuffer:b.conv offset:q_offset * sizeof(float) atIndex:0];
     [encoder setBuffer:b.conv offset:k_offset * sizeof(float) atIndex:1];
@@ -1553,7 +1573,9 @@ bool ssm_block(const SsmQ2_0Job& job) {
     [encoder setBytes:&key_heads32 length:sizeof(key_heads32) atIndex:8];
     [encoder setBytes:&inv_dim length:sizeof(inv_dim) atIndex:9];
     [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+    }
 
+    if (!skip_norm) {
     [encoder setComputePipelineState:s.ssm_gate_norm_pipeline];
     [encoder setBuffer:b.delta offset:0 atIndex:0];
     [encoder setBuffer:b.z offset:0 atIndex:1];
@@ -1588,6 +1610,7 @@ bool ssm_block(const SsmQ2_0Job& job) {
 
     encode_dispatch(s, encoder, out_weights, job.out.rows, hidden, job.out.row_bytes, job.out.scale, 0, act_q8,
                     act_scales, out_buffer);
+    }
     [encoder endEncoding];
     [command commit];
     const std::uint64_t ssm_encode = now_ns();
