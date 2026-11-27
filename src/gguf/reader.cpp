@@ -14,7 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "internal.hpp"
+#include <gguf/internal.hpp>
 #include <mnet/detail/iq1s_grid.hpp>
 #include <mnet/detail/iq_grids.hpp>
 #include <mnet/gguf/format.hpp>

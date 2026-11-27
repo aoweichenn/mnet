@@ -11,7 +11,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "internal.hpp"
+#include <gguf/internal.hpp>
 
 namespace mnet::gguf {
 
