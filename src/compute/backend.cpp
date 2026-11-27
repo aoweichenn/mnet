@@ -53,6 +53,11 @@ std::atomic<SsmQ2_0BatchFn>& ssm_batch_slot() {
     return slot;
 }
 
+std::atomic<LayerPrepFn>& layer_prep_slot() {
+    static std::atomic<LayerPrepFn> slot{nullptr};
+    return slot;
+}
+
 std::atomic<RmsNormFn>& rms_norm_slot() {
     static std::atomic<RmsNormFn> slot{nullptr};
     return slot;
@@ -137,6 +142,18 @@ void set_attention_batch_backend(AttentionQ2_0BatchFn backend) {
 
 void set_rms_norm_backend(RmsNormFn backend) {
     rms_norm_slot().store(backend);
+}
+
+void set_layer_prep_backend(LayerPrepFn backend) {
+    layer_prep_slot().store(backend);
+}
+
+bool layer_prep_f32(const float* input, const float* weight, std::uint64_t size, float eps, const std::int32_t* signs,
+                    std::uint32_t block_size, std::int8_t* qs, float* scales) {
+    static std::once_flag once;
+    std::call_once(once, [] { register_platform_backends(); });
+    const LayerPrepFn backend = layer_prep_slot().load();
+    return backend != nullptr && backend(input, weight, size, eps, signs, block_size, qs, scales);
 }
 
 bool rms_norm_f32(const float* input, const float* weight, std::uint64_t size, float eps, float* output) {

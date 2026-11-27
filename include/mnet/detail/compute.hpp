@@ -219,6 +219,15 @@ using RmsNormFn = bool (*)(const float* input, const float* weight, std::uint64_
 void set_rms_norm_backend(RmsNormFn backend);
 [[nodiscard]] bool rms_norm_f32(const float* input, const float* weight, std::uint64_t size, float eps, float* output);
 
+// Layer preparation in one submission: RMSNorm, the model's signed Hadamard and
+// the Q8_0 requantisation that the block matvecs consume. `size` must be a
+// multiple of `block_size`.
+using LayerPrepFn = bool (*)(const float* input, const float* weight, std::uint64_t size, float eps,
+                             const std::int32_t* signs, std::uint32_t block_size, std::int8_t* qs, float* scales);
+void set_layer_prep_backend(LayerPrepFn backend);
+[[nodiscard]] bool layer_prep_f32(const float* input, const float* weight, std::uint64_t size, float eps,
+                                  const std::int32_t* signs, std::uint32_t block_size, std::int8_t* qs, float* scales);
+
 // True when the caller may use the tolerance-level fast paths.
 [[nodiscard]] bool fast_path_enabled();
 

@@ -2817,6 +2817,65 @@ bool rms_norm_host(const float* input, const float* weight, std::uint64_t size, 
     return true;
 }
 
+// Layer preparation on the device: RMSNorm, the signed Hadamard and the Q8_0
+// requantisation, in two dispatches and one submission. Host buffers for now;
+// the device-resident residual stream will bind them directly.
+bool layer_prep_host(const float* input, const float* weight, std::uint64_t size, float eps,
+                     const std::int32_t* signs, std::uint32_t block_size, std::int8_t* qs, float* scales) {
+    MetalState& s = state();
+    if (!s.ready || s.rms_norm_pipeline == nil || s.hadamard_quantize_pipeline == nil || size == 0U ||
+        size > 65536U || block_size < 64U || block_size > 1024U || (block_size & (block_size - 1U)) != 0U ||
+        (size % block_size) != 0U) {
+        return false;
+    }
+    const std::size_t bytes = static_cast<std::size_t>(size) * sizeof(float);
+    id<MTLBuffer> x = [s.device newBufferWithBytes:input length:static_cast<NSUInteger>(bytes)
+                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> w = [s.device newBufferWithBytes:weight length:static_cast<NSUInteger>(bytes)
+                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> normed = [s.device newBufferWithLength:static_cast<NSUInteger>(bytes)
+                                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> sign_buffer = [s.device newBufferWithBytes:signs
+                                                      length:static_cast<NSUInteger>(size * sizeof(std::int32_t))
+                                                     options:MTLResourceStorageModeShared];
+    id<MTLBuffer> qs_buffer = [s.device newBufferWithLength:static_cast<NSUInteger>(size)
+                                                    options:MTLResourceStorageModeShared];
+    id<MTLBuffer> scale_buffer = [s.device newBufferWithLength:static_cast<NSUInteger>(size / 32U * sizeof(float))
+                                                       options:MTLResourceStorageModeShared];
+    if (x == nil || w == nil || normed == nil || sign_buffer == nil || qs_buffer == nil || scale_buffer == nil) {
+        return false;
+    }
+    const std::uint32_t size32 = static_cast<std::uint32_t>(size);
+    const std::uint32_t blocks32 = static_cast<std::uint32_t>(size / block_size);
+    id<MTLCommandBuffer> command = [s.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:s.rms_norm_pipeline];
+    [encoder setBuffer:x offset:0 atIndex:0];
+    [encoder setBuffer:w offset:0 atIndex:1];
+    [encoder setBuffer:normed offset:0 atIndex:2];
+    [encoder setBytes:&size32 length:sizeof(size32) atIndex:3];
+    [encoder setBytes:&eps length:sizeof(eps) atIndex:4];
+    [encoder setThreadgroupMemoryLength:256U * sizeof(float) atIndex:0];
+    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+    [encoder setComputePipelineState:s.hadamard_quantize_pipeline];
+    [encoder setBuffer:normed offset:0 atIndex:0];
+    [encoder setBuffer:sign_buffer offset:0 atIndex:1];
+    [encoder setBuffer:qs_buffer offset:0 atIndex:2];
+    [encoder setBuffer:scale_buffer offset:0 atIndex:3];
+    [encoder setBytes:&block_size length:sizeof(block_size) atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(blocks32, 1, 1) threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted) {
+        return false;
+    }
+    std::memcpy(qs, qs_buffer.contents, static_cast<std::size_t>(size));
+    std::memcpy(scales, scale_buffer.contents, static_cast<std::size_t>(size / 32U) * sizeof(float));
+    return true;
+}
+
 bool matvec_q8_0_backend(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
                          std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales,
                          float* out, std::uint64_t identity, const std::uint8_t* region,
@@ -2853,6 +2912,8 @@ void register_platform_backends() {
     set_attention_backend(&attention);
     set_attention_batch_backend(&attention_batch_block);
     set_rms_norm_backend(&rms_norm_host);
+    set_layer_prep_backend(&layer_prep_host);
+    set_layer_prep_backend(&layer_prep_host);
     set_ssm_backend(&ssm_block);
     set_ssm_batch_backend(&ssm_batch_block);
 }
