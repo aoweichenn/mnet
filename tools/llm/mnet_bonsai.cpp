@@ -523,6 +523,7 @@ private:
         }
         add_time("branch", since(t_branch));
         const auto t_tail = std::chrono::steady_clock::now();
+        const auto t_cpu = std::chrono::steady_clock::now();
         for (std::size_t i = 0; i < this->config_.n_embd; ++i) {
             x[i] += branch[i];
         }
@@ -537,6 +538,7 @@ private:
         }
         auto ph = pn;
         hadamard_forward(ph, signs_embd, this->config_.hadamard_block);
+        add_time("tail_cpu", since(t_cpu));
         const auto& signs_hidden = this->signs_hidden_;
         std::vector<float> down(this->config_.n_embd);
         bool fused = false;
