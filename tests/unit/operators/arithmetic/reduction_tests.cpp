@@ -10,7 +10,7 @@
 #include <mlayer/cumulativesum.hpp>
 #include <mlayer/reduction.hpp>
 #include <mlayer/unaryop.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
 
 TEST(ArithmeticKernel, UnarySqrtScalarAndVector) {
     using U = mlayer::UnaryOp<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;

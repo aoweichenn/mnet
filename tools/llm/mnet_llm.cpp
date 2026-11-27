@@ -22,8 +22,8 @@
 #include <sys/resource.h>
 #endif
 
-#include <mnet/net.hpp>
-#include <mnet/tokenizer.hpp>
+#include <mnet/core/net.hpp>
+#include <mnet/tokenizer/tokenizer.hpp>
 
 namespace {
 

@@ -9,17 +9,17 @@
 //
 // Reference dumps come from tools/dump_piper_reference.py (deterministic noise).
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+
+#include <algorithm>
 #include <exception>
 #include <filesystem>
 #include <new>
 #include <string>
 
-#include <mnet/tts_ops.hpp>
-
+#include <mnet/tts/tts_ops.hpp>
 #include <tts/common.hpp>
 
 namespace {

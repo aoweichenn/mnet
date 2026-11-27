@@ -1,4 +1,4 @@
-#include <mnet/result.hpp>
+#include <mnet/core/result.hpp>
 
 int main() {
     const mnet::Status status{};

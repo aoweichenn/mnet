@@ -17,9 +17,9 @@
 #include <string>
 #include <vector>
 
-#include <mnet/bpe.hpp>
 #include <mnet/detail/ggml_kernels.hpp>
 #include <mnet/gguf.hpp>
+#include <mnet/tokenizer/bpe.hpp>
 
 namespace {
 
@@ -267,8 +267,8 @@ using mnet::detail::ggml::softmax_exp;
     for (std::size_t i = 0; i < n; ++i) {
         // llama: add(sub(cur, mul(forget, cur)), mul(gain, message)) with each
         // product rounded separately.
-        out[i] =
-            (cur[i] - rounded_product(mnet::detail::ggml::tanhf(forget[i]), cur[i])) + rounded_product(mnet::detail::ggml::tanhf(gain[i]), message[i]);
+        out[i] = (cur[i] - rounded_product(mnet::detail::ggml::tanhf(forget[i]), cur[i])) +
+                 rounded_product(mnet::detail::ggml::tanhf(gain[i]), message[i]);
     }
     return out;
 }
@@ -576,7 +576,7 @@ private:
         const float tau = static_cast<float>(
             1.0 + static_cast<double>(this->config_.log_scale_alpha) *
                       mnet::detail::ggml::dlog(std::max(1.0, static_cast<double>(position + 1) /
-                                                 static_cast<double>(this->config_.log_scale_floor))));
+                                                                 static_cast<double>(this->config_.log_scale_floor))));
 
         const auto wq = this->reader_.quantized(this->reader_.tensor(prefix + "attn_q.weight"));
         std::vector<float> q(this->config_.n_head * this->config_.head_dim);

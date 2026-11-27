@@ -1,30 +1,25 @@
 #pragma once
+#include <cstdint>
+#include <mnet/detail/tokenizer_types.h>
+
+#include <functional>
+#include <limits>
+#include <map>
+#include <mutex>
 #include <string>
-#include <vector>
 #include <unordered_map>
 #include <unordered_set>
-#include <cstdint>
-#include <functional>
 #include <utility>
-#include <limits>
-#include <mutex>
-#include <map>
-#include <mnet/detail/tokenizer_types.h>
+#include <vector>
 
 class BpeTokenizer {
 public:
-    static BpeTokenizer LoadFromFiles(const std::string& vocab_path,
-                                      const std::string& merges_path,
-                                      const SpecialTokensConfig& spec,
-                                      bool add_special_if_missing = true,
-                                      bool fallback_to_chars = true,
-                                      bool use_byte_encoder = false);
+    static BpeTokenizer LoadFromFiles(const std::string& vocab_path, const std::string& merges_path,
+                                      const SpecialTokensConfig& spec, bool add_special_if_missing = true,
+                                      bool fallback_to_chars = true, bool use_byte_encoder = false);
 
-    std::vector<std::int32_t> encode(const std::string& text,
-                            bool add_bos = false,
-                            bool add_eos = false,
-                            bool add_cls = false,
-                            bool add_sep = false) const;
+    std::vector<std::int32_t> encode(const std::string& text, bool add_bos = false, bool add_eos = false,
+                                     bool add_cls = false, bool add_sep = false) const;
 
     std::string decode(const std::vector<std::int32_t>& ids, bool skip_special_tokens = true) const;
 
@@ -34,15 +29,11 @@ public:
     const SpecialTokenIds& special_ids() const { return special_ids_; }
     bool fallback_to_chars() const { return fallback_to_chars_; }
 
-    void AddAdditionalSpecialToken(const std::string& token,
-                                   bool add_if_missing = true);
+    void AddAdditionalSpecialToken(const std::string& token, bool add_if_missing = true);
 
-    void SetAdditionalSpecialTokens(const std::vector<std::string>& tokens,
-                                    bool add_if_missing = true);
+    void SetAdditionalSpecialTokens(const std::vector<std::string>& tokens, bool add_if_missing = true);
 
-    const std::vector<std::int32_t>& additional_special_token_ids() const {
-        return additional_special_token_ids_;
-    }
+    const std::vector<std::int32_t>& additional_special_token_ids() const { return additional_special_token_ids_; }
 
     BpeTokenizer(const BpeTokenizer&) = delete;
     BpeTokenizer& operator=(const BpeTokenizer&) = delete;

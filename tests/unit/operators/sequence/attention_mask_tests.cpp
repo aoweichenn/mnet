@@ -7,7 +7,7 @@
 
 #include <limits>
 
-#include <mnet/net.hpp>
+#include <mnet/core/net.hpp>
 #include <operator_test.hpp>
 
 namespace {

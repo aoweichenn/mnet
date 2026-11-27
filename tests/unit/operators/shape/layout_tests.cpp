@@ -13,7 +13,7 @@
 #include <mlayer/permute.hpp>
 #include <mlayer/reshape.hpp>
 #include <mlayer/squeeze.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
 
 TEST(ShapeKernel, ExpandDimsScalarAxisMappings) {
     using ED = mlayer::ExpandDims<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;

@@ -3,17 +3,18 @@
 // Activation tensors and the flattened parameter blob used by the TTS runners,
 // plus the tracked memory budget that MNET_MAX_MEM_MB enforces.
 
-#include <algorithm>
-#include <atomic>
-#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+
+#include <algorithm>
+#include <atomic>
+#include <bit>
 #include <fstream>
 #include <map>
 #include <new>
-#include <stdexcept>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>

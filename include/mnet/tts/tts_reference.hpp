@@ -8,13 +8,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
 #include <fstream>
 #include <map>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <mnet/tts_tensor.hpp>
+#include <mnet/tts/tts_tensor.hpp>
 
 namespace mnet::tts {
 
@@ -63,7 +64,7 @@ struct Reference {
 // Some reference dumps are stored time-major ([1, T, C], the view the operator
 // works on inside ONNX); the runner keeps activations channel-major.
 inline void report(const Reference& ref, const std::string& label, const Act& act, const std::string& name,
-            bool time_major = false) {
+                   bool time_major = false) {
     const auto it = ref.tensors.find(label);
     if (it == ref.tensors.end()) {
         return;
@@ -92,7 +93,7 @@ inline void report(const Reference& ref, const std::string& label, const Act& ac
 // spectrogram, whose phase in near-silent bins is defined by the reference
 // FFT's rounding).
 inline void report_channels(const Reference& ref, const std::string& label, const Act& act, const std::string& name,
-                     std::size_t channels) {
+                            std::size_t channels) {
     const auto it = ref.tensors.find(label);
     if (it == ref.tensors.end()) {
         return;

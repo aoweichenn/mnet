@@ -6,7 +6,7 @@
 
 #include <cstdint>
 
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
 
 namespace mnet {
 

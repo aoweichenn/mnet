@@ -13,7 +13,7 @@
 #include <mlayer/nonzero.hpp>
 #include <mlayer/range.hpp>
 #include <mlayer/scatternd.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
 
 // Gather along axis 0 (1-D and 2-D) and axis 1 (2-D).
 TEST(IndexingKernel, GatherIndices) {

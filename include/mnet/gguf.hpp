@@ -366,8 +366,9 @@ struct Q8_0Blocks {
         const std::uint8_t* ql = block;
         const std::uint8_t* qh = block + 128U;
         const std::int8_t* q = q8.qs.data() + i * 256U;
-        const float d = q8.d[i] *
-                        half_to_float(static_cast<std::uint16_t>(block[208] | (static_cast<std::uint16_t>(block[209]) << 8U)));
+        const float d =
+            q8.d[i] *
+            half_to_float(static_cast<std::uint16_t>(block[208] | (static_cast<std::uint16_t>(block[209]) << 8U)));
         std::int32_t scales[16];
         for (std::size_t k = 0; k < 16; ++k) {
             scales[k] = static_cast<std::int8_t>(block[192U + k]);
@@ -375,9 +376,9 @@ struct Q8_0Blocks {
         // q8sclsub = 32 * sum over the 16-value groups of (bsum * scale).
         std::uint32_t q8sclsub[8];
         for (std::size_t lane = 0; lane < 8; ++lane) {
-            const std::int32_t pair = static_cast<std::int32_t>(q8.bsums[i * 16U + lane * 2U]) * scales[lane * 2U] +
-                                      static_cast<std::int32_t>(q8.bsums[i * 16U + lane * 2U + 1U]) *
-                                          scales[lane * 2U + 1U];
+            const std::int32_t pair =
+                static_cast<std::int32_t>(q8.bsums[i * 16U + lane * 2U]) * scales[lane * 2U] +
+                static_cast<std::int32_t>(q8.bsums[i * 16U + lane * 2U + 1U]) * scales[lane * 2U + 1U];
             q8sclsub[lane] = static_cast<std::uint32_t>(pair) << 5U;
         }
         std::uint32_t sumi[8] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
@@ -405,8 +406,8 @@ struct Q8_0Blocks {
                         low4 = static_cast<std::uint8_t>(ql2[idx] >> 4U);
                         high2 = static_cast<std::uint8_t>((qhb[idx] & 0xC0U) >> 6U);
                     }
-                    const std::int32_t value = static_cast<std::int32_t>(low4) |
-                                               (static_cast<std::int32_t>(high2) << 4);
+                    const std::int32_t value =
+                        static_cast<std::int32_t>(low4) | (static_cast<std::int32_t>(high2) << 4);
                     const std::int32_t product =
                         value * static_cast<std::int32_t>(q8b[static_cast<std::size_t>(group) * 32U + idx]);
                     if ((idx & 1U) == 0U) {
@@ -447,8 +448,9 @@ struct Q8_0Blocks {
     float accum1 = 0.0F;
     for (std::uint64_t b = 0; b < blocks; ++b) {
         const std::uint8_t* block = data + b * 50U;
-        const float d = q8.d[b] *
-                        half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U)));
+        const float d =
+            q8.d[b] *
+            half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U)));
         const std::uint8_t* qs = block + 2U;
         const auto qh = reinterpret_cast<const std::uint16_t*>(block + 34);
         const std::int8_t* q = q8.qs.data() + b * 256U;
@@ -542,14 +544,12 @@ inline bool& ggml_tinyblas_batch() {
 // The batched (n >= 2) llamafile_sgemm BF16 kernel: weights and activations
 // are bf16, promoted to f32 and fused into an eight-lane accumulator over K,
 // then reduced as ((a0+a4)+(a2+a6)) + ((a1+a5)+(a3+a7)) (sgemm.cpp hsum).
-[[nodiscard]] inline float dot_bf16_tinyblas(const std::uint8_t* data, const std::uint16_t* input,
-                                             std::uint64_t size) {
+[[nodiscard]] inline float dot_bf16_tinyblas(const std::uint8_t* data, const std::uint16_t* input, std::uint64_t size) {
     float acc[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
     std::uint64_t i = 0;
     for (; i + 8 <= size; i += 8) {
         for (std::uint64_t j = 0; j < 8; ++j) {
-            const std::uint16_t bits =
-                static_cast<std::uint16_t>(data[(i + j) * 2] | (data[(i + j) * 2 + 1] << 8U));
+            const std::uint16_t bits = static_cast<std::uint16_t>(data[(i + j) * 2] | (data[(i + j) * 2 + 1] << 8U));
             acc[j] = std::fma(bf16_bits_to_float(bits), bf16_bits_to_float(input[i + j]), acc[j]);
         }
     }
@@ -851,7 +851,6 @@ inline bool& ggml_tinyblas_batch() {
         13, 13, 13, 13, 13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15, 15, 15};
     return _mm_loadu_si128(reinterpret_cast<const __m128i*>(kShuffle) + index);
 }
-
 
 [[nodiscard]] inline float dot_q6_k_q8_k_avx2(const std::uint8_t* data, const Q8KBlocks& q8, std::uint64_t blocks) {
     const __m256i m3 = _mm256_set1_epi8(3);
@@ -1322,9 +1321,9 @@ inline bool& ggml_tinyblas_batch() {
             // pairs; real Q8_0 codes stay in [-127, 127] so this only matters
             // for synthetic data containing -128.
             const auto pair = [&](std::size_t k0) {
-                const int sum = static_cast<int>(static_cast<std::int8_t>(block[2U + j * 4U + k0])) * qy[j * 4U + k0] +
-                                static_cast<int>(static_cast<std::int8_t>(block[2U + j * 4U + k0 + 1U])) *
-                                    qy[j * 4U + k0 + 1U];
+                const int sum =
+                    static_cast<int>(static_cast<std::int8_t>(block[2U + j * 4U + k0])) * qy[j * 4U + k0] +
+                    static_cast<int>(static_cast<std::int8_t>(block[2U + j * 4U + k0 + 1U])) * qy[j * 4U + k0 + 1U];
                 return std::min(32767, std::max(-32768, sum));
             };
             const int lane = pair(0) + pair(2);
@@ -1348,8 +1347,9 @@ inline bool& ggml_tinyblas_batch() {
     float accum[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
     for (std::uint64_t b = 0; b < blocks; ++b) {
         const std::uint8_t* block = data + b * 66U;
-        const float d = q8.d[b] *
-                        half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U)));
+        const float d =
+            q8.d[b] *
+            half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U)));
         const auto* q2 = reinterpret_cast<const std::uint16_t*>(block + 2);
         const std::int8_t* q = q8.qs.data() + b * 256U;
         std::uint32_t sumi1[8] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
@@ -1382,10 +1382,10 @@ inline bool& ggml_tinyblas_batch() {
                     const std::size_t at = lane * 4U + j;
                     const auto sign1 = static_cast<std::int8_t>((s1[at / 8U] >> (8U * (at % 8U))) & 0xFFU);
                     const auto sign2 = static_cast<std::int8_t>((s2[at / 8U] >> (8U * (at % 8U))) & 0xFFU);
-                    const std::int32_t v1 = sign1 < 0 ? -static_cast<std::int32_t>(q8_1[at])
-                                                      : static_cast<std::int32_t>(q8_1[at]);
-                    const std::int32_t v2 = sign2 < 0 ? -static_cast<std::int32_t>(q8_2[at])
-                                                      : static_cast<std::int32_t>(q8_2[at]);
+                    const std::int32_t v1 =
+                        sign1 < 0 ? -static_cast<std::int32_t>(q8_1[at]) : static_cast<std::int32_t>(q8_1[at]);
+                    const std::int32_t v2 =
+                        sign2 < 0 ? -static_cast<std::int32_t>(q8_2[at]) : static_cast<std::int32_t>(q8_2[at]);
                     p1 += static_cast<std::int32_t>(grid1[at]) * v1;
                     p2 += static_cast<std::int32_t>(grid2[at]) * v2;
                 }
@@ -1415,8 +1415,9 @@ inline bool& ggml_tinyblas_batch() {
     float accum[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
     for (std::uint64_t b = 0; b < blocks; ++b) {
         const std::uint8_t* block = data + b * 74U;
-        const float d = q8.d[b] *
-                        half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U)));
+        const float d =
+            q8.d[b] *
+            half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U)));
         const auto* q2 = reinterpret_cast<const std::uint16_t*>(block + 2);
         const std::uint8_t* sc_bytes = block + 66U;
         const std::int8_t* q = q8.qs.data() + b * 256U;
@@ -1442,13 +1443,13 @@ inline bool& ggml_tinyblas_batch() {
                 const std::uint8_t odd_hi = (count_hi & 0x80U) != 0 ? 0U : kBitHelper[count_hi & 0x0FU];
                 // OR the odd bits into the partial sign bytes (not into counting).
                 full_signs[2U * i] = static_cast<std::uint8_t>(static_cast<std::uint8_t>(partial & 0xFFU) | odd_lo);
-                full_signs[2U * i + 1U] =
-                    static_cast<std::uint8_t>(static_cast<std::uint8_t>(partial >> 8U) | odd_hi);
+                full_signs[2U * i + 1U] = static_cast<std::uint8_t>(static_cast<std::uint8_t>(partial >> 8U) | odd_hi);
             }
             for (int group = 0; group < 4; ++group) {
                 std::uint8_t grid[32];
                 for (std::size_t k = 0; k < 4; ++k) {
-                    const std::uint16_t index = static_cast<std::uint16_t>(codes[4U * static_cast<std::size_t>(group) + k] & 511U);
+                    const std::uint16_t index =
+                        static_cast<std::uint16_t>(codes[4U * static_cast<std::size_t>(group) + k] & 511U);
                     std::memcpy(grid + k * 8U, &detail::kIq2xsGrid[index], 8);
                 }
                 const std::int8_t* q8g = q;
@@ -1458,16 +1459,16 @@ inline bool& ggml_tinyblas_batch() {
                     std::int32_t sum = 0;
                     for (std::size_t e = 0; e < 2; ++e) {
                         const std::size_t at = pair * 2U + e;
-                        const std::size_t sign_index =
-                            static_cast<std::size_t>(group) * 8U + 2U * ((at >> 3U) & 3U);
+                        const std::size_t sign_index = static_cast<std::size_t>(group) * 8U + 2U * ((at >> 3U) & 3U);
                         const bool negative = (full_signs[sign_index] & (1U << (at & 7U))) != 0;
-                        const std::int32_t value = negative ? -static_cast<std::int32_t>(q8g[at])
-                                                            : static_cast<std::int32_t>(q8g[at]);
+                        const std::int32_t value =
+                            negative ? -static_cast<std::int32_t>(q8g[at]) : static_cast<std::int32_t>(q8g[at]);
                         sum += static_cast<std::int32_t>(grid[at]) * value;
                     }
                     dot[pair] = static_cast<std::int32_t>(std::int16_t(std::min(32767, std::max(-32768, sum))));
                 }
-                const std::int32_t scale_lo = scales[2U * (static_cast<std::size_t>(ib) + static_cast<std::size_t>(group))];
+                const std::int32_t scale_lo =
+                    scales[2U * (static_cast<std::size_t>(ib) + static_cast<std::size_t>(group))];
                 const std::int32_t scale_hi =
                     scales[2U * (static_cast<std::size_t>(ib) + static_cast<std::size_t>(group)) + 1U];
                 std::uint32_t* dst = (group % 2 == 0) ? sumi1 : sumi2;
@@ -1500,8 +1501,9 @@ inline bool& ggml_tinyblas_batch() {
     float accum[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
     for (std::uint64_t b = 0; b < blocks; ++b) {
         const std::uint8_t* block = data + b * 82U;
-        const float d = q8.d[b] *
-                        half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U)));
+        const float d =
+            q8.d[b] *
+            half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U)));
         const std::uint8_t* qs = block + 2U;
         const std::uint8_t* signs = block + 34U;
         const std::uint8_t* qh = block + 66U;
@@ -1547,8 +1549,9 @@ inline bool& ggml_tinyblas_batch() {
     float accum[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
     for (std::uint64_t b = 0; b < blocks; ++b) {
         const std::uint8_t* block = data + b * 98U;
-        const float d = q8.d[b] *
-                        half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U)));
+        const float d =
+            q8.d[b] *
+            half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U)));
         const std::uint8_t* q3 = block + 2U;
         const std::uint8_t* gas = block + 66U;
         const std::int8_t* q = q8.qs.data() + b * 256U;
@@ -1583,9 +1586,9 @@ inline bool& ggml_tinyblas_batch() {
                     const auto m1 = static_cast<std::uint8_t>((w1 >> (8U * (byte_base + j))) & 0xFFU);
                     const auto m2 = static_cast<std::uint8_t>((w2 >> (8U * (byte_base + j))) & 0xFFU);
                     const std::int32_t q1 = (m1 & 0x80U) != 0U ? -static_cast<std::int32_t>(q8_1[value])
-                                                              : static_cast<std::int32_t>(q8_1[value]);
+                                                               : static_cast<std::int32_t>(q8_1[value]);
                     const std::int32_t q2 = (m2 & 0x80U) != 0U ? -static_cast<std::int32_t>(q8_2[value])
-                                                              : static_cast<std::int32_t>(q8_2[value]);
+                                                               : static_cast<std::int32_t>(q8_2[value]);
                     p1 += v1 * q1;
                     p2 += v2 * q2;
                 }
@@ -1642,15 +1645,16 @@ inline bool& ggml_tinyblas_batch() {
             }
             for (std::size_t lane = 0; lane < 8; ++lane) {
                 const std::size_t at = lane * 4U;
-                const std::int32_t p1 = v1[at] * q8b_1[at] + v1[at + 1U] * q8b_1[at + 1U] + v1[at + 2U] * q8b_1[at + 2U] +
-                                        v1[at + 3U] * q8b_1[at + 3U];
-                const std::int32_t p2 = v2[at] * q8b_2[at] + v2[at + 1U] * q8b_2[at + 1U] + v2[at + 2U] * q8b_2[at + 2U] +
-                                        v2[at + 3U] * q8b_2[at + 3U];
+                const std::int32_t p1 = v1[at] * q8b_1[at] + v1[at + 1U] * q8b_1[at + 1U] +
+                                        v1[at + 2U] * q8b_1[at + 2U] + v1[at + 3U] * q8b_1[at + 3U];
+                const std::int32_t p2 = v2[at] * q8b_2[at] + v2[at + 1U] * q8b_2[at + 1U] +
+                                        v2[at + 2U] * q8b_2[at + 2U] + v2[at + 3U] * q8b_2[at + 3U];
                 sumi[lane] += static_cast<std::uint32_t>(ls1 * p1 + ls2 * p2);
             }
         }
-        const float d = half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U))) *
-                        q8.d[b];
+        const float d =
+            half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U))) *
+            q8.d[b];
         for (std::size_t lane = 0; lane < 8; ++lane) {
             accum[lane] = std::fma(d, static_cast<float>(static_cast<std::int32_t>(sumi[lane])), accum[lane]);
         }
@@ -1683,10 +1687,10 @@ inline bool& ggml_tinyblas_batch() {
                     for (std::size_t t = 0; t < 4; ++t) {
                         const std::size_t m = 4U * ln + t;
                         const std::uint8_t qv = block[4U + 16U * g + 8U * sh + (m % 8U)];
-                        const std::uint8_t code = m < 8U ? static_cast<std::uint8_t>(qv & 0x0FU)
-                                                         : static_cast<std::uint8_t>(qv >> 4U);
-                        isum += static_cast<std::int32_t>(qy[16U * sh + m]) *
-                                static_cast<std::int32_t>(kMxfp4Values[code]);
+                        const std::uint8_t code =
+                            m < 8U ? static_cast<std::uint8_t>(qv & 0x0FU) : static_cast<std::uint8_t>(qv >> 4U);
+                        isum +=
+                            static_cast<std::int32_t>(qy[16U * sh + m]) * static_cast<std::int32_t>(kMxfp4Values[code]);
                     }
                     const std::size_t lane = 4U * sh + ln;
                     accum[lane] = std::fma(scale[2U * g + sh], static_cast<float>(isum), accum[lane]);

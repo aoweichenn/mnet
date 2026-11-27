@@ -11,7 +11,7 @@
 #include <gtest/gtest.h>
 #include <mformat/data_reader.hpp>
 #include <mformat/model_bin.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
 
 TEST(ModelBinKernel, ModelBinReadsFp16WeightsAndBias) {
     const char* dir_env = std::getenv("MNET_SQUEEZENET_DIR");

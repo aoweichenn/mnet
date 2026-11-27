@@ -5,7 +5,6 @@
 #include <cstdint>
 
 #include <gtest/gtest.h>
-
 #include <mmemory/allocator.hpp>
 
 namespace {

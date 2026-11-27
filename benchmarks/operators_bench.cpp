@@ -14,10 +14,10 @@
 #include <mlayer/concat.hpp>
 #include <mlayer/convolution.hpp>
 #include <mmemory/allocator.hpp>
-#include <mnet/activation.hpp>
-#include <mnet/border.hpp>
-#include <mnet/layer.hpp>
-#include <mnet/quantize.hpp>
+#include <mnet/core/layer.hpp>
+#include <mnet/ops/activation.hpp>
+#include <mnet/ops/border.hpp>
+#include <mnet/ops/quantize.hpp>
 
 namespace {
 

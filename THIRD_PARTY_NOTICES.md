@@ -26,5 +26,5 @@ MIT License: https://opensource.org/licenses/MIT
 `include/mnet/detail/unicode_flags.hpp` (codepoint category and whitespace
 ranges) is derived from llama.cpp (MIT License), `src/unicode-data.cpp`.
 
-The BPE pre-tokenizer structure in `include/mnet/bpe.hpp` follows llama.cpp's
+The BPE pre-tokenizer structure in `include/mnet/tokenizer/bpe.hpp` follows llama.cpp's
 `unicode_regex_split_custom_qwen35` and the GPT4O pattern.

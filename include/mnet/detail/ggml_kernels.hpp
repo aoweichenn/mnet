@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+
 #include <limits>
 
 #include <mnet/detail/ggml_vec_exact.hpp>
@@ -128,10 +129,10 @@ inline void swiglu(float* out, const float* gate, const float* up, std::size_t s
     if (ax < 0.25F) {
         // tanh(x) = x - x^3/3 + 2x^5/15 - 17x^7/315 + 62x^9/2835 - 1382x^11/155925
         const float x2 = value * value;
-        return value * (1.0F + x2 * (-1.0F / 3.0F +
-                                     x2 * (2.0F / 15.0F +
-                                           x2 * (-17.0F / 315.0F +
-                                                 x2 * (62.0F / 2835.0F + x2 * (-1382.0F / 155925.0F))))));
+        return value *
+               (1.0F + x2 * (-1.0F / 3.0F +
+                             x2 * (2.0F / 15.0F +
+                                   x2 * (-17.0F / 315.0F + x2 * (62.0F / 2835.0F + x2 * (-1382.0F / 155925.0F))))));
     }
     // 1 - 2/(e^(2|x|)+1); the cancellation factor is below 4 for |x| >= 0.25.
     const float r = 1.0F - 2.0F / (expf(2.0F * ax) + 1.0F);
@@ -145,14 +146,14 @@ inline void swiglu(float* out, const float* gate, const float* up, std::size_t s
         }
         return std::numeric_limits<float>::quiet_NaN();
     }
-    int exponent = 0;
-    const float mantissa = std::frexp(value, &exponent);  // [0.5, 1)
+    int exponent = 0;                                       // check-types: allow std::frexp takes int*
+    const float mantissa = std::frexp(value, &exponent);    // [0.5, 1)
     const float t = (mantissa - 1.0F) / (mantissa + 1.0F);  // |t| <= 1/3
     const float t2 = t * t;
-    const float series = 1.0F + t2 * (1.0F / 3.0F +
-                                      t2 * (1.0F / 5.0F +
-                                            t2 * (1.0F / 7.0F +
-                                                  t2 * (1.0F / 9.0F + t2 * (1.0F / 11.0F + t2 * (1.0F / 13.0F))))));
+    const float series =
+        1.0F +
+        t2 * (1.0F / 3.0F +
+              t2 * (1.0F / 5.0F + t2 * (1.0F / 7.0F + t2 * (1.0F / 9.0F + t2 * (1.0F / 11.0F + t2 * (1.0F / 13.0F))))));
     const double ln_mantissa = 2.0 * static_cast<double>(t) * static_cast<double>(series);
     return static_cast<float>(static_cast<double>(exponent) * 0.693147180559945309417232121458 + ln_mantissa);
 }
@@ -178,17 +179,16 @@ inline void swiglu(float* out, const float* gate, const float* up, std::size_t s
 
 [[nodiscard]] inline double dlog(double value) {
     if (value <= 0.0) {
-        return value == 0.0 ? -std::numeric_limits<double>::infinity()
-                            : std::numeric_limits<double>::quiet_NaN();
+        return value == 0.0 ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::quiet_NaN();
     }
-    int exponent = 0;
+    int exponent = 0;  // check-types: allow std::frexp takes int*
     const double mantissa = std::frexp(value, &exponent);
     const double t = (mantissa - 1.0) / (mantissa + 1.0);
     const double t2 = t * t;
     double series = 1.0;
     double power = t2;
-    for (int k = 1; k <= 10; ++k) {
-        series += power / static_cast<double>(2 * k + 1);
+    for (std::size_t k = 1; k <= 10; ++k) {
+        series += power / static_cast<double>(2U * k + 1U);
         power *= t2;
     }
     return 2.0 * t * series + static_cast<double>(exponent) * 0.693147180559945309417232121458;

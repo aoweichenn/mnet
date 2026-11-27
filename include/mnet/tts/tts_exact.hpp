@@ -15,12 +15,13 @@
 //   - the Softmax kernel, the Gelu/Erf kernel and the convolutional GEMM
 //     blocking rules come from mlas/lib and mlas/lib/x86_64.
 
-#include <algorithm>
-#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+
+#include <algorithm>
+#include <bit>
 #include <thread>
 #include <utility>
 #include <vector>

@@ -1,6 +1,6 @@
 // 错误码的稳定字符串名。日志与测试都依赖它，不允许随版本漂移。
 
-#include <mnet/error.hpp>
+#include <mnet/core/error.hpp>
 
 namespace mnet {
 

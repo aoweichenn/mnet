@@ -9,8 +9,8 @@
 #include <string>
 
 #include <gtest/gtest.h>
-#include <mnet/layer_registry.hpp>
-#include <mnet/net.hpp>
+#include <mnet/core/layer_registry.hpp>
+#include <mnet/core/net.hpp>
 
 namespace {
 

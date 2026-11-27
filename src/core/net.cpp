@@ -1,7 +1,7 @@
 // Copyright 2026 mcnn authors
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <mnet/net.hpp>
+#include <mnet/core/net.hpp>
 
 #include <cstdint>
 #include <cstdio>
@@ -9,7 +9,6 @@
 #include <cstring>
 
 #include <algorithm>
-
 #include <chrono>
 #include <fstream>
 #include <sstream>
@@ -23,8 +22,8 @@
 #include <mgraph/extractor.hpp>
 #include <mgraph/graph.hpp>
 #include <mmemory/allocator.hpp>
+#include <mnet/core/layer_registry.hpp>
 #include <mnet/detail/txn_log.hpp>
-#include <mnet/layer_registry.hpp>
 
 namespace mnet {
 

@@ -12,7 +12,7 @@
 #include <type_traits>
 #include <utility>
 
-#include <mnet/error.hpp>
+#include <mnet/core/error.hpp>
 
 namespace mnet {
 

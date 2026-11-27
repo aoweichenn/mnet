@@ -4,8 +4,8 @@
 #include <cstdint>
 
 #include <gtest/gtest.h>
-#include <mnet/border.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
+#include <mnet/ops/border.hpp>
 
 TEST(ConvolutionKernel, CopyMakeBorderZeroPadPreservesData) {
     mnet::Mat src(4, 3, 2);

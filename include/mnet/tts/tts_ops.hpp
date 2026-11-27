@@ -4,21 +4,22 @@
 // VITS/StyleTTS2 building blocks (convolution, transposed convolution, linear,
 // LayerNorm, AdaIN, WaveNet and ResBlock stacks). Every kernel follows ONNX
 // Runtime's arithmetic bit-for-bit; the element-wise primitives it builds on
-// live in <mnet/tts_exact.hpp>.
+// live in <mnet/tts/tts_exact.hpp>.
 
-#include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+
+#include <algorithm>
+#include <atomic>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
-#include <mnet/tts_exact.hpp>
-#include <mnet/tts_reference.hpp>
-#include <mnet/tts_tensor.hpp>
+#include <mnet/tts/tts_exact.hpp>
+#include <mnet/tts/tts_reference.hpp>
+#include <mnet/tts/tts_tensor.hpp>
 
 namespace mnet::tts {
 
@@ -74,7 +75,8 @@ private:
 // convolution's N dimension and therefore each output column's K blocking.
 // The pinned Piper reference ran with the default (one thread per core); the
 // pinned Kokoro reference ran with a single thread.
-inline std::size_t g_ort_threads = std::max<std::size_t>(1, static_cast<std::size_t>(std::thread::hardware_concurrency()));
+inline std::size_t g_ort_threads =
+    std::max<std::size_t>(1, static_cast<std::size_t>(std::thread::hardware_concurrency()));
 
 // Split an independent iteration space across the machine's cores. Every
 // kernel parallelised with this keeps exactly one thread per output element, so
@@ -125,7 +127,8 @@ inline void parallel_for(std::size_t count, std::size_t work_per_item, Fn&& fn) 
 // Conv1d with dilation and groups (groups == in_channels is the depthwise case
 // used by DDSConv). Padding follows the reference: ((kernel-1)*dilation)/2.
 [[nodiscard]] inline Act conv1d(const Act& input, const Weight& weight, const Weight& bias, std::size_t kernel,
-                         std::size_t pad, std::size_t dilation = 1, std::size_t groups = 1, std::size_t stride = 1) {
+                                std::size_t pad, std::size_t dilation = 1, std::size_t groups = 1,
+                                std::size_t stride = 1) {
     const ProfileScope profile(kProfileConv);
     const std::size_t out_channels = weight.size(0);
     const std::size_t in_per_group = weight.size(1);
@@ -254,7 +257,8 @@ inline void parallel_for(std::size_t count, std::size_t work_per_item, Fn&& fn) 
     return out;
 }
 
-[[nodiscard]] inline Act layer_norm(const Act& input, const Weight& gamma, const Weight& beta, float eps = kLayerNormEps) {
+[[nodiscard]] inline Act layer_norm(const Act& input, const Weight& gamma, const Weight& beta,
+                                    float eps = kLayerNormEps) {
     // ONNX Runtime's MlasLayerNormKernelAvx2:
     //   mean: double accumulators in four strided lanes, reduced (d0+d2)+(d1+d3)
     //         then the n % 4 tail; cast to float;
@@ -403,7 +407,7 @@ inline void relu_in_place(Act& act) {
 // modules.DDSConv: dilated depthwise conv -> LayerNorm -> gelu -> 1x1 conv ->
 // LayerNorm -> gelu, with a residual add per layer.
 [[nodiscard]] inline Act dds_conv(const Act& input, const Weights& weights, const std::string& prefix, const Act* cond,
-                           const std::vector<float>& mask, std::size_t kernel, const Reference* ref = nullptr) {
+                                  const std::vector<float>& mask, std::size_t kernel, const Reference* ref = nullptr) {
     Act x = input;
     if (cond != nullptr) {
         for (std::size_t i = 0; i < x.data.size(); ++i) {
@@ -441,8 +445,8 @@ inline void relu_in_place(Act& act) {
     return x;
 }
 
-[[nodiscard]] inline Act conv_transpose1d(const Act& input, const Weight& weight, const Weight& bias, std::size_t stride,
-                                   std::size_t kernel, std::size_t pad) {
+[[nodiscard]] inline Act conv_transpose1d(const Act& input, const Weight& weight, const Weight& bias,
+                                          std::size_t stride, std::size_t kernel, std::size_t pad) {
     const ProfileScope profile(kProfileConvTranspose);
     const std::size_t in_channels = weight.size(0);
     const std::size_t out_channels = weight.size(1);
@@ -508,7 +512,7 @@ inline void leaky_relu(Act& act, float slope) {
 
 // modules.WN: tanh * sigmoid gated dilated convolutions with residual skips.
 [[nodiscard]] inline Act wave_net(const Act& input, const Weights& weights, const std::string& prefix,
-                           const std::vector<float>& mask, std::size_t layers, std::size_t kernel) {
+                                  const std::vector<float>& mask, std::size_t layers, std::size_t kernel) {
     const std::size_t hidden = input.channels;
     Act x = input;
     Act output(hidden, x.length);
@@ -551,9 +555,9 @@ inline void leaky_relu(Act& act, float slope) {
 }
 
 // modules.ResBlock2: two dilated convs with a residual add each.
-[[nodiscard]] inline Act res_block2(const Act& input, const Weights& weights, const std::string& prefix, std::size_t kernel,
-                             std::size_t d0, std::size_t d1, const Reference* ref = nullptr,
-                             const std::string& label = {}) {
+[[nodiscard]] inline Act res_block2(const Act& input, const Weights& weights, const std::string& prefix,
+                                    std::size_t kernel, std::size_t d0, std::size_t d1, const Reference* ref = nullptr,
+                                    const std::string& label = {}) {
     Act x = input;
     const std::size_t dilations[2] = {d0, d1};
     for (std::size_t i = 0; i < 2; ++i) {
@@ -615,7 +619,8 @@ inline void leaky_relu(Act& act, float slope) {
 
 // Some exporters name a conv bias after the layer path and its weight after the
 // node path; accept either spelling.
-[[nodiscard]] inline const Weight& weight_or(const Weights& weights, const std::string& first, const std::string& second) {
+[[nodiscard]] inline const Weight& weight_or(const Weights& weights, const std::string& first,
+                                             const std::string& second) {
     return weights.has(first) ? weights.at(first) : weights.at(second);
 }
 
@@ -702,7 +707,7 @@ inline void leaky_relu(Act& act, float slope) {
 }
 
 [[nodiscard]] inline Act adain_norm(const Act& x, const Weight& fc_w, const Weight& fc_b, const Act& style_act,
-                             bool strided_input) {
+                                    bool strided_input) {
     const ProfileScope profile(kProfileNorm);
     // Kokoro exports AdaIN as an explicit decomposition (not
     // InstanceNormalization):
@@ -755,7 +760,7 @@ inline void leaky_relu(Act& act, float slope) {
 // Depthwise ConvTranspose1d (the AdaIN blocks' "pool"): weight (C, 1, k),
 // stride 2, kernel 3, padding 1, output_padding 1.
 [[nodiscard]] inline Act depthwise_transpose(const Act& x, const Weight& weight, const Weight& bias, std::size_t stride,
-                                      std::size_t pad) {
+                                             std::size_t pad) {
     const std::size_t channels = x.channels;
     const std::size_t kernel = weight.size(2);
     const std::size_t out_len = (x.length - 1) * stride + kernel + 1 - 2 * pad;

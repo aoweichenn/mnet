@@ -7,8 +7,8 @@
 #include <cstdint>
 #include <cstring>
 
-#include <mnet/mat.hpp>
-#include <mnet/option.hpp>
+#include <mnet/core/mat.hpp>
+#include <mnet/core/option.hpp>
 
 namespace mnet {
 

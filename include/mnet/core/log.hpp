@@ -14,7 +14,7 @@
 #include <source_location>
 #include <string_view>
 
-#include <mnet/error.hpp>
+#include <mnet/core/error.hpp>
 
 namespace mnet {
 

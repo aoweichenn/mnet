@@ -11,7 +11,7 @@
 #include <mformat/param_dict.hpp>
 #include <mlayer/lrn.hpp>
 #include <mlayer/rmsnorm.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
 
 TEST(NormalizationKernel, RMSNormAffine) {
     using Norm = mlayer::RMSNorm<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, mformat::ModelBin>;

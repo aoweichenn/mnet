@@ -1,7 +1,7 @@
 // Copyright 2026 mcnn authors
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <mnet/layer_registry.hpp>
+#include <mnet/core/layer_registry.hpp>
 
 #include <cstdint>
 
@@ -49,10 +49,10 @@
 #include <mlayer/flatten.hpp>
 #include <mlayer/flip.hpp>
 #include <mlayer/gateddeltarule.hpp>
-#include <mlayer/gelu.hpp>
 #include <mlayer/gather.hpp>
 #include <mlayer/gatherelements.hpp>
 #include <mlayer/gathernd.hpp>
+#include <mlayer/gelu.hpp>
 #include <mlayer/gemm.hpp>
 #include <mlayer/glu.hpp>
 #include <mlayer/gridsample.hpp>
@@ -72,11 +72,11 @@
 #include <mlayer/mish.hpp>
 #include <mlayer/multiheadattention.hpp>
 #include <mlayer/mvn.hpp>
-#include <mlayer/noop.hpp>
 #include <mlayer/nonzero.hpp>
+#include <mlayer/noop.hpp>
+#include <mlayer/normalize.hpp>
 #include <mlayer/onnxpad.hpp>
 #include <mlayer/onnxslice.hpp>
-#include <mlayer/normalize.hpp>
 #include <mlayer/packing.hpp>
 #include <mlayer/padding.hpp>
 #include <mlayer/permute.hpp>
@@ -109,11 +109,10 @@
 #include <mlayer/selu.hpp>
 #include <mlayer/shape.hpp>
 #include <mlayer/shortconv.hpp>
-#include <mlayer/situ.hpp>
-#include <mlayer/stft.hpp>
 #include <mlayer/shrink.hpp>
 #include <mlayer/shufflechannel.hpp>
 #include <mlayer/sigmoid.hpp>
+#include <mlayer/situ.hpp>
 #include <mlayer/slice.hpp>
 #include <mlayer/softmax.hpp>
 #include <mlayer/softplus.hpp>
@@ -123,20 +122,21 @@
 #include <mlayer/squeeze.hpp>
 #include <mlayer/squeezeonnx.hpp>
 #include <mlayer/statisticspooling.hpp>
+#include <mlayer/stft.hpp>
 #include <mlayer/swish.hpp>
 #include <mlayer/tanh.hpp>
 #include <mlayer/threshold.hpp>
 #include <mlayer/tile.hpp>
 #include <mlayer/unaryop.hpp>
+#include <mlayer/unfold.hpp>
 #include <mlayer/unsqueezeonnx.hpp>
 #include <mlayer/where.hpp>
-#include <mlayer/unfold.hpp>
 #include <mlayer/yolodetectionoutput.hpp>
 #include <mlayer/yolov3detectionoutput.hpp>
 #include <mlayer/yolov5focus.hpp>
-#include <mnet/activation.hpp>
-#include <mnet/border.hpp>
-#include <mnet/quantize.hpp>
+#include <mnet/ops/activation.hpp>
+#include <mnet/ops/border.hpp>
+#include <mnet/ops/quantize.hpp>
 
 namespace mnet {
 namespace {

@@ -22,9 +22,9 @@
 #include <string>
 #include <vector>
 
-#include <mnet/bpe.hpp>
 #include <mnet/detail/ggml_kernels.hpp>
 #include <mnet/gguf.hpp>
+#include <mnet/tokenizer/bpe.hpp>
 
 namespace {
 

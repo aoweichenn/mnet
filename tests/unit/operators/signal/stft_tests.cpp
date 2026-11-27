@@ -9,7 +9,7 @@
 #include <gtest/gtest.h>
 #include <mformat/param_dict.hpp>
 #include <mlayer/stft.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
 
 // One-sided STFT: framing + window + DFT, output (bins, frames, 2).
 TEST(SignalKernel, StftMatchesReference) {

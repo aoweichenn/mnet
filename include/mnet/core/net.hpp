@@ -11,9 +11,9 @@
 #include <string>
 #include <vector>
 
-#include <mnet/layer.hpp>
-#include <mnet/mat.hpp>
-#include <mnet/option.hpp>
+#include <mnet/core/layer.hpp>
+#include <mnet/core/mat.hpp>
+#include <mnet/core/option.hpp>
 
 namespace mnet {
 

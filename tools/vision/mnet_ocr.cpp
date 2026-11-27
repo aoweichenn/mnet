@@ -10,20 +10,20 @@
 // score + rectangular unclip expansion) so latency and outputs are comparable.
 // No OpenCV dependency: the tool reads uncompressed 24/32-bit BMP files.
 
-#include <mnet/net.hpp>
-
-#include <mplatform/cpu.hpp>
-
-#include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <string>
 #include <vector>
+
+#include <mnet/core/net.hpp>
+#include <mplatform/cpu.hpp>
 
 namespace {
 
@@ -84,8 +84,7 @@ std::int32_t read_le32s(const std::uint8_t* p) {
 }
 
 std::uint16_t read_le16(const std::uint8_t* p) {
-    return static_cast<std::uint16_t>(static_cast<std::uint16_t>(p[0]) |
-                                      (static_cast<std::uint16_t>(p[1]) << 8));
+    return static_cast<std::uint16_t>(static_cast<std::uint16_t>(p[0]) | (static_cast<std::uint16_t>(p[1]) << 8));
 }
 
 bool load_bmp(const std::string& path, Image& img) {
@@ -132,7 +131,8 @@ bool load_bmp(const std::string& path, Image& img) {
         const std::int32_t dst_y = bottom_up ? height - 1 - y : y;
         std::uint8_t* dst = img.rgb.data() + rgb_offset(0, dst_y, width);
         for (std::int32_t x = 0; x < width; ++x) {
-            const std::uint8_t* src = row.data() + static_cast<std::size_t>(x) * static_cast<std::size_t>(bytes_per_pixel);
+            const std::uint8_t* src =
+                row.data() + static_cast<std::size_t>(x) * static_cast<std::size_t>(bytes_per_pixel);
             const std::size_t base = static_cast<std::size_t>(x) * static_cast<std::size_t>(kBytesPerPixel);
             dst[base + 0] = src[2];  // BMP is BGR(A)
             dst[base + 1] = src[1];
@@ -184,9 +184,8 @@ struct DetInput {
 
 DetInput make_det_input(const Image& img, std::int32_t target_size) {
     DetInput out;
-    const float scale = target_size > 0 ? static_cast<float>(target_size) /
-                                              static_cast<float>(std::max(img.w, img.h))
-                                        : 1.0F;
+    const float scale =
+        target_size > 0 ? static_cast<float>(target_size) / static_cast<float>(std::max(img.w, img.h)) : 1.0F;
     std::int32_t rw = std::max(1, static_cast<std::int32_t>(std::lround(static_cast<float>(img.w) * scale)));
     std::int32_t rh = std::max(1, static_cast<std::int32_t>(std::lround(static_cast<float>(img.h) * scale)));
     rw = std::min(rw, target_size > 0 ? target_size : rw);
@@ -356,9 +355,9 @@ mnet::Mat make_rec_input(const Image& img, const Box& box) {
                     static_cast<std::size_t>(cw) * static_cast<std::size_t>(kBytesPerPixel));
     }
 
-    const std::int32_t rw = std::clamp(static_cast<std::int32_t>(std::lround(static_cast<float>(cw) * kRecHeight /
-                                                                           static_cast<float>(ch))),
-                                       kRecMinWidth, kRecMaxWidth);
+    const std::int32_t rw =
+        std::clamp(static_cast<std::int32_t>(std::lround(static_cast<float>(cw) * kRecHeight / static_cast<float>(ch))),
+                   kRecMinWidth, kRecMaxWidth);
     std::vector<std::uint8_t> resized;
     resize_rgb(crop.data(), cw, ch, rw, kRecHeight, resized);
 
@@ -529,8 +528,8 @@ int main(int argc, char** argv) {
                 above += v >= kDetThreshold ? 1 : 0;
             }
             std::printf("det_stats min=%.3f max=%.3f mean=%.3f above_%.1f=%.2f%%\n", static_cast<double>(min_prob),
-                        static_cast<double>(max_prob),
-                        sum_prob / static_cast<double>(prob.w * prob.h), static_cast<double>(kDetThreshold),
+                        static_cast<double>(max_prob), sum_prob / static_cast<double>(prob.w * prob.h),
+                        static_cast<double>(kDetThreshold),
                         100.0 * static_cast<double>(above) / static_cast<double>(prob.w * prob.h));
         }
         boxes = det_postprocess(prob, det_in, image.w, image.h);

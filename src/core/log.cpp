@@ -1,6 +1,6 @@
 // 默认 Logger 只是一个 atomic 指针：没有 init/shutdown，没有线程与文件。
 
-#include <mnet/log.hpp>
+#include <mnet/core/log.hpp>
 
 #include <atomic>
 

@@ -16,8 +16,8 @@
 #include <mlayer/proposal.hpp>
 #include <mlayer/psroipooling.hpp>
 #include <mlayer/roipooling.hpp>
-#include <mnet/border.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
+#include <mnet/ops/border.hpp>
 
 TEST(VisionKernel, PoolingMaxNoPadMatchesEveryWindow) {
     using Pool =

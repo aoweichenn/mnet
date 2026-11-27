@@ -10,7 +10,7 @@
 #include <string>
 
 #include <gtest/gtest.h>
-#include <mnet/net.hpp>
+#include <mnet/core/net.hpp>
 
 TEST(Net, RunsSqueezenetEndToEnd) {
     const char* dir_env = std::getenv("MNET_SQUEEZENET_DIR");
@@ -370,7 +370,7 @@ TEST(Net, RunsQwen3TwoTokenDecode) {
     EXPECT_GE(next2, 0);
 }
 
-#include <mnet/tokenizer.hpp>
+#include <mnet/tokenizer/tokenizer.hpp>
 
 TEST(Net, RunsQwen3TextGeneration) {
     const char* dir_env = std::getenv("MNET_QWEN3_DIR");

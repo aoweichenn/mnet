@@ -5,13 +5,13 @@
 
 #include <cstddef>
 #include <cstdint>
+
 #include <string>
 #include <vector>
 
-#include <mnet/tts_ops.hpp>
+#include <mnet/tts/tts_ops.hpp>
 
-
-// The exact-arithmetic kernels live in <mnet/tts_exact.hpp>; pull the ones the
+// The exact-arithmetic kernels live in <mnet/tts/tts_exact.hpp>; pull the ones the
 // model code calls into this translation unit's anonymous namespace.
 using mnet::tts::eigen_atan;
 using mnet::tts::eigen_cos;
@@ -37,7 +37,7 @@ using mnet::tts::mlas_sumexp_term;
 using mnet::tts::ort_logistic;
 using mnet::tts::ort_tanh;
 
-// Operator layer and shared tensor/reference helpers (<mnet/tts_ops.hpp>).
+// Operator layer and shared tensor/reference helpers (<mnet/tts/tts_ops.hpp>).
 using mnet::tts::Act;
 using mnet::tts::adain_norm;
 using mnet::tts::apply_mask;
@@ -84,7 +84,7 @@ using mnet::tts::write_wav;
 
 namespace mnet_tts {
 
-// Command line options shared by both models (see tools/mnet_tts.cpp).
+// Command line options shared by both models (see tools/tts/mnet_tts.cpp).
 struct TtsOptions {
     std::string model_dir;
     std::string ref_dir;
@@ -120,10 +120,10 @@ struct TtsOptions {
     return ids;
 }
 
-// Piper/VITS path (tools/mnet_tts_piper.cpp).
+// Piper/VITS path (tools/tts/mnet_tts_piper.cpp).
 [[nodiscard]] int run_piper(const TtsOptions& opt, const mnet::tts::Weights& weights);
 
-// Kokoro/StyleTTS2 path (tools/mnet_tts_kokoro.cpp).
+// Kokoro/StyleTTS2 path (tools/tts/mnet_tts_kokoro.cpp).
 [[nodiscard]] int run_kokoro(const TtsOptions& opt, const mnet::tts::Weights& weights);
 
 }  // namespace mnet_tts

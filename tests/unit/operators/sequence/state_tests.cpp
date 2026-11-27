@@ -11,7 +11,7 @@
 #include <mformat/param_dict.hpp>
 #include <mlayer/gateddeltarule.hpp>
 #include <mlayer/shortconv.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
 
 // Causal depthwise short convolution: y[t] = sum_k xs[t + k] * w[k] with the
 // K-1 history tokens as prefix; activation 0 disables the Qwen3.5 SiLU.

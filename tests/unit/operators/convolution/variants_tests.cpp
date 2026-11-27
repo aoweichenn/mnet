@@ -11,10 +11,10 @@
 #include <mformat/param_dict.hpp>
 #include <mlayer/convolution1d.hpp>
 #include <mlayer/convolutiondepthwise.hpp>
-#include <mnet/activation.hpp>
-#include <mnet/border.hpp>
-#include <mnet/layer.hpp>
-#include <mnet/quantize.hpp>
+#include <mnet/core/layer.hpp>
+#include <mnet/ops/activation.hpp>
+#include <mnet/ops/border.hpp>
+#include <mnet/ops/quantize.hpp>
 
 TEST(ConvolutionKernel, Convolution1DMatchesNumpy) {
     constexpr std::int32_t MNET_CONVOLUTION1D_TEST_WIDTH = 4;

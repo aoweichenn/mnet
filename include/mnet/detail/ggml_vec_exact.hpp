@@ -5,11 +5,12 @@
 // arithmetic. The arm64 builds of the bit-exactness runners use these so the
 // numbers match the x86 reference build instead of a different summation order.
 
-#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+
+#include <bit>
 
 namespace mnet::detail {
 
@@ -41,9 +42,9 @@ namespace mnet::detail {
     const float k = std::bit_cast<float>(e + std::bit_cast<std::uint32_t>(1.0F));
     const bool c = ggml_abs_gt(n, 126.0F);
     const float u = b * b;
-    const float j = std::fma(
-        std::fma(std::fma(0x1.0e4020p-7F, b, 0x1.573e2ep-5F), u, std::fma(0x1.555e66p-3F, b, 0x1.fffdb6p-2F)), u,
-        std::fma(0x1.ffffecp-1F, b, 0.0F));
+    const float j =
+        std::fma(std::fma(std::fma(0x1.0e4020p-7F, b, 0x1.573e2ep-5F), u, std::fma(0x1.555e66p-3F, b, 0x1.fffdb6p-2F)),
+                 u, std::fma(0x1.ffffecp-1F, b, 0.0F));
     if (!c) {
         return std::fma(j, k, k);
     }
@@ -54,8 +55,8 @@ namespace mnet::detail {
     if (d) {
         return s1 * s1;
     }
-    const std::uint32_t low = c ? std::bit_cast<std::uint32_t>(std::fma(s2, j, s2) * s1)
-                                : std::bit_cast<std::uint32_t>(std::fma(k, j, k));
+    const std::uint32_t low =
+        c ? std::bit_cast<std::uint32_t>(std::fma(s2, j, s2) * s1) : std::bit_cast<std::uint32_t>(std::fma(k, j, k));
     return std::bit_cast<float>(low);
 }
 

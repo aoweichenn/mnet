@@ -99,7 +99,7 @@ Android 使用 `-DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26
   - Qwen3 0.6B int8 单 token：embed → decoder → proj → argmax
   - Qwen3 0.6B int8 两 token decode：把 28 层 KV cache 回灌，验证 cache 复用
   - 文本生成：BPE tokenizer + 23-token chat prompt → 3 个新 token → `Hello! How can`
-  - `tools/mnet_llm`：读取 `model.json` 的通用 LLM runner（rope 参数 / tokenizer /
+  - `tools/llm/mnet_llm`：读取 `model.json` 的通用 LLM runner（rope 参数 / tokenizer /
     KV、conv、gated-delta-rule 状态缓存），已跑通 MiniCPM5 1B/2B 与 Qwen3.5 4B int8：
 
 | 模型 | 线程 | Prefill | Decode | 峰值 RSS |
@@ -188,7 +188,7 @@ decode 46.5 ms/tok。
 
 ### OCR 端到端（det → DB 后处理 → rec → CTC）
 
-`tools/mnet_ocr` 是完整的 PP-OCRv5 流水线，不依赖 OpenCV：
+`tools/vision/mnet_ocr` 是完整的 PP-OCRv5 流水线，不依赖 OpenCV：
 
 ```bash
 ./mnet_ocr --image in.bmp \

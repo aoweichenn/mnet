@@ -4,12 +4,13 @@
 // Piper/VITS runner: text encoder, stochastic duration predictor, flow and the
 // HiFiGAN decoder, reproducing the pinned ONNX reference stage by stage.
 
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
+#include <algorithm>
 #include <random>
 #include <string>
 #include <thread>

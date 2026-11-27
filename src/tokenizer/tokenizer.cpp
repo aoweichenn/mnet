@@ -1,7 +1,7 @@
 // Copyright 2026 mcnn authors
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <mnet/tokenizer.hpp>
+#include <mnet/tokenizer/tokenizer.hpp>
 
 #include <cstdint>
 #include <mnet/detail/bpe_tokenizer.h>

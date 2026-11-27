@@ -9,8 +9,8 @@
 #include <string>
 #include <vector>
 
-#include <mnet/bpe.hpp>
 #include <mnet/gguf.hpp>
+#include <mnet/tokenizer/bpe.hpp>
 
 int main(int argc, char** argv) {
     try {

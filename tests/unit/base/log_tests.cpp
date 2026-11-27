@@ -2,7 +2,7 @@
 #include <vector>
 
 #include <gtest/gtest.h>
-#include <mnet/log.hpp>
+#include <mnet/core/log.hpp>
 
 namespace {
 

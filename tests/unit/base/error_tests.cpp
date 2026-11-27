@@ -2,7 +2,7 @@
 #include <string>
 
 #include <gtest/gtest.h>
-#include <mnet/error.hpp>
+#include <mnet/core/error.hpp>
 
 TEST(Error, EveryValueHasUniqueName) {
     const mnet::Error values[] = {

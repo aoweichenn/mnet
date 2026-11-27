@@ -3,7 +3,7 @@
 #include <utility>
 
 #include <gtest/gtest.h>
-#include <mnet/result.hpp>
+#include <mnet/core/result.hpp>
 
 TEST(Status, DefaultIsOk) {
     const mnet::Status status{};

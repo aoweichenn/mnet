@@ -1,7 +1,8 @@
 #pragma once
 #include <cstdint>
-#include <string>
+
 #include <optional>
+#include <string>
 
 struct SpecialTokensConfig {
     std::optional<std::string> bos_token;

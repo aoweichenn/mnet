@@ -1,20 +1,20 @@
 // Copyright 2026 mcnn authors
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <mnet/net.hpp>
-
-#include <mplatform/cpu.hpp>
-
-#include <chrono>
-#include <cmath>
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <string>
 #include <vector>
+
+#include <mnet/core/net.hpp>
+#include <mplatform/cpu.hpp>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -135,8 +135,7 @@ int main(int argc, char** argv) {
     std::int32_t w = 0;
     std::int32_t h = 0;
     std::int32_t c = 0;
-    if (std::sscanf(arg_base[2], "%" SCNd32 "x%" SCNd32 "x%" SCNd32, &w, &h, &c) != 3 || w <= 0 || h <= 0 ||
-        c <= 0) {
+    if (std::sscanf(arg_base[2], "%" SCNd32 "x%" SCNd32 "x%" SCNd32, &w, &h, &c) != 3 || w <= 0 || h <= 0 || c <= 0) {
         std::fprintf(stderr, "invalid shape %s\n", arg_base[2]);
         return 2;
     }
@@ -245,9 +244,10 @@ int main(int argc, char** argv) {
         }
         // A released or uninitialised blob can carry garbage dimensions; a
         // 14 GiB dump from a bogus w once filled the disk, so refuse them.
-        constexpr std::int64_t kMaxDumpFloats = 1LL << 28;   // 1 GiB of floats
+        constexpr std::int64_t kMaxDumpFloats = 1LL << 28;  // 1 GiB of floats
         if (last_out.w <= 0 || last_out.h < 0 || last_out.c <= 0 ||
-            static_cast<std::int64_t>(last_out.w) * last_out.h * (last_out.d > 0 ? last_out.d : 1) * last_out.c > kMaxDumpFloats) {
+            static_cast<std::int64_t>(last_out.w) * last_out.h * (last_out.d > 0 ? last_out.d : 1) * last_out.c >
+                kMaxDumpFloats) {
             std::fprintf(stderr, "refusing to dump implausible blob %s w=%d h=%d c=%d\n", last_out_name.c_str(),
                          last_out.w, last_out.h, last_out.c);
             return 1;
@@ -259,11 +259,9 @@ int main(int argc, char** argv) {
     std::printf("model=%s threads=%" PRId32 " iters=%" PRId32
                 " avg_ms=%.3f cpu_ms=%.3f peak_rss_mb=%.1f mem_peak_mb=%.1f mem_budget_mb=%zu budget_hit=%d"
                 " cpus=%" PRId32 " big=%" PRId32 " inputs=%zu outputs=%zu\n",
-                arg_base[0], threads, iters, avg_ms, cpu_ms,
-                static_cast<double>(read_vmhwm_kb()) / 1024.0,
+                arg_base[0], threads, iters, avg_ms, cpu_ms, static_cast<double>(read_vmhwm_kb()) / 1024.0,
                 static_cast<double>(net.memory_peak_bytes()) / (1024.0 * 1024.0),
                 net.memory_budget_bytes() / (1024U * 1024U), net.memory_budget_exhausted() ? 1 : 0,
-                mplatform::get_cpu_count(),
-                mplatform::get_big_cpu_count(), inputs.size(), outputs.size());
+                mplatform::get_cpu_count(), mplatform::get_big_cpu_count(), inputs.size(), outputs.size());
     return 0;
 }

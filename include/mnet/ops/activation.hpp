@@ -9,7 +9,7 @@
 
 #include <algorithm>
 
-#include <mnet/mat.hpp>
+#include <mnet/core/mat.hpp>
 
 namespace mnet {
 

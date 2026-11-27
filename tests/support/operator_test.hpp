@@ -23,7 +23,7 @@
 #include <gtest/gtest.h>
 #include <mformat/model_bin.hpp>
 #include <mformat/param_dict.hpp>
-#include <mnet/layer_registry.hpp>
+#include <mnet/core/layer_registry.hpp>
 
 namespace mnet::test {
 
@@ -150,9 +150,9 @@ struct ReferenceTensor {
     std::vector<std::size_t> shape;
     std::vector<float> values;
 
-    ReferenceTensor(const std::vector<std::size_t>& shape, const std::vector<float>& values)
-            : shape(shape), values(values) {
-        if (shape.empty() || shape.size() > 4 || values.size() != element_count(shape)) {
+    ReferenceTensor(const std::vector<std::size_t>& dimensions, const std::vector<float>& data)
+            : shape(dimensions), values(data) {
+        if (dimensions.empty() || dimensions.size() > 4 || data.size() != element_count(dimensions)) {
             throw std::invalid_argument("Invalid reference tensor");
         }
     }

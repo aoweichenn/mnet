@@ -97,11 +97,11 @@ set(MNET_WARNINGS
 set_source_files_properties(src/tokenizer/bpe_tokenizer.cpp PROPERTIES COMPILE_OPTIONS "-w")
 
 add_library(mnet_objs OBJECT
-    src/mnet/base/error.cpp
-    src/mnet/log.cpp
-    src/layer_registry.cpp
-    src/net.cpp
-    src/tokenizer.cpp
+    src/core/error.cpp
+    src/core/log.cpp
+    src/core/layer_registry.cpp
+    src/core/net.cpp
+    src/tokenizer/tokenizer.cpp
     src/tokenizer/bpe_tokenizer.cpp
 )
 
@@ -199,15 +199,15 @@ if(PROJECT_IS_TOP_LEVEL)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/mnetConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/mnetConfigVersion.cmake
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mnet)
 
-    add_executable(mnet_probe tools/mnet_probe.cpp)
+    add_executable(mnet_probe tools/llm/mnet_probe.cpp)
     target_link_libraries(mnet_probe PRIVATE mnet::mnet)
     target_compile_options(mnet_probe PRIVATE ${MNET_WARNINGS})
 
-    add_executable(mnet_gguf tools/mnet_gguf.cpp)
+    add_executable(mnet_gguf tools/model/mnet_gguf.cpp)
     target_link_libraries(mnet_gguf PRIVATE mnet::mnet)
     target_compile_options(mnet_gguf PRIVATE ${MNET_WARNINGS})
 
-    add_executable(mnet_bonsai_block tools/mnet_bonsai_block.cpp)
+    add_executable(mnet_bonsai_block tools/llm/mnet_bonsai_block.cpp)
     target_link_libraries(mnet_bonsai_block PRIVATE mnet::mnet)
     target_compile_options(mnet_bonsai_block PRIVATE ${MNET_WARNINGS})
 
@@ -215,15 +215,15 @@ if(PROJECT_IS_TOP_LEVEL)
     # they use the AVX2/FMA intrinsics directly; elsewhere the same lane layout
     # and reduction order is evaluated scalar (mnet/detail/ggml_vec_exact.hpp),
     # so the binaries build and produce the same numbers on arm64 as well.
-    add_executable(mnet_bonsai tools/mnet_bonsai.cpp)
+    add_executable(mnet_bonsai tools/llm/mnet_bonsai.cpp)
     target_link_libraries(mnet_bonsai PRIVATE mnet::mnet)
     target_compile_options(mnet_bonsai PRIVATE ${MNET_WARNINGS})
 
-    add_executable(mnet_inkling2 tools/mnet_inkling2.cpp)
+    add_executable(mnet_inkling2 tools/llm/mnet_inkling2.cpp)
     target_link_libraries(mnet_inkling2 PRIVATE mnet::mnet)
     target_compile_options(mnet_inkling2 PRIVATE ${MNET_WARNINGS})
 
-    add_executable(mnet_inkling2_attn tools/mnet_inkling2_attn.cpp)
+    add_executable(mnet_inkling2_attn tools/llm/mnet_inkling2_attn.cpp)
     target_link_libraries(mnet_inkling2_attn PRIVATE mnet::mnet)
     target_compile_options(mnet_inkling2_attn PRIVATE ${MNET_WARNINGS})
 
@@ -238,11 +238,11 @@ if(PROJECT_IS_TOP_LEVEL)
         target_compile_options(mnet_inkling2 PRIVATE -ffp-contract=off)
     endif()
 
-    add_executable(mnet_tokenize tools/mnet_tokenize.cpp)
+    add_executable(mnet_tokenize tools/model/mnet_tokenize.cpp)
     target_link_libraries(mnet_tokenize PRIVATE mnet::mnet)
     target_compile_options(mnet_tokenize PRIVATE ${MNET_WARNINGS})
 
-    add_executable(mnet_tts tools/mnet_tts.cpp tools/mnet_tts_piper.cpp tools/mnet_tts_kokoro.cpp)
+    add_executable(mnet_tts tools/tts/mnet_tts.cpp tools/tts/mnet_tts_piper.cpp tools/tts/mnet_tts_kokoro.cpp)
     target_link_libraries(mnet_tts PRIVATE mnet::mnet)
     target_include_directories(mnet_tts PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
     target_compile_options(mnet_tts PRIVATE ${MNET_WARNINGS})
@@ -253,11 +253,11 @@ if(PROJECT_IS_TOP_LEVEL)
         target_compile_options(mnet_tts PRIVATE -ffp-contract=off)
     endif()
 
-    add_executable(mnet_llm tools/mnet_llm.cpp)
+    add_executable(mnet_llm tools/llm/mnet_llm.cpp)
     target_link_libraries(mnet_llm PRIVATE mnet::mnet)
     target_compile_options(mnet_llm PRIVATE ${MNET_WARNINGS})
 
-    add_executable(mnet_ocr tools/mnet_ocr.cpp)
+    add_executable(mnet_ocr tools/vision/mnet_ocr.cpp)
     target_link_libraries(mnet_ocr PRIVATE mnet::mnet)
     target_compile_options(mnet_ocr PRIVATE ${MNET_WARNINGS})
 endif()

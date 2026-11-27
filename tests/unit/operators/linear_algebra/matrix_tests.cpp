@@ -14,7 +14,7 @@
 #include <mlayer/gemm.hpp>
 #include <mlayer/interp.hpp>
 #include <mlayer/matmul.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
 
 TEST(LinearAlgebraKernel, MatMul2DAndInterpNearest) {
     using MM = mlayer::MatMul<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;

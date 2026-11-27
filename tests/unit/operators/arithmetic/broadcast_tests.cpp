@@ -11,7 +11,7 @@
 #include <mlayer/binaryop.hpp>
 #include <mlayer/compare.hpp>
 #include <mlayer/where.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
 
 TEST(ArithmeticKernel, BinaryOpAddAndScalarMul) {
     using BinOp = mlayer::BinaryOp<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict, false>;

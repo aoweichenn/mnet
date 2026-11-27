@@ -9,7 +9,7 @@
 #include <gtest/gtest.h>
 #include <mformat/param_dict.hpp>
 #include <mlayer/situ.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
 
 // SiTU gated activation (Inkling-2-Mini MoE): beta*tanh(g/beta)*sigmoid(g) * lb*tanh(u/lb).
 TEST(ActivationKernel, SituMatchesReference) {

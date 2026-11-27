@@ -5,14 +5,15 @@
 // predictor, decoder and the iSTFT generator, reproducing the pinned ONNX
 // reference stage by stage.
 
-#include <algorithm>
-#include <bit>
 #include <cmath>
-#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
+#include <algorithm>
+#include <bit>
+#include <complex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -659,479 +660,476 @@ private:
 namespace mnet_tts {
 
 [[nodiscard]] int run_kokoro(const TtsOptions& opt, const Weights& weights) {
-        Reference kokoro_ref;
-        if (!opt.ref_dir.empty()) {
-            kokoro_ref.load(opt.ref_dir);
+    Reference kokoro_ref;
+    if (!opt.ref_dir.empty()) {
+        kokoro_ref.load(opt.ref_dir);
+    }
+    const std::vector<std::int64_t> ids = parse_id_list(opt.ids_arg);
+    if (ids.empty()) {
+        std::fprintf(stderr, "kokoro needs --ids a,b,c\n");
+        return 2;
+    }
+    // PLBERT: embeddings -> LayerNorm -> hidden mapping -> 12 shared layers
+    constexpr std::size_t kEmbd = 128;
+    constexpr std::size_t kHeads = 12;
+    constexpr std::size_t kHeadDim = 64;
+    constexpr std::size_t kLayers = 12;
+    const std::size_t tokens = ids.size();
+    Act x(kEmbd, tokens);
+    const Weight& wemb = weights.at("encoder.bert.embeddings.word_embeddings.weight");
+    const Weight& pemb = weights.at("encoder.bert.embeddings.position_embeddings.weight");
+    const Weight& temb = weights.at("encoder.bert.embeddings.token_type_embeddings.weight");
+    for (std::size_t t = 0; t < tokens; ++t) {
+        const std::size_t row = static_cast<std::size_t>(ids[t]);
+        for (std::size_t c = 0; c < kEmbd; ++c) {
+            // The graph sums (word_embeddings + token_type_embeddings)
+            // first and then adds position_embeddings; the grouping changes
+            // the float rounding and must match Add + Add_1.
+            x.at(c, t) = (wemb.values[row * kEmbd + c] + temb.values[c]) + pemb.values[t * kEmbd + c];
         }
-        const std::vector<std::int64_t> ids = parse_id_list(opt.ids_arg);
-        if (ids.empty()) {
-            std::fprintf(stderr, "kokoro needs --ids a,b,c\n");
-            return 2;
-        }
-        // PLBERT: embeddings -> LayerNorm -> hidden mapping -> 12 shared layers
-        constexpr std::size_t kEmbd = 128;
-        constexpr std::size_t kHeads = 12;
-        constexpr std::size_t kHeadDim = 64;
-        constexpr std::size_t kLayers = 12;
-        const std::size_t tokens = ids.size();
-        Act x(kEmbd, tokens);
-        const Weight& wemb = weights.at("encoder.bert.embeddings.word_embeddings.weight");
-        const Weight& pemb = weights.at("encoder.bert.embeddings.position_embeddings.weight");
-        const Weight& temb = weights.at("encoder.bert.embeddings.token_type_embeddings.weight");
-        for (std::size_t t = 0; t < tokens; ++t) {
-            const std::size_t row = static_cast<std::size_t>(ids[t]);
-            for (std::size_t c = 0; c < kEmbd; ++c) {
-                // The graph sums (word_embeddings + token_type_embeddings)
-                // first and then adds position_embeddings; the grouping changes
-                // the float rounding and must match Add + Add_1.
-                x.at(c, t) = (wemb.values[row * kEmbd + c] + temb.values[c]) + pemb.values[t * kEmbd + c];
-            }
-        }
-        x = layer_norm(x, weights.at("encoder.bert.embeddings.LayerNorm.weight"),
-                       weights.at("encoder.bert.embeddings.LayerNorm.bias"), kKokoroLayerNormEps);
-        if (!g_debug_dir.empty()) {
-            debug_dump("kokoro_embed", x.data);
-        }
-        report(kokoro_ref, "encoder_bert_embeddings_LayerNorm_LayerNormalization", x, "plbert embeddings", true);
-        Act h = linear(x, weights.at("encoder.bert.encoder.embedding_hidden_mapping_in.weight"),
-                       &weights.at("encoder.bert.encoder.embedding_hidden_mapping_in.bias"));
-        report(kokoro_ref, "encoder_bert_encoder_embedding_hidden_mapping_in_Add", h, "plbert hidden mapping", true);
-        const std::string layer = "encoder.bert.encoder.albert_layer_groups.0.albert_layers.0.";
-        for (std::size_t i = 0; i < kLayers; ++i) {
-            h = kokoro_albert_layer(h, weights, kHeads, kHeadDim, layer);
-            const std::string suffix = i == 0 ? "" : "_" + std::to_string(i);
-            report(kokoro_ref,
-                   "encoder_bert_encoder_albert_layer_groups.0_albert_layers.0_full_layer_layer_norm" + suffix +
-                       "_LayerNormalization",
-                   h, "plbert layer " + std::to_string(i), true);
-        }
-        const Act text = linear(h, weights.at("encoder.bert_encoder.weight"), &weights.at("encoder.bert_encoder.bias"));
-        report(kokoro_ref, "encoder_bert_encoder_Add", text, "plbert text features", true);
-        std::printf("  %-42s %zu tokens\n", "plbert text features", tokens);
+    }
+    x = layer_norm(x, weights.at("encoder.bert.embeddings.LayerNorm.weight"),
+                   weights.at("encoder.bert.embeddings.LayerNorm.bias"), kKokoroLayerNormEps);
+    if (!g_debug_dir.empty()) {
+        debug_dump("kokoro_embed", x.data);
+    }
+    report(kokoro_ref, "encoder_bert_embeddings_LayerNorm_LayerNormalization", x, "plbert embeddings", true);
+    Act h = linear(x, weights.at("encoder.bert.encoder.embedding_hidden_mapping_in.weight"),
+                   &weights.at("encoder.bert.encoder.embedding_hidden_mapping_in.bias"));
+    report(kokoro_ref, "encoder_bert_encoder_embedding_hidden_mapping_in_Add", h, "plbert hidden mapping", true);
+    const std::string layer = "encoder.bert.encoder.albert_layer_groups.0.albert_layers.0.";
+    for (std::size_t i = 0; i < kLayers; ++i) {
+        h = kokoro_albert_layer(h, weights, kHeads, kHeadDim, layer);
+        const std::string suffix = i == 0 ? "" : "_" + std::to_string(i);
+        report(kokoro_ref,
+               "encoder_bert_encoder_albert_layer_groups.0_albert_layers.0_full_layer_layer_norm" + suffix +
+                   "_LayerNormalization",
+               h, "plbert layer " + std::to_string(i), true);
+    }
+    const Act text = linear(h, weights.at("encoder.bert_encoder.weight"), &weights.at("encoder.bert_encoder.bias"));
+    report(kokoro_ref, "encoder_bert_encoder_Add", text, "plbert text features", true);
+    std::printf("  %-42s %zu tokens\n", "plbert text features", tokens);
 
-        // encoder.text_encoder: embedding -> 3 x [conv5, LayerNorm, LeakyReLU]
-        // -> bidirectional LSTM(256), the decoder's "d_en" input.
-        constexpr std::size_t kText = 512;
-        Act te(kText, tokens);
-        const Weight& text_emb = weights.at("encoder.text_encoder.embedding.weight");
-        for (std::size_t t = 0; t < tokens; ++t) {
-            const std::size_t row = static_cast<std::size_t>(ids[t]);
-            for (std::size_t c = 0; c < kText; ++c) {
-                te.at(c, t) = text_emb.values[row * kText + c];
-            }
+    // encoder.text_encoder: embedding -> 3 x [conv5, LayerNorm, LeakyReLU]
+    // -> bidirectional LSTM(256), the decoder's "d_en" input.
+    constexpr std::size_t kText = 512;
+    Act te(kText, tokens);
+    const Weight& text_emb = weights.at("encoder.text_encoder.embedding.weight");
+    for (std::size_t t = 0; t < tokens; ++t) {
+        const std::size_t row = static_cast<std::size_t>(ids[t]);
+        for (std::size_t c = 0; c < kText; ++c) {
+            te.at(c, t) = text_emb.values[row * kText + c];
         }
-        report(kokoro_ref, "encoder_text_encoder_embedding_Gather", te, "text encoder embedding", true);
-        for (std::size_t i = 0; i < 3; ++i) {
-            const std::string tag = "encoder.text_encoder.cnn." + std::to_string(i) + ".cnn." + std::to_string(i);
-            const std::string conv_bias = "encoder.text_encoder.cnn." + std::to_string(i) + ".0.bias";
-            Act conv = conv1d(te, weights.at(tag + ".0.weight"), weights.at(conv_bias), 5, 2);
-            report(kokoro_ref,
-                   "encoder_text_encoder_cnn." + std::to_string(i) + "_cnn." + std::to_string(i) + ".0_Conv", conv,
-                   "text encoder conv " + std::to_string(i));
-            const std::string ln_tag = "encoder.text_encoder.cnn." + std::to_string(i) + ".1";
-            conv = layer_norm(conv, weights.at(ln_tag + ".gamma"), weights.at(ln_tag + ".beta"));
-            report(
-                kokoro_ref,
-                "encoder_text_encoder_cnn." + std::to_string(i) + "_cnn." + std::to_string(i) + ".1_LayerNormalization",
-                conv, "text encoder norm " + std::to_string(i), true);
-            leaky_relu(conv, 0.2F);
-            te = conv;
-        }
-        const Act d_en = lstm_bidirectional(te, weights.at("encoder.text_encoder.lstm.weight_ih"),
-                                            weights.at("encoder.text_encoder.lstm.weight_hh"),
-                                            weights.at("encoder.text_encoder.lstm.bias"));
-        report(kokoro_ref, "encoder_text_encoder_lstm_LSTM", d_en, "text encoder BiLSTM", true);
-        std::printf("  %-42s %zu x %zu\n", "text encoder output (d_en)", d_en.channels, d_en.length);
+    }
+    report(kokoro_ref, "encoder_text_encoder_embedding_Gather", te, "text encoder embedding", true);
+    for (std::size_t i = 0; i < 3; ++i) {
+        const std::string tag = "encoder.text_encoder.cnn." + std::to_string(i) + ".cnn." + std::to_string(i);
+        const std::string conv_bias = "encoder.text_encoder.cnn." + std::to_string(i) + ".0.bias";
+        Act conv = conv1d(te, weights.at(tag + ".0.weight"), weights.at(conv_bias), 5, 2);
+        report(kokoro_ref, "encoder_text_encoder_cnn." + std::to_string(i) + "_cnn." + std::to_string(i) + ".0_Conv",
+               conv, "text encoder conv " + std::to_string(i));
+        const std::string ln_tag = "encoder.text_encoder.cnn." + std::to_string(i) + ".1";
+        conv = layer_norm(conv, weights.at(ln_tag + ".gamma"), weights.at(ln_tag + ".beta"));
+        report(kokoro_ref,
+               "encoder_text_encoder_cnn." + std::to_string(i) + "_cnn." + std::to_string(i) + ".1_LayerNormalization",
+               conv, "text encoder norm " + std::to_string(i), true);
+        leaky_relu(conv, 0.2F);
+        te = conv;
+    }
+    const Act d_en = lstm_bidirectional(te, weights.at("encoder.text_encoder.lstm.weight_ih"),
+                                        weights.at("encoder.text_encoder.lstm.weight_hh"),
+                                        weights.at("encoder.text_encoder.lstm.bias"));
+    report(kokoro_ref, "encoder_text_encoder_lstm_LSTM", d_en, "text encoder BiLSTM", true);
+    std::printf("  %-42s %zu x %zu\n", "text encoder output (d_en)", d_en.channels, d_en.length);
 
-        // Prosody predictor, duration branch: StyleTTS2 DurationEncoder =
-        // 3 x [concat(text, style) -> BiLSTM -> AdaLayerNorm(style)], then a
-        // BiLSTM over cat(t_en, style) and a 50-bin linear head whose sigmoid
-        // sum (divided by opt.speed) is the frame duration.
-        // the predictor consumes style[:, 128:] (the decoder uses the first half)
-        constexpr std::size_t kStyle = 128;
-        if (opt.style_path.empty()) {
-            std::fprintf(stderr, "kokoro needs --style FILE (256 float32 values)\n");
-            return 2;
-        }
-        std::ifstream style_file(opt.style_path, std::ios::binary);
-        std::vector<float> style_row(2 * kStyle);
-        style_file.read(reinterpret_cast<char*>(style_row.data()),
-                        static_cast<std::streamsize>(style_row.size() * sizeof(float)));
-        if (!style_file) {
-            std::fprintf(stderr, "cannot read %s\n", opt.style_path.c_str());
-            return 2;
-        }
-        const std::vector<float> style_values(style_row.begin() + static_cast<std::ptrdiff_t>(kStyle), style_row.end());
-        // the predictor starts from the PLBERT text features (512), not from the
-        // text encoder's BiLSTM output (that one feeds the decoder).
-        Act t_en = text;
-        for (std::size_t i = 0; i < 3; ++i) {
-            const std::string tag = "encoder.predictor.text_encoder.lstms." + std::to_string(i * 2);
-            Act cat(512 + kStyle, tokens);
-            for (std::size_t c = 0; c < 512; ++c) {
-                for (std::size_t t = 0; t < tokens; ++t) {
-                    cat.at(c, t) = t_en.at(c, t);
-                }
-            }
-            for (std::size_t c = 0; c < kStyle; ++c) {
-                for (std::size_t t = 0; t < tokens; ++t) {
-                    cat.at(512 + c, t) = style_values[c];
-                }
-            }
-            const Act enc_lstm = lstm_bidirectional(cat, weights.at(tag + ".weight_ih"), weights.at(tag + ".weight_hh"),
-                                                    weights.at(tag + ".bias"));
-            report(kokoro_ref, "encoder_predictor_text_encoder_lstms." + std::to_string(i * 2) + "_LSTM", enc_lstm,
-                   "predictor lstm " + std::to_string(i), true);
-            // AdaLayerNorm: fc(style) -> gamma/beta, x = LN(x) * (1+gamma) + beta
-            Act style_act(kStyle, 1);
-            for (std::size_t c = 0; c < kStyle; ++c) {
-                style_act.at(c, 0) = style_values[c];
-            }
-            const std::string adaln = "encoder.predictor.text_encoder.lstms." + std::to_string(i * 2 + 1) + ".";
-            const Act hb = linear(style_act, weights.at(adaln + "fc.weight"), &weights.at(adaln + "fc.bias"));
-            Act normed = layer_norm_unit(enc_lstm, 1.0e-5F);
-            for (std::size_t c = 0; c < normed.channels; ++c) {
-                const float gamma = hb.at(c, 0);
-                const float beta = hb.at(normed.channels + c, 0);
-                for (std::size_t t = 0; t < normed.length; ++t) {
-                    normed.at(c, t) = normed.at(c, t) * (1.0F + gamma) + beta;
-                }
-            }
-            report(kokoro_ref, "encoder_predictor_text_encoder_lstms." + std::to_string(i * 2 + 1) + "_Add_2", normed,
-                   "predictor adaln " + std::to_string(i), true);
-            t_en = normed;
-        }
-        // predictor.lstm over cat(t_en, style)
-        Act plstm_in(512 + kStyle, tokens);
+    // Prosody predictor, duration branch: StyleTTS2 DurationEncoder =
+    // 3 x [concat(text, style) -> BiLSTM -> AdaLayerNorm(style)], then a
+    // BiLSTM over cat(t_en, style) and a 50-bin linear head whose sigmoid
+    // sum (divided by opt.speed) is the frame duration.
+    // the predictor consumes style[:, 128:] (the decoder uses the first half)
+    constexpr std::size_t kStyle = 128;
+    if (opt.style_path.empty()) {
+        std::fprintf(stderr, "kokoro needs --style FILE (256 float32 values)\n");
+        return 2;
+    }
+    std::ifstream style_file(opt.style_path, std::ios::binary);
+    std::vector<float> style_row(2 * kStyle);
+    style_file.read(reinterpret_cast<char*>(style_row.data()),
+                    static_cast<std::streamsize>(style_row.size() * sizeof(float)));
+    if (!style_file) {
+        std::fprintf(stderr, "cannot read %s\n", opt.style_path.c_str());
+        return 2;
+    }
+    const std::vector<float> style_values(style_row.begin() + static_cast<std::ptrdiff_t>(kStyle), style_row.end());
+    // the predictor starts from the PLBERT text features (512), not from the
+    // text encoder's BiLSTM output (that one feeds the decoder).
+    Act t_en = text;
+    for (std::size_t i = 0; i < 3; ++i) {
+        const std::string tag = "encoder.predictor.text_encoder.lstms." + std::to_string(i * 2);
+        Act cat(512 + kStyle, tokens);
         for (std::size_t c = 0; c < 512; ++c) {
             for (std::size_t t = 0; t < tokens; ++t) {
-                plstm_in.at(c, t) = t_en.at(c, t);
+                cat.at(c, t) = t_en.at(c, t);
             }
         }
         for (std::size_t c = 0; c < kStyle; ++c) {
             for (std::size_t t = 0; t < tokens; ++t) {
-                plstm_in.at(512 + c, t) = style_values[c];
+                cat.at(512 + c, t) = style_values[c];
             }
         }
-        const Act d_lstm = lstm_bidirectional(plstm_in, weights.at("encoder.predictor.lstm.weight_ih"),
-                                              weights.at("encoder.predictor.lstm.weight_hh"),
-                                              weights.at("encoder.predictor.lstm.bias"));
-        report(kokoro_ref, "encoder_predictor_lstm_LSTM", d_lstm, "predictor lstm", true);
-        const Act logits = linear(d_lstm, weights.at("encoder.predictor.duration_proj.linear_layer.weight"),
-                                  &weights.at("encoder.predictor.duration_proj.linear_layer.bias"));
-        report(kokoro_ref, "encoder_predictor_duration_proj_linear_layer_Add", logits, "duration logits", true);
-        Act duration_logit(50, tokens);
-        Act sig(50, tokens);
-        for (std::size_t t = 0; t < tokens; ++t) {
-            double sum = 0.0;
-            for (std::size_t b = 0; b < 50; ++b) {
-                // ONNX Runtime's Sigmoid<float> calls MlasComputeLogistic
-                // (the Eigen rational approximation), not expf.
-                const float v = ort_logistic(logits.at(b, t));
-                sig.at(b, t) = v;
-                sum += static_cast<double>(v);
-            }
-            duration_logit.at(0, t) = static_cast<float>(sum);
+        const Act enc_lstm = lstm_bidirectional(cat, weights.at(tag + ".weight_ih"), weights.at(tag + ".weight_hh"),
+                                                weights.at(tag + ".bias"));
+        report(kokoro_ref, "encoder_predictor_text_encoder_lstms." + std::to_string(i * 2) + "_LSTM", enc_lstm,
+               "predictor lstm " + std::to_string(i), true);
+        // AdaLayerNorm: fc(style) -> gamma/beta, x = LN(x) * (1+gamma) + beta
+        Act style_act(kStyle, 1);
+        for (std::size_t c = 0; c < kStyle; ++c) {
+            style_act.at(c, 0) = style_values[c];
         }
-        report(kokoro_ref, "encoder_predictor_Sigmoid", sig, "duration sigmoid", true);
-        std::printf("  %-42s", "duration (frames per token)");
-        std::int32_t total_frames = 0;
-        for (std::size_t t = 0; t < tokens; ++t) {
-            const auto frames = static_cast<std::int32_t>(std::llround(duration_logit.at(0, t) / opt.speed));
-            total_frames += frames;
-            std::printf(" %d", frames);
-        }
-        std::printf("  (sum %d)\n", total_frames);
-        {
-            const auto it = kokoro_ref.tensors.find("encoder_Round");
-            if (it != kokoro_ref.tensors.end() && it->second.size() == tokens) {
-                std::size_t same = 0;
-                for (std::size_t t = 0; t < tokens; ++t) {
-                    const auto expected = static_cast<std::int32_t>(std::llround(it->second[t]));
-                    const auto ours = static_cast<std::int32_t>(
-                        std::llround(static_cast<double>(duration_logit.at(0, t)) / static_cast<double>(opt.speed)));
-                    if (ours == expected) {
-                        ++same;
-                    }
-                }
-                std::printf("  %-42s %zu/%zu tokens\n", "duration vs encoder_Round", same, tokens);
+        const std::string adaln = "encoder.predictor.text_encoder.lstms." + std::to_string(i * 2 + 1) + ".";
+        const Act hb = linear(style_act, weights.at(adaln + "fc.weight"), &weights.at(adaln + "fc.bias"));
+        Act normed = layer_norm_unit(enc_lstm, 1.0e-5F);
+        for (std::size_t c = 0; c < normed.channels; ++c) {
+            const float gamma = hb.at(c, 0);
+            const float beta = hb.at(normed.channels + c, 0);
+            for (std::size_t t = 0; t < normed.length; ++t) {
+                normed.at(c, t) = normed.at(c, t) * (1.0F + gamma) + beta;
             }
         }
-        // Prosody heads: align the duration encoder output to the frame grid,
-        // run the shared BiLSTM, then the F0 / N AdainResBlk stacks.
-        std::vector<std::int32_t> durations(tokens, 0);
-        std::int32_t frame_total = 0;
+        report(kokoro_ref, "encoder_predictor_text_encoder_lstms." + std::to_string(i * 2 + 1) + "_Add_2", normed,
+               "predictor adaln " + std::to_string(i), true);
+        t_en = normed;
+    }
+    // predictor.lstm over cat(t_en, style)
+    Act plstm_in(512 + kStyle, tokens);
+    for (std::size_t c = 0; c < 512; ++c) {
         for (std::size_t t = 0; t < tokens; ++t) {
-            durations[t] = static_cast<std::int32_t>(
-                std::llround(static_cast<double>(duration_logit.at(0, t)) / static_cast<double>(opt.speed)));
-            frame_total += durations[t];
+            plstm_in.at(c, t) = t_en.at(c, t);
         }
-        std::vector<std::int32_t> frame_token(static_cast<std::size_t>(frame_total), 0);
-        {
-            std::int32_t frame = 0;
+    }
+    for (std::size_t c = 0; c < kStyle; ++c) {
+        for (std::size_t t = 0; t < tokens; ++t) {
+            plstm_in.at(512 + c, t) = style_values[c];
+        }
+    }
+    const Act d_lstm =
+        lstm_bidirectional(plstm_in, weights.at("encoder.predictor.lstm.weight_ih"),
+                           weights.at("encoder.predictor.lstm.weight_hh"), weights.at("encoder.predictor.lstm.bias"));
+    report(kokoro_ref, "encoder_predictor_lstm_LSTM", d_lstm, "predictor lstm", true);
+    const Act logits = linear(d_lstm, weights.at("encoder.predictor.duration_proj.linear_layer.weight"),
+                              &weights.at("encoder.predictor.duration_proj.linear_layer.bias"));
+    report(kokoro_ref, "encoder_predictor_duration_proj_linear_layer_Add", logits, "duration logits", true);
+    Act duration_logit(50, tokens);
+    Act sig(50, tokens);
+    for (std::size_t t = 0; t < tokens; ++t) {
+        double sum = 0.0;
+        for (std::size_t b = 0; b < 50; ++b) {
+            // ONNX Runtime's Sigmoid<float> calls MlasComputeLogistic
+            // (the Eigen rational approximation), not expf.
+            const float v = ort_logistic(logits.at(b, t));
+            sig.at(b, t) = v;
+            sum += static_cast<double>(v);
+        }
+        duration_logit.at(0, t) = static_cast<float>(sum);
+    }
+    report(kokoro_ref, "encoder_predictor_Sigmoid", sig, "duration sigmoid", true);
+    std::printf("  %-42s", "duration (frames per token)");
+    std::int32_t total_frames = 0;
+    for (std::size_t t = 0; t < tokens; ++t) {
+        const auto frames = static_cast<std::int32_t>(std::llround(duration_logit.at(0, t) / opt.speed));
+        total_frames += frames;
+        std::printf(" %d", frames);
+    }
+    std::printf("  (sum %d)\n", total_frames);
+    {
+        const auto it = kokoro_ref.tensors.find("encoder_Round");
+        if (it != kokoro_ref.tensors.end() && it->second.size() == tokens) {
+            std::size_t same = 0;
             for (std::size_t t = 0; t < tokens; ++t) {
-                for (std::int32_t k = 0; k < durations[t] && frame < frame_total; ++k) {
-                    frame_token[static_cast<std::size_t>(frame)] = static_cast<std::int32_t>(t);
-                    ++frame;
+                const auto expected = static_cast<std::int32_t>(std::llround(it->second[t]));
+                const auto ours = static_cast<std::int32_t>(
+                    std::llround(static_cast<double>(duration_logit.at(0, t)) / static_cast<double>(opt.speed)));
+                if (ours == expected) {
+                    ++same;
                 }
+            }
+            std::printf("  %-42s %zu/%zu tokens\n", "duration vs encoder_Round", same, tokens);
+        }
+    }
+    // Prosody heads: align the duration encoder output to the frame grid,
+    // run the shared BiLSTM, then the F0 / N AdainResBlk stacks.
+    std::vector<std::int32_t> durations(tokens, 0);
+    std::int32_t frame_total = 0;
+    for (std::size_t t = 0; t < tokens; ++t) {
+        durations[t] = static_cast<std::int32_t>(
+            std::llround(static_cast<double>(duration_logit.at(0, t)) / static_cast<double>(opt.speed)));
+        frame_total += durations[t];
+    }
+    std::vector<std::int32_t> frame_token(static_cast<std::size_t>(frame_total), 0);
+    {
+        std::int32_t frame = 0;
+        for (std::size_t t = 0; t < tokens; ++t) {
+            for (std::int32_t k = 0; k < durations[t] && frame < frame_total; ++k) {
+                frame_token[static_cast<std::size_t>(frame)] = static_cast<std::int32_t>(t);
+                ++frame;
             }
         }
-        Act aligned(512 + kStyle, static_cast<std::size_t>(frame_total));
-        for (std::size_t c = 0; c < 512 + kStyle; ++c) {
-            for (std::size_t f = 0; f < aligned.length; ++f) {
-                const std::size_t token = static_cast<std::size_t>(frame_token[f]);
-                aligned.at(c, f) = c < 512 ? t_en.at(c, token) : style_values[c - 512];
+    }
+    Act aligned(512 + kStyle, static_cast<std::size_t>(frame_total));
+    for (std::size_t c = 0; c < 512 + kStyle; ++c) {
+        for (std::size_t f = 0; f < aligned.length; ++f) {
+            const std::size_t token = static_cast<std::size_t>(frame_token[f]);
+            aligned.at(c, f) = c < 512 ? t_en.at(c, token) : style_values[c - 512];
+        }
+    }
+    const Act shared = lstm_bidirectional(aligned, weights.at("encoder.shared.weight_ih"),
+                                          weights.at("encoder.shared.weight_hh"), weights.at("encoder.shared.bias"));
+    report(kokoro_ref, "encoder_shared_LSTM", shared, "shared lstm", true);
+    std::vector<float> frame_mask(static_cast<std::size_t>(frame_total), 1.0F);
+    Act f0_values;
+    Act n_values;
+    for (int head = 0; head < 2; ++head) {
+        const std::string name = head == 0 ? "F0" : "N";
+        Act head_act = shared;
+        const std::string divs[3] = {"Div_2", "Div_4", "Div_2"};
+        for (std::size_t i = 0; i < 3; ++i) {
+            const std::string tag = "encoder." + name + "." + std::to_string(i) + ".";
+            const std::string norm_tag = "encoder.predictor." + name + "." + std::to_string(i) + ".";
+            const Act style_act = style_act_of(style_values);
+            head_act = adain_resblock(head_act, weights, tag, norm_tag, style_act, i == 1, i == 1, i == 0);
+            report(kokoro_ref, "encoder_" + name + "." + std::to_string(i) + "_" + divs[i], head_act,
+                   name + " block " + std::to_string(i));
+        }
+        const std::string proj = "encoder.predictor." + name + "_proj.";
+        Act v = conv1d(head_act, weights.at(proj + "weight"), weights.at(proj + "bias"), 1, 0);
+        report(kokoro_ref, "encoder_" + name + "_proj_Conv", v, name + " proj");
+        if (head == 0) {
+            f0_values = v;
+        } else {
+            n_values = v;
+        }
+    }
+    // Decoder: concat(d_en expanded to frames, F0, N) = 514 -> encode ->
+    // 4 x decode (each block sees features + asr_res(64) + F0 + N = 1090).
+    {
+        const std::size_t dec_frames = static_cast<std::size_t>(frame_total);
+        const std::vector<float> style_first_vec(style_row.begin(),
+                                                 style_row.begin() + static_cast<std::ptrdiff_t>(kStyle));
+        const Act style_first = style_act_of(style_first_vec);
+        Act d_en_exp(512, dec_frames);
+        for (std::size_t c = 0; c < 512; ++c) {
+            for (std::size_t f = 0; f < dec_frames; ++f) {
+                d_en_exp.at(c, f) = d_en.at(c, static_cast<std::size_t>(frame_token[f]));
             }
         }
-        const Act shared =
-            lstm_bidirectional(aligned, weights.at("encoder.shared.weight_ih"), weights.at("encoder.shared.weight_hh"),
-                               weights.at("encoder.shared.bias"));
-        report(kokoro_ref, "encoder_shared_LSTM", shared, "shared lstm", true);
-        std::vector<float> frame_mask(static_cast<std::size_t>(frame_total), 1.0F);
-        Act f0_values;
-        Act n_values;
-        for (int head = 0; head < 2; ++head) {
-            const std::string name = head == 0 ? "F0" : "N";
-            Act head_act = shared;
-            const std::string divs[3] = {"Div_2", "Div_4", "Div_2"};
-            for (std::size_t i = 0; i < 3; ++i) {
-                const std::string tag = "encoder." + name + "." + std::to_string(i) + ".";
-                const std::string norm_tag = "encoder.predictor." + name + "." + std::to_string(i) + ".";
-                const Act style_act = style_act_of(style_values);
-                head_act = adain_resblock(head_act, weights, tag, norm_tag, style_act, i == 1, i == 1, i == 0);
-                report(kokoro_ref, "encoder_" + name + "." + std::to_string(i) + "_" + divs[i], head_act,
-                       name + " block " + std::to_string(i));
-            }
-            const std::string proj = "encoder.predictor." + name + "_proj.";
-            Act v = conv1d(head_act, weights.at(proj + "weight"), weights.at(proj + "bias"), 1, 0);
-            report(kokoro_ref, "encoder_" + name + "_proj_Conv", v, name + " proj");
-            if (head == 0) {
-                f0_values = v;
-            } else {
-                n_values = v;
-            }
-        }
-        // Decoder: concat(d_en expanded to frames, F0, N) = 514 -> encode ->
-        // 4 x decode (each block sees features + asr_res(64) + F0 + N = 1090).
-        {
-            const std::size_t dec_frames = static_cast<std::size_t>(frame_total);
-            const std::vector<float> style_first_vec(style_row.begin(),
-                                                     style_row.begin() + static_cast<std::ptrdiff_t>(kStyle));
-            const Act style_first = style_act_of(style_first_vec);
-            Act d_en_exp(512, dec_frames);
-            for (std::size_t c = 0; c < 512; ++c) {
+        const Act asr = conv1d(d_en_exp, weights.at("decoder.decoder.asr_res.asr_res.0.weight"),
+                               weights.at("decoder.decoder.asr_res.0.bias"), 1, 0);
+        const Act f0 = conv1d(f0_values, weights.at("decoder.decoder.F0_conv.weight"),
+                              weights.at("decoder.decoder.F0_conv.bias"), 3, 1, 1, 1, 2);
+        const Act nn = conv1d(n_values, weights.at("decoder.decoder.N_conv.weight"),
+                              weights.at("decoder.decoder.N_conv.bias"), 3, 1, 1, 1, 2);
+        report(kokoro_ref, "decoder_decoder_F0_conv_Conv", f0, "decoder F0 conv");
+        report(kokoro_ref, "decoder_decoder_N_conv_Conv", nn, "decoder N conv");
+        const auto make_block_in = [&](const Act& features) {
+            Act block_in(1090, dec_frames);
+            for (std::size_t c = 0; c < features.channels; ++c) {
                 for (std::size_t f = 0; f < dec_frames; ++f) {
-                    d_en_exp.at(c, f) = d_en.at(c, static_cast<std::size_t>(frame_token[f]));
+                    block_in.at(c, f) = features.at(c, f);
                 }
             }
-            const Act asr = conv1d(d_en_exp, weights.at("decoder.decoder.asr_res.asr_res.0.weight"),
-                                   weights.at("decoder.decoder.asr_res.0.bias"), 1, 0);
-            const Act f0 = conv1d(f0_values, weights.at("decoder.decoder.F0_conv.weight"),
-                                  weights.at("decoder.decoder.F0_conv.bias"), 3, 1, 1, 1, 2);
-            const Act nn = conv1d(n_values, weights.at("decoder.decoder.N_conv.weight"),
-                                  weights.at("decoder.decoder.N_conv.bias"), 3, 1, 1, 1, 2);
-            report(kokoro_ref, "decoder_decoder_F0_conv_Conv", f0, "decoder F0 conv");
-            report(kokoro_ref, "decoder_decoder_N_conv_Conv", nn, "decoder N conv");
-            const auto make_block_in = [&](const Act& features) {
-                Act block_in(1090, dec_frames);
-                for (std::size_t c = 0; c < features.channels; ++c) {
-                    for (std::size_t f = 0; f < dec_frames; ++f) {
-                        block_in.at(c, f) = features.at(c, f);
-                    }
-                }
-                for (std::size_t c = 0; c < 64; ++c) {
-                    for (std::size_t f = 0; f < dec_frames; ++f) {
-                        block_in.at(1024 + c, f) = asr.at(c, f);
-                    }
-                }
+            for (std::size_t c = 0; c < 64; ++c) {
                 for (std::size_t f = 0; f < dec_frames; ++f) {
-                    block_in.at(1088, f) = f0.at(0, f);
-                    block_in.at(1089, f) = nn.at(0, f);
-                }
-                return block_in;
-            };
-            Act dec_in(514, dec_frames);
-            for (std::size_t c = 0; c < 512; ++c) {
-                for (std::size_t f = 0; f < dec_frames; ++f) {
-                    dec_in.at(c, f) = d_en_exp.at(c, f);
+                    block_in.at(1024 + c, f) = asr.at(c, f);
                 }
             }
             for (std::size_t f = 0; f < dec_frames; ++f) {
-                dec_in.at(512, f) = f0.at(0, f);
-                dec_in.at(513, f) = nn.at(0, f);
+                block_in.at(1088, f) = f0.at(0, f);
+                block_in.at(1089, f) = nn.at(0, f);
             }
-            report(kokoro_ref, "decoder_decoder_Concat", dec_in, "decoder input concat");
-            Act enc = adain_resblock(dec_in, weights, "decoder.decoder.encode.", "decoder.decoder.encode.", style_first,
-                                     false, true, false);
-            report(kokoro_ref, "decoder_decoder_encode_Div_3", enc, "decoder encode block");
-            for (std::size_t b = 0; b < 3; ++b) {
-                const std::string tag = "decoder.decoder.decode." + std::to_string(b) + ".";
-                const Act block_in = make_block_in(enc);
-                enc = adain_resblock(block_in, weights, tag, tag, style_first, false, true, false);
-                report(kokoro_ref, "decoder_decoder_decode." + std::to_string(b) + "_Div_3", enc,
-                       "decoder block " + std::to_string(b));
-            }
-            const std::string tag3 = "decoder.decoder.decode.3.";
-            const Act block_in3 = make_block_in(enc);
-            const Act z_dec = adain_resblock(block_in3, weights, tag3, tag3, style_first, true, true, false);
-            report(kokoro_ref, "decoder_decoder_decode.3_Div_4", z_dec, "decoder block 3 (x2 upsample)");
-            // Generator: harmonic source -> noise_res, two upsample stages with
-            // a 3-block receptive-field fusion each, conv_post (22 bins) and the
-            // inverse STFT.
-            Act source = harmonic_source(f0_values, weights, 300);
-            if (opt.ref_f0) {
-                const auto& rf = kokoro_ref.tensors.at("encoder_F0_proj_Conv");
-                Act f0_ref(1, rf.size());
-                std::copy(rf.begin(), rf.end(), f0_ref.data.begin());
-                source = harmonic_source(f0_ref, weights, 300);
-            }
-            report(kokoro_ref, "decoder_decoder_generator_m_source_l_tanh_Tanh", source, "harmonic source");
-
-            Act har = harmonic_spectrogram(source, weights.at("/decoder/decoder/generator/Constant_17_output_0"));
-            if (opt.ref_har) {
-                const auto& rh = kokoro_ref.tensors.at("decoder_decoder_generator_Concat_3");
-                std::copy(rh.begin(), rh.end(), har.data.begin());
-                std::printf("  %-42s %s\n", "harmonic spectrogram", "using the reference (diagnostic)");
-            }
-            report_channels(kokoro_ref, "decoder_decoder_generator_Concat_3", har, "generator har magnitude", 11);
-            if (!g_debug_dir.empty()) {
-                debug_dump("kokoro_har_full", har.data);
-            }
-            Act noise0 = conv1d(har, weights.at("decoder.decoder.generator.noise_convs.0.weight"),
-                                weights.at("decoder.decoder.generator.noise_convs.0.bias"), 12, 3, 1, 1, 6);
-            report(kokoro_ref, "decoder_decoder_generator_noise_convs.0_Conv", noise0, "generator noise conv 0");
-            if (!g_debug_dir.empty()) {
-                debug_dump("kokoro_noise0", noise0.data);
-            }
-            noise0 = generator_resblock(noise0, weights, "decoder.decoder.generator.noise_res.0", style_first, 7);
-            report(kokoro_ref, "decoder_decoder_generator_noise_res.0_Add_8", noise0, "generator noise res 0");
-            Act gen = z_dec;
-            leaky_relu(gen, 0.1F);
-            gen = conv_transpose1d(gen, weights.at("decoder.decoder.generator.ups.0.weight"),
-                                   weights.at("decoder.decoder.generator.ups.0.bias"), 10, 20, 5);
-            report(kokoro_ref, "decoder_decoder_generator_ups.0_ConvTranspose", gen, "generator ups.0");
-            for (std::size_t i = 0; i < gen.data.size(); ++i) {
-                gen.data[i] += noise0.data[i];
-            }
-            report(kokoro_ref, "decoder_decoder_generator_Add_2", gen, "generator add noise 0");
-            std::vector<Act> stage_low;
-            for (std::size_t b = 0; b < 3; ++b) {
-                const std::string tag = "decoder.decoder.generator.resblocks." + std::to_string(b);
-                Act rb = generator_resblock(gen, weights, tag, style_first, 3 + 4 * b);
-                report(kokoro_ref, "decoder_decoder_generator_resblocks." + std::to_string(b) + "_Add_8", rb,
-                       "generator resblock " + std::to_string(b));
-                stage_low.push_back(std::move(rb));
-            }
-            const Act sum0 = [&] {
-                Act acc = stage_low[0];
-                for (std::size_t k = 0; k < acc.data.size(); ++k) {
-                    acc.data[k] += stage_low[1].data[k];
-                }
-                return acc;
-            }();
-            report(kokoro_ref, "decoder_decoder_generator_Add_3", sum0, "generator sum 0a");
-            Act sum0b = sum0;
-            for (std::size_t k = 0; k < sum0b.data.size(); ++k) {
-                sum0b.data[k] += stage_low[2].data[k];
-            }
-            report(kokoro_ref, "decoder_decoder_generator_Add_4", sum0b, "generator sum 0b");
-            Act blended(gen.channels, gen.length);
-            for (std::size_t k = 0; k < blended.data.size(); ++k) {
-                blended.data[k] = sum0b.data[k] / 3.0F;
-            }
-            report(kokoro_ref, "decoder_decoder_generator_Div_2", blended, "generator blend 0");
-            leaky_relu(blended, 0.1F);
-            report(kokoro_ref, "decoder_decoder_generator_LeakyRelu_1", blended, "generator act 1");
-            Act gen2 = conv_transpose1d(blended, weights.at("decoder.decoder.generator.ups.1.weight"),
-                                        weights.at("decoder.decoder.generator.ups.1.bias"), 6, 12, 3);
-            report(kokoro_ref, "decoder_decoder_generator_ups.1_ConvTranspose", gen2, "generator ups.1");
-            Act padded(gen2.channels, gen2.length + 1);
-            for (std::size_t c = 0; c < gen2.channels; ++c) {
-                padded.at(c, 0) = gen2.at(c, 1);
-                for (std::size_t t = 0; t < gen2.length; ++t) {
-                    padded.at(c, t + 1) = gen2.at(c, t);
-                }
-            }
-            report(kokoro_ref, "decoder_decoder_generator_reflection_pad_Pad", padded, "generator reflect pad");
-            Act noise1 = conv1d(har, weights.at("decoder.decoder.generator.noise_convs.1.weight"),
-                                weights.at("decoder.decoder.generator.noise_convs.1.bias"), 1, 0);
-            report(kokoro_ref, "decoder_decoder_generator_noise_convs.1_Conv", noise1, "generator noise conv 1");
-            noise1 = generator_resblock(noise1, weights, "decoder.decoder.generator.noise_res.1", style_first, 11);
-            report(kokoro_ref, "decoder_decoder_generator_noise_res.1_Add_8", noise1, "generator noise res 1");
-            for (std::size_t k = 0; k < padded.data.size(); ++k) {
-                padded.data[k] += noise1.data[k];
-            }
-            report(kokoro_ref, "decoder_decoder_generator_Add_5", padded, "generator add noise 1");
-            std::vector<Act> stage2;
-            for (std::size_t b = 3; b < 6; ++b) {
-                const std::string tag = "decoder.decoder.generator.resblocks." + std::to_string(b);
-                Act rb = generator_resblock(padded, weights, tag, style_first, 3 + 4 * (b - 3));
-                report(kokoro_ref, "decoder_decoder_generator_resblocks." + std::to_string(b) + "_Add_8", rb,
-                       "generator resblock " + std::to_string(b));
-                stage2.push_back(std::move(rb));
-            }
-            Act sum1 = stage2[0];
-            for (std::size_t k = 0; k < sum1.data.size(); ++k) {
-                sum1.data[k] += stage2[1].data[k];
-            }
-            report(kokoro_ref, "decoder_decoder_generator_Add_6", sum1, "generator sum 1a");
-            for (std::size_t k = 0; k < sum1.data.size(); ++k) {
-                sum1.data[k] += stage2[2].data[k];
-            }
-            report(kokoro_ref, "decoder_decoder_generator_Add_7", sum1, "generator sum 1b");
-            Act blended2(padded.channels, padded.length);
-            for (std::size_t k = 0; k < blended2.data.size(); ++k) {
-                blended2.data[k] = sum1.data[k] / 3.0F;
-            }
-            report(kokoro_ref, "decoder_decoder_generator_Div_4", blended2, "generator blend 1");
-            leaky_relu(blended2, 0.01F);
-            report(kokoro_ref, "decoder_decoder_generator_LeakyRelu_2", blended2, "generator act 2");
-            const Act post = conv1d(blended2, weights.at("decoder.decoder.generator.conv_post.weight"),
-                                    weights.at("decoder.decoder.generator.conv_post.bias"), 7, 3);
-            report(kokoro_ref, "decoder_decoder_generator_conv_post_Conv", post, "generator conv_post");
-            const std::size_t bins = post.channels / 2;
-            const std::size_t slice_len = bins * post.length;
-            Act spec(post.channels, post.length);
-            for (std::size_t b = 0; b < bins; ++b) {
-                for (std::size_t t = 0; t < post.length; ++t) {
-                    // The graph runs Exp over the magnitude slice and then
-                    // Sin -> (Sin, Cos) over the phase slice, each as a flat
-                    // Eigen array of bins * T elements (so the packet tail is
-                    // the last three entries of the last bin).
-                    const std::size_t index = b * post.length + t;
-                    const float magnitude = mlas_exp(post.at(b, t));
-                    const float phase = eigen_sin_element(post.at(bins + b, t), index, slice_len);
-                    spec.at(b, t) = magnitude * eigen_cos_element(phase, index, slice_len);
-                    spec.at(bins + b, t) = magnitude * eigen_sin_element(phase, index, slice_len);
-                }
-            }
-            if (!g_debug_dir.empty()) {
-                debug_dump("kokoro_istft_concat", spec.data);
-            }
-            const Act wave = istft_waveform(spec, weights.at("decoder.decoder.generator.stft.istft.stft.inverse_basis"),
-                                            weights.at("decoder.decoder.generator.stft.istft.stft.window_sum"));
-            report(kokoro_ref, "output", wave, "waveform");
-            const auto out_it = kokoro_ref.tensors.find("output");
-            if (out_it != kokoro_ref.tensors.end() && out_it->second.size() == wave.data.size()) {
-                double dot = 0.0;
-                double norm_a = 0.0;
-                double norm_b = 0.0;
-                for (std::size_t i = 0; i < wave.data.size(); ++i) {
-                    const double a = static_cast<double>(wave.data[i]);
-                    const double b = static_cast<double>(out_it->second[i]);
-                    dot += a * b;
-                    norm_a += a * a;
-                    norm_b += b * b;
-                }
-                const double cos = norm_a > 0.0 && norm_b > 0.0 ? dot / std::sqrt(norm_a * norm_b) : 0.0;
-                std::printf("  %-42s cos %.9f  rms %.4f\n", "waveform similarity", cos,
-                            std::sqrt(norm_a / static_cast<double>(wave.data.size())));
-            }
-            if (!opt.wav_out.empty()) {
-                write_wav(opt.wav_out, wave.data, 24000U);
+            return block_in;
+        };
+        Act dec_in(514, dec_frames);
+        for (std::size_t c = 0; c < 512; ++c) {
+            for (std::size_t f = 0; f < dec_frames; ++f) {
+                dec_in.at(c, f) = d_en_exp.at(c, f);
             }
         }
-        return 0;
+        for (std::size_t f = 0; f < dec_frames; ++f) {
+            dec_in.at(512, f) = f0.at(0, f);
+            dec_in.at(513, f) = nn.at(0, f);
+        }
+        report(kokoro_ref, "decoder_decoder_Concat", dec_in, "decoder input concat");
+        Act enc = adain_resblock(dec_in, weights, "decoder.decoder.encode.", "decoder.decoder.encode.", style_first,
+                                 false, true, false);
+        report(kokoro_ref, "decoder_decoder_encode_Div_3", enc, "decoder encode block");
+        for (std::size_t b = 0; b < 3; ++b) {
+            const std::string tag = "decoder.decoder.decode." + std::to_string(b) + ".";
+            const Act block_in = make_block_in(enc);
+            enc = adain_resblock(block_in, weights, tag, tag, style_first, false, true, false);
+            report(kokoro_ref, "decoder_decoder_decode." + std::to_string(b) + "_Div_3", enc,
+                   "decoder block " + std::to_string(b));
+        }
+        const std::string tag3 = "decoder.decoder.decode.3.";
+        const Act block_in3 = make_block_in(enc);
+        const Act z_dec = adain_resblock(block_in3, weights, tag3, tag3, style_first, true, true, false);
+        report(kokoro_ref, "decoder_decoder_decode.3_Div_4", z_dec, "decoder block 3 (x2 upsample)");
+        // Generator: harmonic source -> noise_res, two upsample stages with
+        // a 3-block receptive-field fusion each, conv_post (22 bins) and the
+        // inverse STFT.
+        Act source = harmonic_source(f0_values, weights, 300);
+        if (opt.ref_f0) {
+            const auto& rf = kokoro_ref.tensors.at("encoder_F0_proj_Conv");
+            Act f0_ref(1, rf.size());
+            std::copy(rf.begin(), rf.end(), f0_ref.data.begin());
+            source = harmonic_source(f0_ref, weights, 300);
+        }
+        report(kokoro_ref, "decoder_decoder_generator_m_source_l_tanh_Tanh", source, "harmonic source");
+
+        Act har = harmonic_spectrogram(source, weights.at("/decoder/decoder/generator/Constant_17_output_0"));
+        if (opt.ref_har) {
+            const auto& rh = kokoro_ref.tensors.at("decoder_decoder_generator_Concat_3");
+            std::copy(rh.begin(), rh.end(), har.data.begin());
+            std::printf("  %-42s %s\n", "harmonic spectrogram", "using the reference (diagnostic)");
+        }
+        report_channels(kokoro_ref, "decoder_decoder_generator_Concat_3", har, "generator har magnitude", 11);
+        if (!g_debug_dir.empty()) {
+            debug_dump("kokoro_har_full", har.data);
+        }
+        Act noise0 = conv1d(har, weights.at("decoder.decoder.generator.noise_convs.0.weight"),
+                            weights.at("decoder.decoder.generator.noise_convs.0.bias"), 12, 3, 1, 1, 6);
+        report(kokoro_ref, "decoder_decoder_generator_noise_convs.0_Conv", noise0, "generator noise conv 0");
+        if (!g_debug_dir.empty()) {
+            debug_dump("kokoro_noise0", noise0.data);
+        }
+        noise0 = generator_resblock(noise0, weights, "decoder.decoder.generator.noise_res.0", style_first, 7);
+        report(kokoro_ref, "decoder_decoder_generator_noise_res.0_Add_8", noise0, "generator noise res 0");
+        Act gen = z_dec;
+        leaky_relu(gen, 0.1F);
+        gen = conv_transpose1d(gen, weights.at("decoder.decoder.generator.ups.0.weight"),
+                               weights.at("decoder.decoder.generator.ups.0.bias"), 10, 20, 5);
+        report(kokoro_ref, "decoder_decoder_generator_ups.0_ConvTranspose", gen, "generator ups.0");
+        for (std::size_t i = 0; i < gen.data.size(); ++i) {
+            gen.data[i] += noise0.data[i];
+        }
+        report(kokoro_ref, "decoder_decoder_generator_Add_2", gen, "generator add noise 0");
+        std::vector<Act> stage_low;
+        for (std::size_t b = 0; b < 3; ++b) {
+            const std::string tag = "decoder.decoder.generator.resblocks." + std::to_string(b);
+            Act rb = generator_resblock(gen, weights, tag, style_first, 3 + 4 * b);
+            report(kokoro_ref, "decoder_decoder_generator_resblocks." + std::to_string(b) + "_Add_8", rb,
+                   "generator resblock " + std::to_string(b));
+            stage_low.push_back(std::move(rb));
+        }
+        const Act sum0 = [&] {
+            Act acc = stage_low[0];
+            for (std::size_t k = 0; k < acc.data.size(); ++k) {
+                acc.data[k] += stage_low[1].data[k];
+            }
+            return acc;
+        }();
+        report(kokoro_ref, "decoder_decoder_generator_Add_3", sum0, "generator sum 0a");
+        Act sum0b = sum0;
+        for (std::size_t k = 0; k < sum0b.data.size(); ++k) {
+            sum0b.data[k] += stage_low[2].data[k];
+        }
+        report(kokoro_ref, "decoder_decoder_generator_Add_4", sum0b, "generator sum 0b");
+        Act blended(gen.channels, gen.length);
+        for (std::size_t k = 0; k < blended.data.size(); ++k) {
+            blended.data[k] = sum0b.data[k] / 3.0F;
+        }
+        report(kokoro_ref, "decoder_decoder_generator_Div_2", blended, "generator blend 0");
+        leaky_relu(blended, 0.1F);
+        report(kokoro_ref, "decoder_decoder_generator_LeakyRelu_1", blended, "generator act 1");
+        Act gen2 = conv_transpose1d(blended, weights.at("decoder.decoder.generator.ups.1.weight"),
+                                    weights.at("decoder.decoder.generator.ups.1.bias"), 6, 12, 3);
+        report(kokoro_ref, "decoder_decoder_generator_ups.1_ConvTranspose", gen2, "generator ups.1");
+        Act padded(gen2.channels, gen2.length + 1);
+        for (std::size_t c = 0; c < gen2.channels; ++c) {
+            padded.at(c, 0) = gen2.at(c, 1);
+            for (std::size_t t = 0; t < gen2.length; ++t) {
+                padded.at(c, t + 1) = gen2.at(c, t);
+            }
+        }
+        report(kokoro_ref, "decoder_decoder_generator_reflection_pad_Pad", padded, "generator reflect pad");
+        Act noise1 = conv1d(har, weights.at("decoder.decoder.generator.noise_convs.1.weight"),
+                            weights.at("decoder.decoder.generator.noise_convs.1.bias"), 1, 0);
+        report(kokoro_ref, "decoder_decoder_generator_noise_convs.1_Conv", noise1, "generator noise conv 1");
+        noise1 = generator_resblock(noise1, weights, "decoder.decoder.generator.noise_res.1", style_first, 11);
+        report(kokoro_ref, "decoder_decoder_generator_noise_res.1_Add_8", noise1, "generator noise res 1");
+        for (std::size_t k = 0; k < padded.data.size(); ++k) {
+            padded.data[k] += noise1.data[k];
+        }
+        report(kokoro_ref, "decoder_decoder_generator_Add_5", padded, "generator add noise 1");
+        std::vector<Act> stage2;
+        for (std::size_t b = 3; b < 6; ++b) {
+            const std::string tag = "decoder.decoder.generator.resblocks." + std::to_string(b);
+            Act rb = generator_resblock(padded, weights, tag, style_first, 3 + 4 * (b - 3));
+            report(kokoro_ref, "decoder_decoder_generator_resblocks." + std::to_string(b) + "_Add_8", rb,
+                   "generator resblock " + std::to_string(b));
+            stage2.push_back(std::move(rb));
+        }
+        Act sum1 = stage2[0];
+        for (std::size_t k = 0; k < sum1.data.size(); ++k) {
+            sum1.data[k] += stage2[1].data[k];
+        }
+        report(kokoro_ref, "decoder_decoder_generator_Add_6", sum1, "generator sum 1a");
+        for (std::size_t k = 0; k < sum1.data.size(); ++k) {
+            sum1.data[k] += stage2[2].data[k];
+        }
+        report(kokoro_ref, "decoder_decoder_generator_Add_7", sum1, "generator sum 1b");
+        Act blended2(padded.channels, padded.length);
+        for (std::size_t k = 0; k < blended2.data.size(); ++k) {
+            blended2.data[k] = sum1.data[k] / 3.0F;
+        }
+        report(kokoro_ref, "decoder_decoder_generator_Div_4", blended2, "generator blend 1");
+        leaky_relu(blended2, 0.01F);
+        report(kokoro_ref, "decoder_decoder_generator_LeakyRelu_2", blended2, "generator act 2");
+        const Act post = conv1d(blended2, weights.at("decoder.decoder.generator.conv_post.weight"),
+                                weights.at("decoder.decoder.generator.conv_post.bias"), 7, 3);
+        report(kokoro_ref, "decoder_decoder_generator_conv_post_Conv", post, "generator conv_post");
+        const std::size_t bins = post.channels / 2;
+        const std::size_t slice_len = bins * post.length;
+        Act spec(post.channels, post.length);
+        for (std::size_t b = 0; b < bins; ++b) {
+            for (std::size_t t = 0; t < post.length; ++t) {
+                // The graph runs Exp over the magnitude slice and then
+                // Sin -> (Sin, Cos) over the phase slice, each as a flat
+                // Eigen array of bins * T elements (so the packet tail is
+                // the last three entries of the last bin).
+                const std::size_t index = b * post.length + t;
+                const float magnitude = mlas_exp(post.at(b, t));
+                const float phase = eigen_sin_element(post.at(bins + b, t), index, slice_len);
+                spec.at(b, t) = magnitude * eigen_cos_element(phase, index, slice_len);
+                spec.at(bins + b, t) = magnitude * eigen_sin_element(phase, index, slice_len);
+            }
+        }
+        if (!g_debug_dir.empty()) {
+            debug_dump("kokoro_istft_concat", spec.data);
+        }
+        const Act wave = istft_waveform(spec, weights.at("decoder.decoder.generator.stft.istft.stft.inverse_basis"),
+                                        weights.at("decoder.decoder.generator.stft.istft.stft.window_sum"));
+        report(kokoro_ref, "output", wave, "waveform");
+        const auto out_it = kokoro_ref.tensors.find("output");
+        if (out_it != kokoro_ref.tensors.end() && out_it->second.size() == wave.data.size()) {
+            double dot = 0.0;
+            double norm_a = 0.0;
+            double norm_b = 0.0;
+            for (std::size_t i = 0; i < wave.data.size(); ++i) {
+                const double a = static_cast<double>(wave.data[i]);
+                const double b = static_cast<double>(out_it->second[i]);
+                dot += a * b;
+                norm_a += a * a;
+                norm_b += b * b;
+            }
+            const double cos = norm_a > 0.0 && norm_b > 0.0 ? dot / std::sqrt(norm_a * norm_b) : 0.0;
+            std::printf("  %-42s cos %.9f  rms %.4f\n", "waveform similarity", cos,
+                        std::sqrt(norm_a / static_cast<double>(wave.data.size())));
+        }
+        if (!opt.wav_out.empty()) {
+            write_wav(opt.wav_out, wave.data, 24000U);
+        }
+    }
+    return 0;
 }
 
 }  // namespace mnet_tts

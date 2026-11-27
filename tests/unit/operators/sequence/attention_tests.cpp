@@ -14,7 +14,7 @@
 #include <mlayer/relposbias.hpp>
 #include <mlayer/rotaryembed.hpp>
 #include <mlayer/sdpa.hpp>
-#include <mnet/layer.hpp>
+#include <mnet/core/layer.hpp>
 
 TEST(SequenceKernel, RotaryEmbedAndSdpaSingleStep) {
     using RE = mlayer::RotaryEmbed<mnet::Layer, mnet::Mat, mnet::Option, mformat::ParamDict>;
