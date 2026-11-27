@@ -137,7 +137,7 @@ Qwen3 0.6B（28 层 / 8 KV heads / head_dim 128，int8 KV = 59 KB/token）：
 
 线性外推 256k：int8 KV ≈ **14.5 GiB**，fp32 KV ≈ **56 GiB**（后者在 32/48 GB
 上都放不下）。`SDPA` 的 int8 路径有单元测试
-（`Kernel.SdpaInt8KvCacheMatchesFp32`）与 fp32 结果比对，误差 < 0.05。
+（`SequenceKernel.SdpaInt8KvCacheMatchesFp32`）与 fp32 结果比对，误差 < 0.05。
 
 注意 `Mat::create` 走 mmap，容量只是保留地址空间，页在真正写入该 token 时才
 驻留；所以长上下文的 RSS 会随 token 数增长，而不是一次性跳到 14.5 GiB。
