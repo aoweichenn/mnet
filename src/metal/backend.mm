@@ -1037,6 +1037,21 @@ id<MTLBuffer> ensure_buffer(id<MTLDevice> device, id<MTLBuffer>& buffer, std::si
     return buffer;
 }
 
+// Lanes per row for the fast matvec. The batch path is bandwidth bound and
+// prefers one warp per row; a single-token grid is 32x smaller, so the override
+// exists to test whether more lanes per row helps there.
+std::uint32_t matvec_lanes() {
+    static const std::uint32_t lanes = [] {
+        const char* value = std::getenv("MNET_MATVEC_LANES");
+        const auto parsed = value != nullptr ? static_cast<std::uint32_t>(std::atoi(value)) : 32U;
+        if (parsed != 32U && parsed != 64U) {
+            return 32U;
+        }
+        return parsed;
+    }();
+    return lanes;
+}
+
 std::uint64_t cache_key(std::uint64_t identity, const std::uint8_t* weights) {
     // Loaded tensors carry a unique identity; raw-pointer callers (tests) use
     // the address with the top bit set so the two spaces cannot collide.
@@ -1140,6 +1155,7 @@ void encode_dispatch(MetalState& s, id<MTLComputeCommandEncoder> encoder, const 
     [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
     [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
     [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+    lanes = matvec_lanes();
     static const bool use_fast = std::getenv("MNET_METAL_FAST") != nullptr && s.fast_pipeline != nil;
     static const bool use_f32 = use_fast && s.fast_f32_pipeline != nil && s.dequant_pipeline != nil;
     if (use_f32) {
@@ -2045,7 +2061,7 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
             const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(first.gate.row_bytes);
             const std::uint32_t blocks32 = static_cast<std::uint32_t>(columns / 64U);
             const float scale = pass == 0U ? first.gate.scale : first.up.scale;
-            const std::uint32_t lanes = 32U;
+            const std::uint32_t lanes = matvec_lanes();
             [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
             [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
             [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
@@ -2086,7 +2102,7 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(first.down.row_bytes);
         const std::uint32_t blocks32 = static_cast<std::uint32_t>(hidden / 64U);
         const float scale = first.down.scale;
-        const std::uint32_t lanes = 32U;
+        const std::uint32_t lanes = matvec_lanes();
         const std::uint32_t rows32 = static_cast<std::uint32_t>(columns);
         const std::uint32_t x_stride32 = static_cast<std::uint32_t>(hidden);
         [encoder setComputePipelineState:s.fast_f32_multi_pipeline];
@@ -2319,7 +2335,7 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
             const std::uint32_t row_bytes32 =
                 static_cast<std::uint32_t>(pass == 0U ? job.qkv.row_bytes : job.gate.row_bytes);
             const float scale = pass == 0U ? job.qkv.scale : job.gate.scale;
-            const std::uint32_t lanes = 32U;
+            const std::uint32_t lanes = matvec_lanes();
             const std::uint32_t rows32 = static_cast<std::uint32_t>(rows);
             const std::uint32_t x_stride32 = static_cast<std::uint32_t>(job.columns);
             [encoder setComputePipelineState:s.fast_f32_multi_pipeline];
@@ -2446,7 +2462,7 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(job.out.row_bytes);
         const std::uint32_t blocks32 = static_cast<std::uint32_t>(hidden / 64U);
         const float scale = job.out.scale;
-        const std::uint32_t lanes = 32U;
+        const std::uint32_t lanes = matvec_lanes();
         const std::uint32_t rows32 = static_cast<std::uint32_t>(job.out.rows);
         const std::uint32_t x_stride32 = static_cast<std::uint32_t>(hidden);
         [encoder setComputePipelineState:s.fast_f32_multi_pipeline];
@@ -2632,7 +2648,7 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
                                                                                                : job.v.row_bytes));
         const float scale = pass == 0U ? job.q.scale : (pass == 1U ? job.k.scale : job.v.scale);
         const std::uint32_t blocks32 = static_cast<std::uint32_t>(job.columns / 64U);
-        const std::uint32_t lanes = 32U;
+        const std::uint32_t lanes = matvec_lanes();
         {
             const std::uint32_t rows32 = static_cast<std::uint32_t>(rows);
             const std::uint32_t x_stride32 = static_cast<std::uint32_t>(job.columns);
@@ -2740,7 +2756,7 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(job.out.row_bytes);
         const std::uint32_t blocks32 = static_cast<std::uint32_t>(hidden / 64U);
         const float scale = job.out.scale;
-        const std::uint32_t lanes = 32U;
+        const std::uint32_t lanes = matvec_lanes();
         const std::uint32_t rows32 = static_cast<std::uint32_t>(job.out.rows);
         const std::uint32_t x_stride32 = static_cast<std::uint32_t>(hidden);
         [encoder setComputePipelineState:s.fast_f32_multi_pipeline];
