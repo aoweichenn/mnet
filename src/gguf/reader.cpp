@@ -606,6 +606,64 @@ bool Reader::ffn_swiglu(const Quantized& gate, const Quantized& up, const Quanti
         gate.columns, gate.rows, input, signs, block_size);
 }
 
+bool Reader::attention_batch(const Quantized& q, const Quantized& k, const Quantized& v, const Quantized& out,
+                             const AttentionParams& params, float* k_cache, float* v_cache,
+                             const AttentionBatchEntry* entries, std::size_t count) {
+    if (entries == nullptr || count == 0U || q.type != kGgmlQ2_0 || k.type != kGgmlQ2_0 || v.type != kGgmlQ2_0 ||
+        out.type != kGgmlQ2_0) {
+        return false;
+    }
+    const std::uint64_t heads = params.head_count;
+    const std::uint64_t heads_kv = params.head_count_kv;
+    const std::uint64_t head_dim = params.head_dim;
+    if (heads == 0U || heads_kv == 0U || (heads % heads_kv) != 0U || head_dim == 0U) {
+        return false;
+    }
+    if (q.rows != 2U * heads * head_dim || k.rows != heads_kv * head_dim || v.rows != heads_kv * head_dim ||
+        out.rows != q.columns || out.columns != heads * head_dim || q.columns != k.columns) {
+        return false;
+    }
+    const auto info = type_info(q.type);
+    const std::uint64_t row_bytes = q.columns / info.block_elements * info.block_bytes;
+    const std::uint64_t out_bytes = out.columns / info.block_elements * info.block_bytes;
+    mnet::detail::compute::AttentionQ2_0Job job;
+    job.q = {q.type, q.data(), q.rows, row_bytes, q.scale, nullptr, q.identity, q.region, q.region_bytes};
+    job.k = {k.type, k.data(), k.rows, row_bytes, k.scale, nullptr, k.identity, k.region, k.region_bytes};
+    job.v = {v.type, v.data(), v.rows, row_bytes, v.scale, nullptr, v.identity, v.region, v.region_bytes};
+    job.out = {out.type, out.data(),   out.rows,   out_bytes,       out.scale,
+               nullptr,  out.identity, out.region, out.region_bytes};
+    job.input = entries[0].input;
+    job.q_norm = params.q_norm;
+    job.k_norm = params.k_norm;
+    job.rope_cos = entries[0].rope_cos;
+    job.rope_sin = entries[0].rope_sin;
+    job.signs = params.signs;
+    job.k_cache = k_cache;
+    job.v_cache = v_cache;
+    job.result = entries[0].output;
+    job.columns = q.columns;
+    job.n_head = params.head_count;
+    job.n_head_kv = params.head_count_kv;
+    job.head_dim = params.head_dim;
+    job.rope_dims = params.rope_dims;
+    job.block_size = params.block_size;
+    job.cache_tokens = params.cache_tokens;
+    job.eps = params.eps;
+    job.attention_scale = params.attention_scale;
+    std::vector<mnet::detail::compute::AttentionBatchEntry> batch(count);
+    for (std::size_t t = 0; t < count; ++t) {
+        if (entries[t].input == nullptr || entries[t].output == nullptr || entries[t].rope_cos == nullptr ||
+            entries[t].rope_sin == nullptr) {
+            return false;
+        }
+        batch[t].input = entries[t].input;
+        batch[t].output = entries[t].output;
+        batch[t].rope_cos = entries[t].rope_cos;
+        batch[t].rope_sin = entries[t].rope_sin;
+    }
+    return mnet::detail::compute::attention_q2_0_batch(job, batch.data(), count);
+}
+
 bool Reader::ffn_swiglu_batch(const Quantized& gate, const Quantized& up, const Quantized& down,
                               const FfnEntry* entries, std::size_t count, const std::int32_t* signs,
                               std::uint32_t block_size) {

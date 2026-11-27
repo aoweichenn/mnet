@@ -138,6 +138,23 @@ void set_attention_backend(AttentionQ2_0Fn backend);
 // the step-by-step path (which is also the bit-exact reference).
 [[nodiscard]] bool attention_q2_0(const AttentionQ2_0Job& job);
 
+// One token of a batched attention block. The q/k/v matvecs, the head norms and
+// RoPE, the f16 KV append and the output projection are token independent; the
+// attention itself only needs the cache to hold the tokens up to its own
+// position.
+struct AttentionBatchEntry {
+    const float* input = nullptr;  // n_embd, already Hadamard'ed
+    float* output = nullptr;       // n_embd
+    const float* rope_cos = nullptr;
+    const float* rope_sin = nullptr;
+};
+
+using AttentionQ2_0BatchFn = bool (*)(const AttentionQ2_0Job& job, const AttentionBatchEntry* entries,
+                                      std::size_t count);
+void set_attention_batch_backend(AttentionQ2_0BatchFn backend);
+[[nodiscard]] bool attention_q2_0_batch(const AttentionQ2_0Job& job, const AttentionBatchEntry* entries,
+                                        std::size_t count);
+
 // Fused gated-delta (SSM) block: qkv and gate matvecs, the beta/alpha head
 // projections, the causal depthwise convolution, the per-head delta rule over
 // the persistent state, the gated RMS norm with the grouped-head permute, the

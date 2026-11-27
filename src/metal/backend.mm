@@ -563,6 +563,36 @@ struct FfnBatchBuffers {
     std::size_t out_capacity = 0;
 };
 
+// Per-token scratch for a batched attention block.
+struct AttentionBatchBuffers {
+    id<MTLBuffer> q8 = nil;
+    id<MTLBuffer> scales = nil;
+    id<MTLBuffer> wide = nil;
+    id<MTLBuffer> qfull = nil;
+    id<MTLBuffer> q = nil;
+    id<MTLBuffer> k_new = nil;
+    id<MTLBuffer> v_new = nil;
+    id<MTLBuffer> gates = nil;
+    id<MTLBuffer> attn = nil;
+    id<MTLBuffer> act_q8 = nil;
+    id<MTLBuffer> act_scales = nil;
+    id<MTLBuffer> out = nil;
+    id<MTLBuffer> tables = nil;
+    std::size_t q8_capacity = 0;
+    std::size_t scales_capacity = 0;
+    std::size_t wide_capacity = 0;
+    std::size_t qfull_capacity = 0;
+    std::size_t q_capacity = 0;
+    std::size_t k_new_capacity = 0;
+    std::size_t v_new_capacity = 0;
+    std::size_t gates_capacity = 0;
+    std::size_t attn_capacity = 0;
+    std::size_t act_q8_capacity = 0;
+    std::size_t act_scales_capacity = 0;
+    std::size_t out_capacity = 0;
+    std::size_t tables_capacity = 0;
+};
+
 // Per-token scratch for a batched gated-delta block.
 struct SsmBatchBuffers {
     id<MTLBuffer> q8 = nil;
@@ -653,6 +683,7 @@ struct MetalState {
     id<MTLComputePipelineState> ssm_gate_norm_pipeline = nil;
     FfnBatchBuffers ffn_batch;
     SsmBatchBuffers ssm_batch;
+    AttentionBatchBuffers attn_batch;
     AttentionBuffers attn;
     SsmBuffers ssm;
     std::unordered_map<std::uint64_t, SsmLayer> ssm_layers;
@@ -2148,6 +2179,272 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     return true;
 }
 
+// Attention block for several tokens of one layer: every q/k/v matvec, every
+// head norm and RoPE, every f16 KV append and every output projection are
+// encoded for all tokens; each token's attention then runs over the cache up to
+// its own position, so the token order is preserved where it matters.
+bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntry* entries, std::size_t count) {
+    MetalState& s = state();
+    if (!s.ready || s.attn_prep_pipeline == nil || s.attn_flash_pipeline == nil || s.attn_gate_pipeline == nil ||
+        s.attn_store_pipeline == nil || s.hadamard_quantize_pipeline == nil || s.fast_f32_pipeline == nil ||
+        s.dequant_pipeline == nil || entries == nullptr || count == 0U) {
+        return false;
+    }
+    if (job.q.type != 42U || job.k.type != 42U || job.v.type != 42U || job.out.type != 42U) {
+        return false;
+    }
+    const std::uint64_t head_dim = job.head_dim;
+    const std::uint64_t heads = job.n_head;
+    const std::uint64_t heads_kv = job.n_head_kv;
+    const std::uint64_t hidden = heads * head_dim;
+    if (head_dim == 0U || head_dim > 256U || (head_dim % 32U) != 0U || heads == 0U || heads_kv == 0U ||
+        (heads % heads_kv) != 0U || job.columns == 0U || (job.columns % 64U) != 0U ||
+        job.rope_dims == 0U || (job.rope_dims % 2U) != 0U || job.rope_dims > head_dim || job.block_size < 64U ||
+        job.block_size > 1024U || (job.block_size & (job.block_size - 1U)) != 0U || (hidden % job.block_size) != 0U ||
+        job.out.rows != job.columns) {
+        return false;
+    }
+    const std::uint64_t kv_head_elems = heads_kv * head_dim;
+    const std::uint64_t tokens_total = static_cast<std::uint64_t>(job.cache_tokens) + count;
+    const std::uint64_t kv_plane_bytes = tokens_total * kv_head_elems * sizeof(float);
+
+    const WeightBinding q_weights = weight_buffer_for(s, job.q, job.q.rows, job.q.row_bytes, true);
+    const WeightBinding k_weights = weight_buffer_for(s, job.k, job.k.rows, job.k.row_bytes, true);
+    const WeightBinding v_weights = weight_buffer_for(s, job.v, job.v.rows, job.v.row_bytes, true);
+    const WeightBinding out_weights = weight_buffer_for(s, job.out, job.out.rows, job.out.row_bytes, true);
+    if (q_weights.buffer == nil || k_weights.buffer == nil || v_weights.buffer == nil || out_weights.buffer == nil) {
+        return false;
+    }
+    AttentionBuffers& shared = s.attn;
+    id<MTLBuffer> kv = ensure_buffer(s.device, shared.kv, shared.kv_capacity, static_cast<std::size_t>(2U * kv_plane_bytes));
+    // Head norm weights live next to each other in the shared table buffer.
+    id<MTLBuffer> norm_tables = ensure_buffer(s.device, shared.tables, shared.tables_capacity,
+                                              static_cast<std::size_t>(2U * head_dim) * sizeof(float));
+    if (norm_tables == nil) {
+        return false;
+    }
+    {
+        auto* table = static_cast<float*>(norm_tables.contents);
+        std::memcpy(table, job.q_norm, static_cast<std::size_t>(head_dim) * sizeof(float));
+        std::memcpy(table + head_dim, job.k_norm, static_cast<std::size_t>(head_dim) * sizeof(float));
+    }
+    const std::size_t q_norm_offset = 0U;
+    const std::size_t k_norm_offset = static_cast<std::size_t>(head_dim);
+    id<MTLBuffer> signs_buffer =
+        ensure_buffer(s.device, shared.signs, shared.signs_capacity, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
+    if (kv == nil || signs_buffer == nil) {
+        return false;
+    }
+    std::memcpy(signs_buffer.contents, job.signs, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
+
+    AttentionBatchBuffers& b = s.attn_batch;
+    const std::size_t n = count;
+    const std::size_t half_rope = job.rope_dims / 2U;
+    b.q8 = ensure_buffer(s.device, b.q8, b.q8_capacity, n * static_cast<std::size_t>(job.columns));
+    b.scales = ensure_buffer(s.device, b.scales, b.scales_capacity,
+                             n * static_cast<std::size_t>(job.columns / 32U) * sizeof(float));
+    // The widened activation is reused for the output projection, whose input is
+    // hidden wide, so the slab covers the larger of the two.
+    const std::uint64_t attn_widest = job.columns > hidden ? job.columns : hidden;
+    b.wide = ensure_buffer(s.device, b.wide, b.wide_capacity,
+                           n * static_cast<std::size_t>(attn_widest) * sizeof(float));
+    b.qfull = ensure_buffer(s.device, b.qfull, b.qfull_capacity, n * static_cast<std::size_t>(2U * hidden) * sizeof(float));
+    b.q = ensure_buffer(s.device, b.q, b.q_capacity, n * static_cast<std::size_t>(hidden) * sizeof(float));
+    b.k_new = ensure_buffer(s.device, b.k_new, b.k_new_capacity, n * static_cast<std::size_t>(kv_head_elems) * sizeof(float));
+    b.v_new = ensure_buffer(s.device, b.v_new, b.v_new_capacity, n * static_cast<std::size_t>(kv_head_elems) * sizeof(float));
+    b.gates = ensure_buffer(s.device, b.gates, b.gates_capacity, n * static_cast<std::size_t>(hidden) * sizeof(float));
+    b.attn = ensure_buffer(s.device, b.attn, b.attn_capacity, n * static_cast<std::size_t>(hidden) * sizeof(float));
+    b.act_q8 = ensure_buffer(s.device, b.act_q8, b.act_q8_capacity, n * static_cast<std::size_t>(hidden));
+    b.act_scales = ensure_buffer(s.device, b.act_scales, b.act_scales_capacity,
+                                 n * static_cast<std::size_t>(hidden / 32U) * sizeof(float));
+    b.out = ensure_buffer(s.device, b.out, b.out_capacity, n * static_cast<std::size_t>(job.columns) * sizeof(float));
+    b.tables = ensure_buffer(s.device, b.tables, b.tables_capacity,
+                             n * static_cast<std::size_t>(2U * half_rope) * sizeof(float));
+    if (b.q8 == nil || b.scales == nil || b.wide == nil || b.qfull == nil || b.q == nil || b.k_new == nil ||
+        b.v_new == nil || b.gates == nil || b.attn == nil || b.act_q8 == nil || b.act_scales == nil || b.out == nil ||
+        b.tables == nil) {
+        return false;
+    }
+    auto* tables = static_cast<float*>(b.tables.contents);
+    auto* q8_destination = static_cast<std::uint8_t*>(b.q8.contents);
+    auto* scale_destination = static_cast<float*>(b.scales.contents);
+    for (std::size_t t = 0; t < count; ++t) {
+        const auto q80 = mnet::gguf::make_q8_0_blocks(entries[t].input, job.columns);
+        std::memcpy(q8_destination + t * job.columns, q80.qs.data(), static_cast<std::size_t>(job.columns));
+        std::memcpy(scale_destination + t * (job.columns / 32U), q80.d.data(),
+                    static_cast<std::size_t>(job.columns / 32U) * sizeof(float));
+        std::memcpy(tables + t * 2U * half_rope, entries[t].rope_cos, half_rope * sizeof(float));
+        std::memcpy(tables + t * 2U * half_rope + half_rope, entries[t].rope_sin, half_rope * sizeof(float));
+    }
+    auto* kv_bytes = static_cast<std::uint8_t*>(kv.contents);
+    const std::uint64_t cached_bytes = static_cast<std::uint64_t>(job.cache_tokens) * kv_head_elems * sizeof(float);
+    if (cached_bytes != 0U) {
+        std::memcpy(kv_bytes, job.k_cache, static_cast<std::size_t>(cached_bytes));
+        std::memcpy(kv_bytes + kv_plane_bytes, job.v_cache, static_cast<std::size_t>(cached_bytes));
+    }
+
+    const std::uint32_t head_dim32 = static_cast<std::uint32_t>(head_dim);
+    const std::uint32_t heads_kv32 = static_cast<std::uint32_t>(heads_kv);
+    const std::uint32_t group32 = static_cast<std::uint32_t>(heads / heads_kv);
+    const std::uint32_t hidden32 = static_cast<std::uint32_t>(hidden);
+    const std::uint32_t stride_q = static_cast<std::uint32_t>(2U * head_dim);
+    const std::uint32_t rope32 = job.rope_dims;
+    const std::uint32_t half_store_off = 0U;
+    const std::uint32_t half_store_on = 1U;
+    const std::uint32_t block32 = job.block_size;
+    const std::uint32_t kv_elems32 = static_cast<std::uint32_t>(kv_head_elems);
+    const float eps = job.eps;
+    const float attn_scale = job.attention_scale;
+
+    id<MTLCommandBuffer> command = [s.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    // Widen every token's activation once, then all q, all k and all v matvecs.
+    for (std::size_t t = 0; t < count; ++t) {
+        [encoder setComputePipelineState:s.dequant_pipeline];
+        [encoder setBuffer:b.q8 offset:static_cast<NSUInteger>(t * job.columns) atIndex:0];
+        [encoder setBuffer:b.scales offset:static_cast<NSUInteger>(t * (job.columns / 32U) * sizeof(float)) atIndex:1];
+        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(job.columns, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    }
+    for (std::size_t pass = 0; pass < 3U; ++pass) {
+        const WeightBinding& weights = pass == 0U ? q_weights : (pass == 1U ? k_weights : v_weights);
+        id<MTLBuffer> target = pass == 0U ? b.qfull : (pass == 1U ? b.k_new : b.v_new);
+        const std::uint64_t rows = pass == 0U ? 2U * hidden : kv_head_elems;
+        const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(pass == 0U ? job.q.row_bytes
+                                                                                 : (pass == 1U ? job.k.row_bytes
+                                                                                               : job.v.row_bytes));
+        const float scale = pass == 0U ? job.q.scale : (pass == 1U ? job.k.scale : job.v.scale);
+        const std::uint32_t blocks32 = static_cast<std::uint32_t>(job.columns / 64U);
+        const std::uint32_t lanes = 32U;
+        for (std::size_t t = 0; t < count; ++t) {
+            [encoder setComputePipelineState:s.fast_f32_pipeline];
+            [encoder setBuffer:weights.buffer offset:static_cast<NSUInteger>(weights.offset) atIndex:0];
+            [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:1];
+            [encoder setBuffer:target offset:static_cast<NSUInteger>(t * rows * sizeof(float)) atIndex:3];
+            [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
+            [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
+            [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+            [encoder setBytes:&lanes length:sizeof(lanes) atIndex:7];
+            [encoder dispatchThreadgroups:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        }
+    }
+    // Head norms, RoPE, gate sigmoid and the f16 KV append for every token.
+    const float hadamard_scale = 1.0F / std::sqrt(static_cast<float>(job.block_size));
+    (void)hadamard_scale;
+    for (std::size_t t = 0; t < count; ++t) {
+        [encoder setComputePipelineState:s.attn_prep_pipeline];
+        [encoder setBuffer:b.qfull offset:static_cast<NSUInteger>(t * 2U * hidden * sizeof(float)) atIndex:0];
+        [encoder setBuffer:norm_tables offset:q_norm_offset * sizeof(float) atIndex:1];
+        [encoder setBuffer:b.tables offset:static_cast<NSUInteger>(t * 2U * half_rope * sizeof(float)) atIndex:2];
+        [encoder setBuffer:b.tables
+                     offset:static_cast<NSUInteger>((t * 2U * half_rope + half_rope) * sizeof(float))
+                    atIndex:3];
+        [encoder setBuffer:b.q offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:4];
+        [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:5];
+        [encoder setBytes:&rope32 length:sizeof(rope32) atIndex:6];
+        [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
+        [encoder setBytes:&stride_q length:sizeof(stride_q) atIndex:8];
+        [encoder setBytes:&half_store_off length:sizeof(half_store_off) atIndex:9];
+        [encoder dispatchThreadgroups:MTLSizeMake(heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+
+        [encoder setComputePipelineState:s.attn_gate_pipeline];
+        [encoder setBuffer:b.qfull offset:static_cast<NSUInteger>(t * 2U * hidden * sizeof(float)) atIndex:0];
+        [encoder setBuffer:b.gates offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
+        [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:2];
+        [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:3];
+        [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+
+        [encoder setComputePipelineState:s.attn_prep_pipeline];
+        [encoder setBuffer:b.k_new offset:static_cast<NSUInteger>(t * kv_head_elems * sizeof(float)) atIndex:0];
+        [encoder setBuffer:norm_tables offset:k_norm_offset * sizeof(float) atIndex:1];
+        [encoder setBuffer:b.tables offset:static_cast<NSUInteger>(t * 2U * half_rope * sizeof(float)) atIndex:2];
+        [encoder setBuffer:b.tables
+                     offset:static_cast<NSUInteger>((t * 2U * half_rope + half_rope) * sizeof(float))
+                    atIndex:3];
+        [encoder setBuffer:kv
+                     offset:static_cast<NSUInteger>(cached_bytes + t * kv_head_elems * sizeof(float))
+                    atIndex:4];
+        [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:5];
+        [encoder setBytes:&rope32 length:sizeof(rope32) atIndex:6];
+        [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
+        [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:8];
+        [encoder setBytes:&half_store_on length:sizeof(half_store_on) atIndex:9];
+        [encoder dispatchThreadgroups:MTLSizeMake(heads_kv, 1, 1) threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+
+        [encoder setComputePipelineState:s.attn_store_pipeline];
+        [encoder setBuffer:b.v_new offset:static_cast<NSUInteger>(t * kv_head_elems * sizeof(float)) atIndex:0];
+        [encoder setBuffer:kv
+                     offset:static_cast<NSUInteger>(kv_plane_bytes + cached_bytes + t * kv_head_elems * sizeof(float))
+                    atIndex:1];
+        [encoder setBytes:&kv_elems32 length:sizeof(kv_elems32) atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(kv_head_elems, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    }
+    // Each token's attention over the cache up to its own position.
+    for (std::size_t t = 0; t < count; ++t) {
+        const std::uint32_t visible = static_cast<std::uint32_t>(job.cache_tokens) + static_cast<std::uint32_t>(t) + 1U;
+        [encoder setComputePipelineState:s.attn_flash_pipeline];
+        [encoder setBuffer:b.q offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
+        [encoder setBuffer:kv offset:0 atIndex:1];
+        [encoder setBuffer:kv offset:static_cast<NSUInteger>(kv_plane_bytes) atIndex:2];
+        [encoder setBuffer:b.gates offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:3];
+        [encoder setBuffer:b.attn offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:4];
+        [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:5];
+        [encoder setBytes:&visible length:sizeof(visible) atIndex:6];
+        [encoder setBytes:&heads_kv32 length:sizeof(heads_kv32) atIndex:7];
+        [encoder setBytes:&group32 length:sizeof(group32) atIndex:8];
+        [encoder setBytes:&attn_scale length:sizeof(attn_scale) atIndex:9];
+        [encoder dispatchThreadgroups:MTLSizeMake(heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    }
+    // Hadamard, requantisation and the output projection per token.
+    for (std::size_t t = 0; t < count; ++t) {
+        [encoder setComputePipelineState:s.hadamard_quantize_pipeline];
+        [encoder setBuffer:b.attn offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
+        [encoder setBuffer:signs_buffer offset:0 atIndex:1];
+        [encoder setBuffer:b.act_q8 offset:static_cast<NSUInteger>(t * hidden) atIndex:2];
+        [encoder setBuffer:b.act_scales offset:static_cast<NSUInteger>(t * (hidden / 32U) * sizeof(float)) atIndex:3];
+        [encoder setBytes:&block32 length:sizeof(block32) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(hidden / job.block_size, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(job.block_size, 1, 1)];
+
+        [encoder setComputePipelineState:s.dequant_pipeline];
+        [encoder setBuffer:b.act_q8 offset:static_cast<NSUInteger>(t * hidden) atIndex:0];
+        [encoder setBuffer:b.act_scales offset:static_cast<NSUInteger>(t * (hidden / 32U) * sizeof(float)) atIndex:1];
+        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+
+        [encoder setComputePipelineState:s.fast_f32_pipeline];
+        [encoder setBuffer:out_weights.buffer offset:static_cast<NSUInteger>(out_weights.offset) atIndex:0];
+        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
+        [encoder setBuffer:b.out offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:3];
+        const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(job.out.row_bytes);
+        const std::uint32_t blocks32 = static_cast<std::uint32_t>(hidden / 64U);
+        const float scale = job.out.scale;
+        const std::uint32_t lanes = 32U;
+        [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
+        [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
+        [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+        [encoder setBytes:&lanes length:sizeof(lanes) atIndex:7];
+        [encoder dispatchThreadgroups:MTLSizeMake(job.out.rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    }
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted) {
+        return false;
+    }
+    const auto* results = static_cast<const float*>(b.out.contents);
+    for (std::size_t t = 0; t < count; ++t) {
+        std::memcpy(entries[t].output, results + t * job.columns,
+                    static_cast<std::size_t>(job.columns) * sizeof(float));
+    }
+    const std::uint64_t new_bytes = static_cast<std::uint64_t>(count) * kv_head_elems * sizeof(float);
+    std::memcpy(job.k_cache + static_cast<std::ptrdiff_t>(job.cache_tokens) * kv_head_elems, kv_bytes + cached_bytes,
+                static_cast<std::size_t>(new_bytes));
+    std::memcpy(job.v_cache + static_cast<std::ptrdiff_t>(job.cache_tokens) * kv_head_elems,
+                kv_bytes + kv_plane_bytes + cached_bytes, static_cast<std::size_t>(new_bytes));
+    return true;
+}
+
 bool matvec_q8_0_backend(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
                          std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales,
                          float* out, std::uint64_t identity, const std::uint8_t* region,
@@ -2182,6 +2479,7 @@ void register_platform_backends() {
     set_ffn_swiglu_backend(&ffn_swiglu);
     set_ffn_swiglu_batch_backend(&ffn_batch_block);
     set_attention_backend(&attention);
+    set_attention_batch_backend(&attention_batch_block);
     set_ssm_backend(&ssm_block);
     set_ssm_batch_backend(&ssm_batch_block);
 }

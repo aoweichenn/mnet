@@ -148,6 +148,20 @@ public:
                                         const Quantized& out, const AttentionParams& params, float* k_cache,
                                         float* v_cache, float* result);
 
+    // Same block for several tokens of one layer: the q/k/v matvecs, head norms,
+    // RoPE, f16 KV append and output projection are encoded for all tokens, and
+    // each token's attention runs over the cache up to its own position.
+    struct AttentionBatchEntry {
+        const float* input = nullptr;  // n_embd, Hadamard'ed
+        float* output = nullptr;       // n_embd
+        const float* rope_cos = nullptr;
+        const float* rope_sin = nullptr;
+    };
+
+    [[nodiscard]] static bool attention_batch(const Quantized& q, const Quantized& k, const Quantized& v,
+                                              const Quantized& out, const AttentionParams& params, float* k_cache,
+                                              float* v_cache, const AttentionBatchEntry* entries, std::size_t count);
+
     // Geometry and side data of the fused gated-delta block. The head
     // projections, convolution taps and norm weights are fp32 (llama keeps
     // them unquantized); conv_state/ssm_state seed the device-resident state.

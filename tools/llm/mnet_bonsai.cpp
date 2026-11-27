@@ -420,11 +420,8 @@ public:
             if (this->is_recurrent(layer)) {
                 this->recurrent_layer_batch(hidden, tokens, layer, weights, state, dump ? &dump_dir : nullptr);
             } else {
-                for (std::size_t t = 0; t < tokens; ++t) {
-                    float* x = hidden.data() + t * this->config_.n_embd;
-                    this->layer_branch(layer, weights, state, x, static_cast<std::size_t>(positions[t]),
-                                       dump ? &dump_dir : nullptr, t);
-                }
+                this->attention_layer_batch(hidden, tokens, layer, weights, state, positions,
+                                            dump ? &dump_dir : nullptr);
             }
             this->layer_tail(hidden, tokens, layer, weights, dump ? &dump_dir : nullptr);
         }
@@ -590,6 +587,82 @@ private:
             }
             return;
         }
+        for (std::size_t t = 0; t < tokens; ++t) {
+            float* x = hidden.data() + t * n_embd;
+            const float* branch = projected.data() + t * n_embd;
+            for (std::size_t i = 0; i < n_embd; ++i) {
+                x[i] += branch[i];
+            }
+            if (dump_dir != nullptr) {
+                this->dump_tensor(*dump_dir, "attn_residual", layer, std::vector<float>(x, x + n_embd), t);
+            }
+        }
+    }
+
+    // Attention layer for every token: the block's token-independent part is
+    // encoded for all tokens at once; each token's attention still runs over the
+    // cache up to its own position.
+    void attention_layer_batch(std::vector<float>& hidden, std::size_t tokens, std::size_t layer,
+                               const LayerWeights& w, LayerState& state, const std::vector<std::int32_t>& positions,
+                               const std::string* dump_dir) {
+        const std::size_t n_embd = this->config_.n_embd;
+        std::vector<float> xh(tokens * n_embd);
+        std::vector<float> projected(tokens * n_embd);
+        for (std::size_t t = 0; t < tokens; ++t) {
+            auto normed = rms_norm(hidden.data() + t * n_embd, n_embd, w.attn_norm, this->config_.eps);
+            if (dump_dir != nullptr) {
+                this->dump_tensor(*dump_dir, "attn_norm", layer, normed, t);
+            }
+            hadamard_forward(normed, this->signs_embd_, this->config_.hadamard_block);
+            std::copy(normed.begin(), normed.end(), xh.begin() + static_cast<std::ptrdiff_t>(t * n_embd));
+        }
+        // Per-token rotation tables.
+        std::vector<float> cosines(tokens * (kRopeDims / 2));
+        std::vector<float> sines(tokens * (kRopeDims / 2));
+        for (std::size_t t = 0; t < tokens; ++t) {
+            std::vector<float> cos_t;
+            std::vector<float> sin_t;
+            rope_tables(static_cast<std::size_t>(positions[t]), this->config_.rope_base, cos_t, sin_t);
+            std::copy(cos_t.begin(), cos_t.end(), cosines.begin() + static_cast<std::ptrdiff_t>(t * cos_t.size()));
+            std::copy(sin_t.begin(), sin_t.end(), sines.begin() + static_cast<std::ptrdiff_t>(t * sin_t.size()));
+        }
+        const std::size_t kv_elems = (state.cache_tokens + tokens) * this->config_.n_head_kv * kHeadDim;
+        state.k_cache.resize(kv_elems);
+        state.v_cache.resize(kv_elems);
+        static const bool batched = std::getenv("MNET_NO_BATCHED_ATTN") == nullptr;
+        bool handled =
+            batched && mnet::detail::compute::fast_path_enabled() && mnet::detail::compute::fused_attention_enabled();
+        if (handled) {
+            std::vector<Reader::AttentionBatchEntry> entries(tokens);
+            Reader::AttentionParams params;
+            params.q_norm = w.q_norm.data();
+            params.k_norm = w.k_norm.data();
+            params.signs = this->signs_attn_.data();
+            params.rope_dims = static_cast<std::uint32_t>(kRopeDims);
+            params.head_count = static_cast<std::uint32_t>(this->config_.n_head);
+            params.head_count_kv = static_cast<std::uint32_t>(this->config_.n_head_kv);
+            params.head_dim = static_cast<std::uint32_t>(kHeadDim);
+            params.block_size = this->config_.hadamard_block;
+            params.cache_tokens = static_cast<std::uint32_t>(state.cache_tokens);
+            params.eps = this->config_.eps;
+            params.attention_scale = 1.0F / std::sqrt(static_cast<float>(kHeadDim));
+            for (std::size_t t = 0; t < tokens; ++t) {
+                entries[t].input = xh.data() + t * n_embd;
+                entries[t].output = projected.data() + t * n_embd;
+                entries[t].rope_cos = cosines.data() + t * (kRopeDims / 2);
+                entries[t].rope_sin = sines.data() + t * (kRopeDims / 2);
+            }
+            handled = Reader::attention_batch(w.q, w.k, w.v, w.output, params, state.k_cache.data(),
+                                              state.v_cache.data(), entries.data(), tokens);
+        }
+        if (!handled) {
+            for (std::size_t t = 0; t < tokens; ++t) {
+                this->layer_branch(layer, w, state, hidden.data() + t * n_embd,
+                                   static_cast<std::size_t>(positions[t]), dump_dir, t);
+            }
+            return;
+        }
+        state.cache_tokens += tokens;
         for (std::size_t t = 0; t < tokens; ++t) {
             float* x = hidden.data() + t * n_embd;
             const float* branch = projected.data() + t * n_embd;
