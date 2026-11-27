@@ -1163,6 +1163,7 @@ int main(std::int32_t argc, char** argv) {
         const std::string output_path = argv[3];
         std::size_t start_pos = 0;
         std::size_t generate = 0;
+        std::size_t repeat = 1;
         std::string dump_dir;
         std::string text;
         std::string save_state_path;
@@ -1173,6 +1174,8 @@ int main(std::int32_t argc, char** argv) {
                 start_pos = std::stoul(argv[i + 1]);
             } else if (flag == "--generate") {
                 generate = std::stoul(argv[i + 1]);
+            } else if (flag == "--repeat") {
+                repeat = std::stoul(argv[i + 1]);
             } else if (flag == "--dump") {
                 dump_dir = argv[i + 1];
             } else if (flag == "--text") {
@@ -1232,6 +1235,7 @@ int main(std::int32_t argc, char** argv) {
             dump_dir.clear();
         }
 
+        const std::vector<float> input_hidden = hidden;
         const auto logits_start = std::chrono::steady_clock::now();
         hidden = model.forward(std::move(hidden), positions, dump_dir, !dump_dir.empty());
         const auto logits_begin = std::chrono::steady_clock::now();
@@ -1249,6 +1253,18 @@ int main(std::int32_t argc, char** argv) {
         }
         const auto end = std::chrono::steady_clock::now();
         const double forward_ms = std::chrono::duration<double, std::milli>(logits_begin - logits_start).count();
+        // Repeat the same forward in-process: the weight repack is a per-model
+        // preparation, so this is what an amortised number looks like.
+        std::vector<double> repeat_ms;
+        for (std::size_t r = 1; r < repeat; ++r) {
+            auto again = input_hidden;
+            const auto t0 = std::chrono::steady_clock::now();
+            auto out = model.forward(std::move(again), positions, "", false);
+            const auto t1 = std::chrono::steady_clock::now();
+            (void)out;
+            repeat_ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+            std::printf("mnet_bonsai: repeat %zu forward=%.1f ms\n", r, repeat_ms.back());
+        }
         const double total_ms = std::chrono::duration<double, std::milli>(end - begin).count();
         std::printf("mnet_bonsai: tokens=%zu layers=%zu forward=%.1f ms total=%.1f ms -> %s\n", tokens.size(),
                     cfg.n_layer, forward_ms, total_ms, output_path.c_str());
