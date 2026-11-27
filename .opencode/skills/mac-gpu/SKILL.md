@@ -94,10 +94,20 @@ Quirk: this llama-bench build prints `ngl 10` in every row even with
   RMSNorm with a simdgroup sum + RoPE + optional f16 round on store),
   `attn_gate_sigmoid`, `attn_store_half` and `attn_flash` (one simdgroup per
   head, online softmax, value accumulator in registers, `simd_sum` score).
+- `Reader::ssm_block` (fused gated-delta) is the third block. Its per-head
+  delta-rule state (48 * 128 * 128 floats per layer) is far too large to
+  shuttle per token, so it stays resident on the device keyed by the qkv
+  identity, stored **transposed inside a head** so the scan's passes are
+  coalesced and barrier free. `--dump` and `--save-state/--load-state` force
+  the step-by-step path because the device does not hand the state back.
+- `MNET_PROFILE=1` prints the per-section CPU seconds of a forward; it is how
+  each remaining hotspot got located. `MNET_COMPUTE_STATS=1` prints the
+  device-side split (matvec / fused ffn / fused attn / fused ssm).
 - Measured Bonsai 27B Q2_0, 32 tokens: CPU 167.7 s (5.24 s/token); Metal
-  exact 8.23 s (0.26 s/token, 2371/2371 identical); Metal fast 6.47 s
-  (0.20 s/token, top-5 unchanged, max rel 2e-2); fast + fused FFN + fused
-  attention 5.91-5.99 s.
+  exact 8.23-8.30 s (2371/2371 identical); Metal fast + fused FFN + fused
+  attention + fused SSM 5.33-5.36 s (-40% vs the CPU build's per-token cost
+  would be 5.24 s/token, i.e. ~30x faster); normalized max logit diff vs
+  the CPU build 4.8e-3, top-5 unchanged.
 - Build dirs: `build-metal` (Metal ON), `build-cpu` (CPU reference) in
   `~/mnet_p4/mnet`. Dumps: `~/mnet_p4/{bonsai_cpu,bonsai_gpu}`.
 
