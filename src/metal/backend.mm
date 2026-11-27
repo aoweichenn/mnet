@@ -2425,6 +2425,15 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
     }
 
     const std::uint32_t block32 = block_size;
+    // MNET_FFN_SKIP=<phase> drops one phase for timing; results are garbage.
+    static const std::string ffn_skip =
+        std::getenv("MNET_FFN_SKIP") != nullptr ? std::string(std::getenv("MNET_FFN_SKIP")) : std::string();
+    const bool skip_all = ffn_skip == "all";
+    const bool skip_matvec = skip_all || ffn_skip == "matvec";
+    const bool skip_swiglu = skip_all || ffn_skip == "swiglu";
+    const bool skip_hadamard = skip_all || ffn_skip == "hadamard";
+    const bool skip_dequant = skip_all || ffn_skip == "dequant";
+
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     // Widen every token's activation once: the slabs are contiguous, so this is
@@ -2448,7 +2457,7 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
     const char* mat_mat = std::getenv("MNET_MAT_MAT");
     const bool tiled_down = tiled && (mat_mat == nullptr || std::atoi(mat_mat) != 2);
     id<MTLComputePipelineState> tiled_pipeline = tiled_mat_mat_pipeline(s);
-    if (tiled) {
+    if (tiled && !skip_matvec) {
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(first.gate.row_bytes);
         const std::uint32_t columns32 = static_cast<std::uint32_t>(columns);
         const std::uint32_t rows32 = static_cast<std::uint32_t>(hidden);
@@ -2475,7 +2484,7 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
         }
     }
     // Every gate, then every up matvec.
-    for (std::size_t pass = 0; tiled == false && pass < 2U; ++pass) {
+    for (std::size_t pass = 0; !skip_matvec && tiled == false && pass < 2U; ++pass) {
         for (std::size_t t = 0; t < count; ++t) {
             [encoder setComputePipelineState:s.fast_f32_pipeline];
             // Aliased weights live at an offset inside the mapping buffer.
@@ -2501,6 +2510,7 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
     // per-token slab, so one dispatch each covers every token.
     {
         const std::uint32_t slab = static_cast<std::uint32_t>(hidden * count);
+        if (!skip_swiglu) {
         [encoder setComputePipelineState:s.swiglu_pipeline];
         [encoder setBuffer:b.gate offset:0 atIndex:0];
         [encoder setBuffer:b.up offset:0 atIndex:1];
@@ -2508,6 +2518,8 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
         [encoder setBytes:&slab length:sizeof(slab) atIndex:3];
         [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
+        }
+        if (!skip_hadamard) {
         [encoder setComputePipelineState:s.hadamard_multi_pipeline];
         [encoder setBuffer:b.act offset:0 atIndex:0];
         [encoder setBuffer:signs_buffer offset:0 atIndex:1];
@@ -2518,14 +2530,17 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
         [encoder setBytes:&sign_blocks length:sizeof(sign_blocks) atIndex:5];
         [encoder dispatchThreadgroups:MTLSizeMake((hidden / block_size) * count, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
+        }
     }
     // The down matvec's activation is widened for every token in one dispatch,
     // then projected in one dispatch.
-    [encoder setComputePipelineState:s.dequant_pipeline];
-    [encoder setBuffer:b.act_q8 offset:0 atIndex:0];
-    [encoder setBuffer:b.act_scales offset:0 atIndex:1];
-    [encoder setBuffer:b.wide offset:0 atIndex:2];
-    [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    if (!skip_dequant) {
+        [encoder setComputePipelineState:s.dequant_pipeline];
+        [encoder setBuffer:b.act_q8 offset:0 atIndex:0];
+        [encoder setBuffer:b.act_scales offset:0 atIndex:1];
+        [encoder setBuffer:b.wide offset:0 atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    }
     if (tiled_down) {
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(first.down.row_bytes);
         const std::uint32_t columns32 = static_cast<std::uint32_t>(hidden);
@@ -2547,7 +2562,7 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
         [encoder setBytes:&out_stride32 length:sizeof(out_stride32) atIndex:11];
         [encoder dispatchThreadgroups:MTLSizeMake((count + 31U) / 32U, (columns + 63U) / 64U, 1)
                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-    } else {
+    } else if (!skip_matvec) {
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(first.down.row_bytes);
         const std::uint32_t blocks32 = static_cast<std::uint32_t>(hidden / 64U);
         const float scale = first.down.scale;
