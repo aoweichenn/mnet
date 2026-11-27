@@ -959,6 +959,90 @@ kernel void ssm_scan_batch(device const float* q            [[buffer(0)]],
 
 // Gated RMS norm per value head and the tiled -> grouped head permute the
 // folded ssm_out weight was built with, in one pass.
+// Same recurrence as ssm_scan_batch, but the state block for a 32-column slice
+// lives in threadgroup memory for the whole token loop: d, the rank-1 update and
+// the output are all column-independent, so a 128x32 slice is self-contained.
+// The state traffic drops from a full 3.1 MB read+write per token to one pass
+// per layer (log 137).
+kernel void ssm_scan_tiled(device const float* q            [[buffer(0)]],
+                           device const float* k            [[buffer(1)]],
+                           device const float* v            [[buffer(2)]],
+                           device const float* beta         [[buffer(3)]],
+                           device const float* gate         [[buffer(4)]],
+                           device float* state              [[buffer(5)]],
+                           device float* delta              [[buffer(6)]],
+                           constant uint& head_dim          [[buffer(7)]],
+                           constant uint& key_heads         [[buffer(8)]],
+                           constant float& inv_dim          [[buffer(9)]],
+                           constant uint& tokens            [[buffer(10)]],
+                           constant uint& qkv_stride        [[buffer(11)]],
+                           constant uint& gate_stride       [[buffer(12)]],
+                           constant uint& delta_stride      [[buffer(13)]],
+                           constant uint& blocks            [[buffer(14)]],
+                           uint tgid                        [[threadgroup_position_in_grid]],
+                           uint tid                         [[thread_position_in_threadgroup]]) {
+    constexpr uint kCols = 32u;   // columns per threadgroup
+    constexpr uint kRows = 128u;  // head_dim
+    threadgroup float st[kRows * kCols];
+    threadgroup float red[kRows];
+
+    const uint head = tgid / blocks;
+    const uint col0 = (tgid % blocks) * kCols;
+    const uint col = tid & 31u;
+    const uint grp = tid >> 5u;
+    device float* sh = state + head * head_dim * head_dim;
+
+#pragma clang loop unroll(full)
+    for (uint idx = tid; idx < kRows * kCols; idx += 128u) {
+        st[idx] = sh[(idx >> 5u) * head_dim + col0 + (idx & 31u)];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint t = 0; t < tokens; ++t) {
+        device const float* qh = q + (ulong)t * qkv_stride + (head % key_heads) * head_dim;
+        device const float* kh = k + (ulong)t * qkv_stride + (head % key_heads) * head_dim;
+        device const float* vh = v + (ulong)t * qkv_stride + head * head_dim;
+        const float decay = exp(gate[(ulong)t * gate_stride + head]);
+        const float b = beta[(ulong)t * gate_stride + head];
+
+        for (uint idx = tid; idx < kRows * kCols; idx += 128u) {
+            st[idx] *= decay;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float acc = 0.0f;
+        for (uint r = grp * 32u; r < grp * 32u + 32u; ++r) {
+            acc = fma(kh[r], st[r * kCols + col], acc);
+        }
+        red[tid] = acc;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const float d = ((red[col] + red[col + 32u]) + red[col + 64u]) + red[col + 96u];
+
+        const float coeff = (vh[col0 + col] - d) * b;
+        for (uint r = grp * 32u; r < grp * 32u + 32u; ++r) {
+            st[r * kCols + col] = fma(kh[r], coeff, st[r * kCols + col]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float out_acc = 0.0f;
+        for (uint r = grp * 32u; r < grp * 32u + 32u; ++r) {
+            out_acc = fma(qh[r], st[r * kCols + col], out_acc);
+        }
+        red[tid] = out_acc;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < kCols) {
+            delta[(ulong)t * delta_stride + head * head_dim + col0 + tid] =
+                (((red[tid] + red[tid + 32u]) + red[tid + 64u]) + red[tid + 96u]) * inv_dim;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+#pragma clang loop unroll(full)
+    for (uint idx = tid; idx < kRows * kCols; idx += 128u) {
+        sh[(idx >> 5u) * head_dim + col0 + (idx & 31u)] = st[idx];
+    }
+}
+
 kernel void ssm_gate_norm(device const float* delta    [[buffer(0)]],
                           device const float* z        [[buffer(1)]],
                           device const float* norm     [[buffer(2)]],
@@ -1203,6 +1287,7 @@ struct MetalState {
     id<MTLComputePipelineState> ssm_conv_norm_pipeline = nil;
     id<MTLComputePipelineState> ssm_scan_pipeline = nil;
     id<MTLComputePipelineState> ssm_scan_batch_pipeline = nil;
+    id<MTLComputePipelineState> ssm_scan_tiled_pipeline = nil;
     id<MTLComputePipelineState> ssm_gate_norm_pipeline = nil;
     FfnBatchBuffers ffn_batch;
     SsmBatchBuffers ssm_batch;
@@ -1291,6 +1376,7 @@ void initialise(MetalState& state) {
         state.ssm_conv_norm_pipeline = pipeline_for("ssm_conv_norm");
         state.ssm_scan_pipeline = pipeline_for("ssm_scan");
         state.ssm_scan_batch_pipeline = pipeline_for("ssm_scan_batch");
+        state.ssm_scan_tiled_pipeline = pipeline_for("ssm_scan_tiled");
         state.ssm_gate_norm_pipeline = pipeline_for("ssm_gate_norm");
         state.dequant_pipeline = pipeline_for("q8_0_dequantize");
         state.hadamard_multi_pipeline = pipeline_for("hadamard_quantize_multi");
@@ -2813,12 +2899,13 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     const std::uint32_t q_offset = 0U;
     const std::uint32_t k_offset = static_cast<std::uint32_t>(key_heads * head_dim);
     const std::uint32_t v_offset = static_cast<std::uint32_t>(2U * key_heads * head_dim);
+    const bool tiled_scan = head_dim == 128U && s.ssm_scan_tiled_pipeline != nil;
     if (!skip_scan) {
         const std::uint32_t tokens32 = static_cast<std::uint32_t>(count);
         const std::uint32_t qkv_stride32 = static_cast<std::uint32_t>(conv_dim);
         const std::uint32_t gate_stride32 = static_cast<std::uint32_t>(2U * value_heads);
         const std::uint32_t delta_stride32 = static_cast<std::uint32_t>(hidden);
-        [encoder setComputePipelineState:s.ssm_scan_batch_pipeline];
+        [encoder setComputePipelineState:tiled_scan ? s.ssm_scan_tiled_pipeline : s.ssm_scan_batch_pipeline];
         [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(q_offset * sizeof(float)) atIndex:0];
         [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(k_offset * sizeof(float)) atIndex:1];
         [encoder setBuffer:b.conv offset:static_cast<NSUInteger>(v_offset * sizeof(float)) atIndex:2];
@@ -2833,8 +2920,15 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
         [encoder setBytes:&qkv_stride32 length:sizeof(qkv_stride32) atIndex:11];
         [encoder setBytes:&gate_stride32 length:sizeof(gate_stride32) atIndex:12];
         [encoder setBytes:&delta_stride32 length:sizeof(delta_stride32) atIndex:13];
-        [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+        if (tiled_scan) {
+            const std::uint32_t blocks32 = 4U;
+            [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:14];
+            [encoder dispatchThreadgroups:MTLSizeMake(value_heads * blocks32, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        } else {
+            [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(head_dim, 1, 1)];
+        }
     }
     if (!skip_norm) {
         [encoder setComputePipelineState:s.gate_norm_multi_pipeline];
