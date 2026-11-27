@@ -221,6 +221,129 @@ kernel void q2_0_mat_mat_f16_short(device const uchar* w        [[buffer(0)]],
         }
     }
 }
+kernel void q2_0_mat_mat_f16_splitk(device const uchar* w        [[buffer(0)]],
+                             device const float* x        [[buffer(1)]],
+                             device float* out            [[buffer(3)]],
+                             constant uint& row_bytes     [[buffer(4)]],
+                             constant uint& columns       [[buffer(5)]],
+                             constant float& scale        [[buffer(6)]],
+                             constant uint& rows          [[buffer(8)]],
+                             constant uint& tokens        [[buffer(9)]],
+                             constant uint& x_stride      [[buffer(10)]],
+                             constant uint& out_stride    [[buffer(11)]],
+                                   constant uint& split          [[buffer(12)]],
+                                   constant uint& splits         [[buffer(13)]],
+                                   constant uint& partial_stride [[buffer(14)]],
+                             uint3 tgpig                  [[threadgroup_position_in_grid]],
+                             uint tiitg                   [[thread_index_in_threadgroup]],
+                             uint sgitg                   [[simdgroup_index_in_threadgroup]]) {
+    constexpr uint NR0 = 64u;  // rows per threadgroup
+    constexpr uint NR1 = 32u;  // tokens per threadgroup
+    constexpr uint NK = 64u;   // columns per step, one Q2_0 block
+    threadgroup half sa[NR0 * NK];  // [row][k]
+    threadgroup half sb[NR1 * NK];  // [token][k]
+
+    const uint row0 = tgpig.y * NR0;
+    const uint tok0 = tgpig.x * NR1;
+    const uint row_count = min(NR0, rows - row0);
+    const uint tok_count = min(NR1, tokens - tok0);
+
+    simdgroup_float8x8 mc[8];
+    for (uint i = 0; i < 8u; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    const uint per = (columns / splits / NK) * NK;
+    const uint k_begin = split * per;
+    const uint k_end = (split + 1u == splits) ? columns : k_begin + per;
+    for (uint k0 = k_begin; k0 < k_end; k0 += NK) {
+        // Weights: two threads per row, eight code bytes each (32 codes).
+        {
+            const uint row = tiitg / 2u;
+            const uint part = tiitg % 2u;
+            const float d = row < row_count
+                                ? float(as_type<half>(ushort(w[(ulong)(row0 + row) * row_bytes + (k0 / 64u) * 18u] |
+                                                             (ushort(w[(ulong)(row0 + row) * row_bytes + (k0 / 64u) * 18u + 1u]) << 8))))
+                                : 0.0f;
+            device const uchar* q = w + (ulong)(row0 + row) * row_bytes + (k0 / 64u) * 18u + 2u + part * 8u;
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < 8u; ++i) {
+                const uchar byte = row < row_count ? q[i] : 0u;
+                sa[(part * 32u + i * 4u + 0u) * NR0 + row] = half(float(int(byte & 3u) - 1) * d);
+                sa[(part * 32u + i * 4u + 1u) * NR0 + row] = half(float(int((byte >> 2u) & 3u) - 1) * d);
+                sa[(part * 32u + i * 4u + 2u) * NR0 + row] = half(float(int((byte >> 4u) & 3u) - 1) * d);
+                sa[(part * 32u + i * 4u + 3u) * NR0 + row] = half(float(int((byte >> 6u) & 3u) - 1) * d);
+            }
+        }
+        // Activations: one tile of the batch, transposed to [token][k].
+        // Four consecutive columns per thread, loaded as one 16-byte vector and
+        // stored as one half4. The scalar version (one float per thread per
+        // iteration) was the kernel's whole bottleneck: with the tiles left
+        // static, the same loop runs at 5.85 TFLOP/s instead of 1.76
+        // (benchmarks/metal/q2_0_mat_mat_bench.mm).
+        for (uint idx = tiitg; idx < NR1 * (NK / 4u); idx += 128u) {
+            const uint tok = idx / (NK / 4u);
+            const uint k = (idx % (NK / 4u)) * 4u;
+            float4 v = float4(0.0f, 0.0f, 0.0f, 0.0f);
+            if (tok < tok_count && k0 + k + 3u < columns) {
+                v = *reinterpret_cast<device const float4*>(x + (ulong)(tok0 + tok) * x_stride + k0 + k);
+            }
+            *reinterpret_cast<threadgroup half4*>(sb + tok * NK + k) = half4(v.x, v.y, v.z, v.w);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half* sa_q = sa + 32u * (sgitg & 1u);    // this simdgroup's 32 rows, tile is [k][row]
+        threadgroup const half* sb_q = sb + 16u * (sgitg >> 1u) * NK;  // this simdgroup's 16 tokens
+#pragma clang loop unroll(full)
+        for (uint kk = 0; kk < NK / 8u; ++kk) {
+            simdgroup_half8x8 mb[2];
+            simdgroup_half8x8 ma[4];
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < 4u; ++i) {
+                // [row][k] -> [k][row], which is what A*B needs on the right.
+                simdgroup_load(ma[i], sa_q + kk * 8u * NR0 + i * 8u, NR0, 0, false);
+            }
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < 2u; ++i) {
+                simdgroup_load(mb[i], sb_q + i * 8u * NK + kk * 8u, NK, 0, false);
+            }
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < 8u; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4u], ma[i % 4u], mc[i]);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // mc[i] holds [token][row] for tokens 8*(i/4).., rows 8*(i%4).. of this
+    // simdgroup's quadrant. Stage the tile, then write it out with `scale`.
+    // The 8 KB weight tile is dead once the k loop ends, so the float staging
+    // tile reuses it: 12 KB of threadgroup memory per threadgroup instead of 20,
+    // which lets two of them share a core.
+    threadgroup float* tile = reinterpret_cast<threadgroup float*>(sa);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+#pragma clang loop unroll(full)
+    for (uint i = 0; i < 8u; ++i) {
+        simdgroup_store(mc[i], tile + (16u * (sgitg >> 1u) + 8u * (i / 4u)) * NR0 + 32u * (sgitg & 1u) + 8u * (i % 4u),
+                        NR0, 0, false);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint idx = tiitg; idx < NR0 * NR1; idx += 128u) {
+        const uint tok = idx / NR0;
+        const uint row = idx % NR0;
+        if (tok < tok_count && row < row_count) {
+            out[(ulong)split * partial_stride + (ulong)(tok0 + tok) * out_stride + row0 + row] = tile[idx];
+        }
+    }
+}
+kernel void q2_0_mat_mat_splitk_reduce(device const float* partial [[buffer(0)]],
+                                       device float* out             [[buffer(1)]],
+                                       constant float& scale         [[buffer(2)]],
+                                       constant uint& partial_stride [[buffer(3)]],
+                                       uint gid                      [[thread_position_in_grid]]) {
+    out[gid] = scale * (partial[gid] + partial[partial_stride + gid]);
+}
+
 )MSL";
 
 #import <Foundation/Foundation.h>
@@ -298,6 +421,68 @@ Result run(id<MTLCommandQueue> queue, id<MTLComputePipelineState> pipeline, id<M
     return result;
 }
 
+
+Result run_splitk(id<MTLCommandQueue> queue, id<MTLComputePipelineState> pipeline,
+                  id<MTLComputePipelineState> reduce, id<MTLBuffer> weights, id<MTLBuffer> x) {
+    const std::uint32_t rows32 = kRows;
+    const std::uint32_t tokens32 = kTokens;
+    const std::uint32_t columns32 = kColumns;
+    const std::uint32_t row_bytes32 = kRowBytes;
+    const std::uint32_t x_stride32 = kColumns;
+    const std::uint32_t out_stride32 = kRows;
+    const std::uint32_t splits = 2u;
+    const std::uint32_t partial_stride = kRows * kTokens;
+    const float scale = 1.0f;
+    Result result;
+    result.out.assign(static_cast<std::size_t>(kRows) * kTokens, 0.0f);
+    id<MTLBuffer> partial = [queue.device newBufferWithLength:partial_stride * splits * sizeof(float)
+                                                      options:MTLResourceStorageModeShared];
+    id<MTLBuffer> out = [queue.device newBufferWithLength:partial_stride * sizeof(float)
+                                                  options:MTLResourceStorageModeShared];
+    const auto encode = [&](id<MTLCommandBuffer> command, std::uint32_t split32) {
+        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline];
+        [encoder setBuffer:weights offset:0 atIndex:0];
+        [encoder setBuffer:x offset:0 atIndex:1];
+        [encoder setBuffer:partial offset:0 atIndex:3];
+        [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
+        [encoder setBytes:&columns32 length:sizeof(columns32) atIndex:5];
+        [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+        [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
+        [encoder setBytes:&tokens32 length:sizeof(tokens32) atIndex:9];
+        [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:10];
+        [encoder setBytes:&out_stride32 length:sizeof(out_stride32) atIndex:11];
+        [encoder setBytes:&split32 length:sizeof(split32) atIndex:12];
+        [encoder setBytes:&splits length:sizeof(splits) atIndex:13];
+        [encoder setBytes:&partial_stride length:sizeof(partial_stride) atIndex:14];
+        [encoder dispatchThreadgroups:MTLSizeMake(kTokens / 32u, (kRows + 63u) / 64u, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [encoder setComputePipelineState:reduce];
+        [encoder setBuffer:partial offset:0 atIndex:0];
+        [encoder setBuffer:out offset:0 atIndex:1];
+        [encoder setBytes:&scale length:sizeof(scale) atIndex:2];
+        [encoder setBytes:&partial_stride length:sizeof(partial_stride) atIndex:3];
+        [encoder dispatchThreads:MTLSizeMake(partial_stride, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [encoder endEncoding];
+    };
+    const auto one = [&](std::uint32_t split32) {
+        id<MTLCommandBuffer> command = [queue commandBuffer];
+        encode(command, split32);
+        [command commit];
+        [command waitUntilCompleted];
+    };
+    one(0u);
+    one(1u);
+    const auto start = std::chrono::steady_clock::now();
+    for (int pass = 0; pass < 5; ++pass) {
+        one(0u);
+        one(1u);
+    }
+    result.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 5.0;
+    std::memcpy(result.out.data(), out.contents, result.out.size() * sizeof(float));
+    return result;
+}
+
 }  // namespace
 
 int main() {
@@ -345,8 +530,27 @@ int main() {
                                              length:acts.size() * sizeof(float)
                                             options:MTLResourceStorageModeShared];
 
+    id<MTLComputePipelineState> splitk_pipeline = [device
+        newComputePipelineStateWithFunction:[library newFunctionWithName:@"q2_0_mat_mat_f16_splitk"]
+                                      error:&error];
+    id<MTLComputePipelineState> reduce_pipeline = [device
+        newComputePipelineStateWithFunction:[library newFunctionWithName:@"q2_0_mat_mat_splitk_reduce"]
+                                      error:&error];
     const Result ref = run(queue, ref_pipeline, wbuf, xbuf, 64u);
     const Result got = run(queue, short_pipeline, wbuf, xbuf, 32u);
+    if (splitk_pipeline != nil && reduce_pipeline != nil) {
+        const Result split = run_splitk(queue, splitk_pipeline, reduce_pipeline, wbuf, xbuf);
+        double sworst = 0.0;
+        std::size_t sbad = 0;
+        for (std::size_t i = 0; i < ref.out.size(); ++i) {
+            const double diff = std::abs(static_cast<double>(ref.out[i]) - static_cast<double>(split.out[i]));
+            if (diff > 1e-3) {
+                ++sbad;
+                sworst = std::max(sworst, diff);
+            }
+        }
+        std::printf("split-K(2) %.3f ms, differing %zu, worst %.4f\n", split.ms, sbad, sworst);
+    }
 
     double worst = 0.0;
     std::size_t first_bad = SIZE_MAX;
