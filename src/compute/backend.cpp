@@ -38,6 +38,8 @@ struct Stats {
     std::atomic<std::uint64_t> cpu_ns{0};
     std::atomic<std::uint64_t> backend_calls{0};
     std::atomic<std::uint64_t> cpu_calls{0};
+    std::atomic<std::uint64_t> ffn_ns{0};
+    std::atomic<std::uint64_t> ffn_calls{0};
 
     ~Stats() {
         if (std::getenv("MNET_COMPUTE_STATS") == nullptr) {
@@ -45,9 +47,11 @@ struct Stats {
         }
         char line[256];
         std::snprintf(line, sizeof(line),
-                      "mnet: compute backend %" PRIu64 " calls %.3f s, cpu %" PRIu64 " calls %.3f s\n",
+                      "mnet: compute backend %" PRIu64 " calls %.3f s, cpu %" PRIu64 " calls %.3f s, fused ffn %" PRIu64
+                      " calls %.3f s\n",
                       this->backend_calls.load(), static_cast<double>(this->backend_ns.load()) * 1.0e-9,
-                      this->cpu_calls.load(), static_cast<double>(this->cpu_ns.load()) * 1.0e-9);
+                      this->cpu_calls.load(), static_cast<double>(this->cpu_ns.load()) * 1.0e-9, this->ffn_calls.load(),
+                      static_cast<double>(this->ffn_ns.load()) * 1.0e-9);
         mnet::detail::write_diagnostic(std::string(line));
     }
 };
@@ -160,7 +164,18 @@ bool ffn_swiglu_q2_0(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up, const M
     static std::once_flag once;
     std::call_once(once, [] { register_platform_backends(); });
     const FfnSwigluFn backend = ffn_slot().load();
-    return backend != nullptr && backend(gate, up, down, columns, hidden, input, signs, block_size);
+    if (backend == nullptr) {
+        return false;
+    }
+    const auto begin = std::chrono::steady_clock::now();
+    const bool handled = backend(gate, up, down, columns, hidden, input, signs, block_size);
+    if (handled) {
+        const auto elapsed = std::chrono::steady_clock::now() - begin;
+        stats().ffn_ns +=
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+        ++stats().ffn_calls;
+    }
+    return handled;
 }
 
 bool fast_path_enabled() {
