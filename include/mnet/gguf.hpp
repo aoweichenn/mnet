@@ -340,45 +340,81 @@ struct Q8_0Blocks {
 #if defined(__AVX2__) && defined(__FMA__)
     return dot_q6_k_q8_k_avx2(data, q8, blocks);
 #else
-    float sums[8] = {};
-    for (std::uint64_t b = 0; b < blocks; ++b) {
-        const std::uint8_t* ql = data + b * 210;
-        const std::uint8_t* qh = ql + 128;
-        const auto* scales = reinterpret_cast<const std::int8_t*>(ql + 192);
-        const float d =
-            half_to_float(static_cast<std::uint16_t>(ql[208] | (static_cast<std::uint16_t>(ql[209]) << 8U))) * q8.d[b];
-        std::int8_t a[256];
-        for (int half_index = 0; half_index < 2; ++half_index) {
-            const std::uint8_t* qlh = ql + half_index * 64;
-            const std::uint8_t* qhh = qh + half_index * 32;
-            for (int l = 0; l < 32; ++l) {
-                a[half_index * 128 + l] = static_cast<std::int8_t>(((qlh[l] & 0x0F) | (((qhh[l] >> 0) & 3) << 4))) - 32;
-                a[half_index * 128 + l + 32] =
-                    static_cast<std::int8_t>(((qlh[l + 32] & 0x0F) | (((qhh[l] >> 2) & 3) << 4))) - 32;
-                a[half_index * 128 + l + 64] =
-                    static_cast<std::int8_t>(((qlh[l] >> 4) | (((qhh[l] >> 4) & 3) << 4))) - 32;
-                a[half_index * 128 + l + 96] =
-                    static_cast<std::int8_t>(((qlh[l + 32] >> 4) | (((qhh[l] >> 6) & 3) << 4))) - 32;
-            }
+    // Lane-faithful replica of dot_q6_k_q8_k_avx2: the same integer pipeline
+    // (nibble split, maddubs pair sums, madd_epi16 with the per-16-value scales,
+    // the 32 x bsums correction) accumulated into eight int32 lanes and folded
+    // with one fma per block into eight float lanes.
+    float acc[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+    for (std::uint64_t i = 0; i < blocks; ++i) {
+        const std::uint8_t* block = data + i * 210U;
+        const std::uint8_t* ql = block;
+        const std::uint8_t* qh = block + 128U;
+        const std::int8_t* q = q8.qs.data() + i * 256U;
+        const float d = q8.d[i] *
+                        half_to_float(static_cast<std::uint16_t>(block[208] | (static_cast<std::uint16_t>(block[209]) << 8U)));
+        std::int32_t scales[16];
+        for (std::size_t k = 0; k < 16; ++k) {
+            scales[k] = static_cast<std::int8_t>(block[192U + k]);
         }
-        const std::int8_t* q = q8.qs.data() + b * 256;
-        std::int32_t aux32[8] = {};
-        int is = 0;
-        for (int j = 0; j < 16; ++j) {
-            const int scale = scales[is++];
-            for (int l = 0; l < 8; ++l) {
-                aux32[l] += scale * q[l] * a[j * 16 + l];
-            }
-            for (int l = 0; l < 8; ++l) {
-                aux32[l] += scale * q[8 + l] * a[j * 16 + 8 + l];
-            }
-            q += 16;
+        // q8sclsub = 32 * sum over the 16-value groups of (bsum * scale).
+        std::uint32_t q8sclsub[8];
+        for (std::size_t lane = 0; lane < 8; ++lane) {
+            const std::int32_t pair = static_cast<std::int32_t>(q8.bsums[i * 16U + lane * 2U]) * scales[lane * 2U] +
+                                      static_cast<std::int32_t>(q8.bsums[i * 16U + lane * 2U + 1U]) *
+                                          scales[lane * 2U + 1U];
+            q8sclsub[lane] = static_cast<std::uint32_t>(pair) << 5U;
         }
-        for (int l = 0; l < 8; ++l) {
-            sums[l] = std::fma(d, static_cast<float>(aux32[l]), sums[l]);
+        std::uint32_t sumi[8] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
+        std::size_t is = 0;
+        for (int j = 0; j < 2; ++j) {
+            const std::uint8_t* ql1 = ql + static_cast<std::size_t>(j) * 64U;
+            const std::uint8_t* ql2 = ql1 + 32U;
+            const std::uint8_t* qhb = qh + static_cast<std::size_t>(j) * 32U;
+            const std::int8_t* q8b = q + static_cast<std::size_t>(j) * 128U;
+            for (int group = 0; group < 4; ++group) {
+                std::int32_t p16[16];
+                for (std::size_t idx = 0; idx < 32; ++idx) {
+                    std::uint8_t low4;
+                    std::uint8_t high2;
+                    if (group == 0) {
+                        low4 = static_cast<std::uint8_t>(ql1[idx] & 0x0FU);
+                        high2 = static_cast<std::uint8_t>(qhb[idx] & 0x03U);
+                    } else if (group == 1) {
+                        low4 = static_cast<std::uint8_t>(ql2[idx] & 0x0FU);
+                        high2 = static_cast<std::uint8_t>((qhb[idx] & 0x0CU) >> 2U);
+                    } else if (group == 2) {
+                        low4 = static_cast<std::uint8_t>(ql1[idx] >> 4U);
+                        high2 = static_cast<std::uint8_t>((qhb[idx] & 0x30U) >> 4U);
+                    } else {
+                        low4 = static_cast<std::uint8_t>(ql2[idx] >> 4U);
+                        high2 = static_cast<std::uint8_t>((qhb[idx] & 0xC0U) >> 6U);
+                    }
+                    const std::int32_t value = static_cast<std::int32_t>(low4) |
+                                               (static_cast<std::int32_t>(high2) << 4);
+                    const std::int32_t product =
+                        value * static_cast<std::int32_t>(q8b[static_cast<std::size_t>(group) * 32U + idx]);
+                    if ((idx & 1U) == 0U) {
+                        p16[idx / 2U] = product;
+                    } else {
+                        p16[idx / 2U] += product;
+                    }
+                }
+                const std::int32_t scale0 = scales[2U * (is + static_cast<std::size_t>(group))];
+                const std::int32_t scale1 = scales[2U * (is + static_cast<std::size_t>(group)) + 1U];
+                for (std::size_t lane = 0; lane < 8; ++lane) {
+                    const std::int32_t scale = lane < 4 ? scale0 : scale1;
+                    const std::int32_t value = scale * (p16[lane * 2U] + p16[lane * 2U + 1U]);
+                    sumi[lane] += static_cast<std::uint32_t>(value);
+                }
+            }
+            is += 4;
+        }
+        for (std::size_t lane = 0; lane < 8; ++lane) {
+            const std::int32_t value = static_cast<std::int32_t>(sumi[lane] - q8sclsub[lane]);
+            acc[lane] = std::fma(d, static_cast<float>(value), acc[lane]);
         }
     }
-    return hsum_float_8(sums);
+    return hsum_float_8(acc);
 #endif
 }
 
@@ -1451,36 +1487,57 @@ inline bool& ggml_tinyblas_batch() {
 #if defined(__AVX2__) && defined(__FMA__)
     return dot_iq4_xs_q8_k_avx2(data, q8, blocks);
 #else
-    float sumf = 0.0F;
+    // Lane-faithful replica of dot_iq4_xs_q8_k_avx2: per block, four passes of
+    // two 32-value groups, 4-bit codebook lookups (low nibbles then high),
+    // pairwise products with the Q8_K values scaled by ls1/ls2, accumulated into
+    // eight int32 lanes and folded with one fma into eight float lanes.
+    float accum[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
     for (std::uint64_t b = 0; b < blocks; ++b) {
-        const std::uint8_t* block = data + b * 136;
-        const float d4d8 =
-            half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U))) *
-            q8.d[b];
-        std::uint16_t h = static_cast<std::uint16_t>(block[2] | (static_cast<std::uint16_t>(block[3]) << 8U));
-        const std::uint8_t* scales_l = block + 4;
-        const std::uint8_t* qs = block + 8;
-        const std::int8_t* q = q8.qs.data() + b * 256;
+        const std::uint8_t* block = data + b * 136U;
+        const std::uint8_t* qs = block + 8U;
+        const std::int8_t* q = q8.qs.data() + b * 256U;
+        std::uint16_t sh = static_cast<std::uint16_t>(block[2] | (static_cast<std::uint16_t>(block[3]) << 8U));
+        std::uint32_t sumi[8] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
         for (int ib = 0; ib < 8; ib += 2) {
-            const int ls1 = (scales_l[ib / 2] & 0x0F) | ((h << 4) & 0x30);
-            const int ls2 = (scales_l[ib / 2] >> 4) | ((h << 2) & 0x30);
-            h = static_cast<std::uint16_t>(h >> 4);
-            const float d1 = d4d8 * static_cast<float>(ls1 - 32);
-            const float d2 = d4d8 * static_cast<float>(ls2 - 32);
-            for (int half = 0; half < 2; ++half) {
-                int sumi1 = 0;
-                int sumi2 = 0;
-                for (int j = 0; j < 16; ++j) {
-                    sumi1 += q[j] * kIq4NlValues[qs[j] & 0x0F];
-                    sumi2 += q[j + 16] * kIq4NlValues[qs[j] >> 4];
-                }
-                sumf += (half == 0 ? d1 : d2) * static_cast<float>(sumi1 + sumi2);
-                qs += 16;
-                q += 32;
+            const std::uint8_t* q4bits_1 = qs;
+            qs += 16U;
+            const std::uint8_t* q4bits_2 = qs;
+            qs += 16U;
+            const std::int8_t* q8b_1 = q;
+            q += 32;
+            const std::int8_t* q8b_2 = q;
+            q += 32;
+            const std::int32_t ls1 =
+                static_cast<std::int32_t>(((block[4U + static_cast<std::size_t>(ib) / 2U] & 0x0FU) |
+                                           ((sh << 4) & 0x30U)) - 32U);
+            const std::int32_t ls2 =
+                static_cast<std::int32_t>(((block[4U + static_cast<std::size_t>(ib) / 2U] >> 4U) |
+                                           ((sh << 2) & 0x30U)) - 32U);
+            sh = static_cast<std::uint16_t>(sh >> 4U);
+            std::int32_t v1[32];
+            std::int32_t v2[32];
+            for (std::size_t idx = 0; idx < 16; ++idx) {
+                v1[idx] = kIq4NlValues[q4bits_1[idx] & 0x0FU];
+                v1[16U + idx] = kIq4NlValues[q4bits_1[idx] >> 4U];
+                v2[idx] = kIq4NlValues[q4bits_2[idx] & 0x0FU];
+                v2[16U + idx] = kIq4NlValues[q4bits_2[idx] >> 4U];
+            }
+            for (std::size_t lane = 0; lane < 8; ++lane) {
+                const std::size_t at = lane * 4U;
+                const std::int32_t p1 = v1[at] * q8b_1[at] + v1[at + 1U] * q8b_1[at + 1U] + v1[at + 2U] * q8b_1[at + 2U] +
+                                        v1[at + 3U] * q8b_1[at + 3U];
+                const std::int32_t p2 = v2[at] * q8b_2[at] + v2[at + 1U] * q8b_2[at + 1U] + v2[at + 2U] * q8b_2[at + 2U] +
+                                        v2[at + 3U] * q8b_2[at + 3U];
+                sumi[lane] += static_cast<std::uint32_t>(ls1 * p1 + ls2 * p2);
             }
         }
+        const float d = half_to_float(static_cast<std::uint16_t>(block[0] | (static_cast<std::uint16_t>(block[1]) << 8U))) *
+                        q8.d[b];
+        for (std::size_t lane = 0; lane < 8; ++lane) {
+            accum[lane] = std::fma(d, static_cast<float>(static_cast<std::int32_t>(sumi[lane])), accum[lane]);
+        }
     }
-    return sumf;
+    return hsum_float_8(accum);
 #endif
 }
 
