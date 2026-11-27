@@ -127,6 +127,115 @@ kernel void q2_0_mat_mat_f16(device const uchar* w        [[buffer(0)]],
         }
     }
 }
+kernel void q2_0_mat_mat_f16_hot(device const uchar* w        [[buffer(0)]],
+                             device const float* x        [[buffer(1)]],
+                             device float* out            [[buffer(3)]],
+                             constant uint& row_bytes     [[buffer(4)]],
+                             constant uint& columns       [[buffer(5)]],
+                             constant float& scale        [[buffer(6)]],
+                             constant uint& rows          [[buffer(8)]],
+                             constant uint& tokens        [[buffer(9)]],
+                             constant uint& x_stride      [[buffer(10)]],
+                             constant uint& out_stride    [[buffer(11)]],
+                             uint3 tgpig                  [[threadgroup_position_in_grid]],
+                             uint tiitg                   [[thread_index_in_threadgroup]],
+                             uint sgitg                   [[simdgroup_index_in_threadgroup]]) {
+    constexpr uint NR0 = 64u;  // rows per threadgroup
+    constexpr uint NR1 = 32u;  // tokens per threadgroup
+    constexpr uint NK = 64u;   // columns per step, one Q2_0 block
+    threadgroup half sa[NR0 * NK];  // [row][k]
+    threadgroup half sb[NR1 * NK];  // [token][k]
+
+    const uint row0 = 0u;  // every threadgroup reads the same weight tile
+    const uint tok0 = tgpig.x * NR1;
+    const uint row_count = min(NR0, rows - row0);
+    const uint tok_count = min(NR1, tokens - tok0);
+
+    simdgroup_float8x8 mc[8];
+    for (uint i = 0; i < 8u; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint k0 = 0; k0 < columns; k0 += NK) {
+        // Weights: two threads per row, eight code bytes each (32 codes).
+        {
+            const uint row = tiitg / 2u;
+            const uint part = tiitg % 2u;
+            const float d = row < row_count
+                                ? float(as_type<half>(ushort(w[(ulong)(row0 + row) * row_bytes + (k0 / 64u) * 18u] |
+                                                             (ushort(w[(ulong)(row0 + row) * row_bytes + (k0 / 64u) * 18u + 1u]) << 8))))
+                                : 0.0f;
+            device const uchar* q = w + (ulong)(row0 + row) * row_bytes + (k0 / 64u) * 18u + 2u + part * 8u;
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < 8u; ++i) {
+                const uchar byte = row < row_count ? q[i] : 0u;
+                sa[(part * 32u + i * 4u + 0u) * NR0 + row] = half(float(int(byte & 3u) - 1) * d);
+                sa[(part * 32u + i * 4u + 1u) * NR0 + row] = half(float(int((byte >> 2u) & 3u) - 1) * d);
+                sa[(part * 32u + i * 4u + 2u) * NR0 + row] = half(float(int((byte >> 4u) & 3u) - 1) * d);
+                sa[(part * 32u + i * 4u + 3u) * NR0 + row] = half(float(int((byte >> 6u) & 3u) - 1) * d);
+            }
+        }
+        // Activations: one tile of the batch, transposed to [token][k].
+        // Four consecutive columns per thread, loaded as one 16-byte vector and
+        // stored as one half4. The scalar version (one float per thread per
+        // iteration) was the kernel's whole bottleneck: with the tiles left
+        // static, the same loop runs at 5.85 TFLOP/s instead of 1.76
+        // (benchmarks/metal/q2_0_mat_mat_bench.mm).
+        for (uint idx = tiitg; idx < NR1 * (NK / 4u); idx += 128u) {
+            const uint tok = idx / (NK / 4u);
+            const uint k = (idx % (NK / 4u)) * 4u;
+            float4 v = float4(0.0f, 0.0f, 0.0f, 0.0f);
+            if (tok < tok_count && k0 + k + 3u < columns) {
+                v = *reinterpret_cast<device const float4*>(x + (ulong)(tok0 + tok) * x_stride + k0 + k);
+            }
+            *reinterpret_cast<threadgroup half4*>(sb + tok * NK + k) = half4(v.x, v.y, v.z, v.w);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half* sa_q = sa + 32u * (sgitg & 1u);    // this simdgroup's 32 rows, tile is [k][row]
+        threadgroup const half* sb_q = sb + 16u * (sgitg >> 1u) * NK;  // this simdgroup's 16 tokens
+#pragma clang loop unroll(full)
+        for (uint kk = 0; kk < NK / 8u; ++kk) {
+            simdgroup_half8x8 mb[2];
+            simdgroup_half8x8 ma[4];
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < 4u; ++i) {
+                // [row][k] -> [k][row], which is what A*B needs on the right.
+                simdgroup_load(ma[i], sa_q + kk * 8u * NR0 + i * 8u, NR0, 0, false);
+            }
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < 2u; ++i) {
+                simdgroup_load(mb[i], sb_q + i * 8u * NK + kk * 8u, NK, 0, false);
+            }
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < 8u; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4u], ma[i % 4u], mc[i]);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // mc[i] holds [token][row] for tokens 8*(i/4).., rows 8*(i%4).. of this
+    // simdgroup's quadrant. Stage the tile, then write it out with `scale`.
+    // The 8 KB weight tile is dead once the k loop ends, so the float staging
+    // tile reuses it: 12 KB of threadgroup memory per threadgroup instead of 20,
+    // which lets two of them share a core.
+    threadgroup float* tile = reinterpret_cast<threadgroup float*>(sa);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+#pragma clang loop unroll(full)
+    for (uint i = 0; i < 8u; ++i) {
+        simdgroup_store(mc[i], tile + (16u * (sgitg >> 1u) + 8u * (i / 4u)) * NR0 + 32u * (sgitg & 1u) + 8u * (i % 4u),
+                        NR0, 0, false);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint idx = tiitg; idx < NR0 * NR1; idx += 128u) {
+        const uint tok = idx / NR0;
+        const uint row = idx % NR0;
+        if (tok < tok_count && row < row_count) {
+            out[(ulong)(tok0 + tok) * out_stride + row0 + row] = tile[idx] * scale;
+        }
+    }
+}
 kernel void q2_0_mat_mat_f16_static(device const uchar* w        [[buffer(0)]],
                              device const float* x        [[buffer(1)]],
                              device float* out            [[buffer(3)]],
@@ -203,6 +312,71 @@ kernel void q2_0_mat_mat_f16_static(device const uchar* w        [[buffer(0)]],
         }
     }
 }
+
+// No simdgroup_matrix at all: each thread owns a 4-row x 4-token sub-tile, the
+// Q2_0 codes are decoded straight from device memory into registers and the
+// activation slice is one float4 per token. There is no threadgroup staging and
+// no barrier, so it tests whether the staging is what costs (log 124/127) by
+// removing it entirely rather than reshaping it.
+kernel void q2_0_mat_mul_reg(device const uchar* w        [[buffer(0)]],
+                             device const float* x        [[buffer(1)]],
+                             device float* out            [[buffer(3)]],
+                             constant uint& row_bytes     [[buffer(4)]],
+                             constant uint& columns       [[buffer(5)]],
+                             constant float& scale        [[buffer(6)]],
+                             constant uint& rows          [[buffer(8)]],
+                             constant uint& tokens        [[buffer(9)]],
+                             constant uint& x_stride      [[buffer(10)]],
+                             constant uint& out_stride    [[buffer(11)]],
+                             uint3 tgpig                  [[threadgroup_position_in_grid]],
+                             uint tiitg                   [[thread_index_in_threadgroup]]) {
+    const uint row0 = tgpig.y * 64u + (tiitg / 8u) * 4u;   // 16 row groups
+    const uint tok0 = tgpig.x * 32u + (tiitg % 8u) * 4u;   // 8 token groups
+    // Four columns per accumulator, so one vector fma retires four MACs and the
+    // loop issues 16 instructions per 64 MACs instead of 64.
+    float4 acc[4][4];
+#pragma clang loop unroll(full)
+    for (uint r = 0; r < 4u; ++r) {
+#pragma clang loop unroll(full)
+        for (uint t = 0; t < 4u; ++t) {
+            acc[r][t] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+    }
+    const uint groups = columns / 4u;
+    for (uint m = 0; m < groups; ++m) {
+        const uint block = m / 16u;
+        const uint byte_in_block = 2u + (m % 16u);
+        float d[4];
+        uchar c[4];
+#pragma clang loop unroll(full)
+        for (uint r = 0; r < 4u; ++r) {
+            device const uchar* head = w + (ulong)(row0 + r) * row_bytes + block * 18u;
+            d[r] = float(as_type<half>(ushort(head[0] | (ushort(head[1]) << 8))));
+            c[r] = head[byte_in_block];
+        }
+        float4 a[4];
+#pragma clang loop unroll(full)
+        for (uint t = 0; t < 4u; ++t) {
+            a[t] = *reinterpret_cast<device const float4*>(x + (ulong)(tok0 + t) * x_stride + m * 4u);
+        }
+#pragma clang loop unroll(full)
+        for (uint r = 0; r < 4u; ++r) {
+            const float4 weights = float4(float(int(c[r] & 3u) - 1) * d[r], float(int((c[r] >> 2u) & 3u) - 1) * d[r],
+                                          float(int((c[r] >> 4u) & 3u) - 1) * d[r],
+                                          float(int((c[r] >> 6u) & 3u) - 1) * d[r]);
+#pragma clang loop unroll(full)
+            for (uint t = 0; t < 4u; ++t) {
+                acc[r][t] = fma(weights, a[t], acc[r][t]);
+            }
+        }
+    }
+    for (uint r = 0; r < 4u; ++r) {
+        for (uint t = 0; t < 4u; ++t) {
+            const float total = (acc[r][t].x + acc[r][t].y) + (acc[r][t].z + acc[r][t].w);
+            out[(ulong)(tok0 + t) * out_stride + row0 + r] = scale * total;
+        }
+    }
+}
 )MSL";
 
 namespace {
@@ -276,6 +450,14 @@ int main() {
         std::fprintf(stderr, "compile failed: %s\n", [[error description] UTF8String]);
         return 1;
     }
+    id<MTLFunction> hot_function = [library newFunctionWithName:@"q2_0_mat_mat_f16_hot"];
+    id<MTLComputePipelineState> hot_pipeline = [device newComputePipelineStateWithFunction:hot_function error:&error];
+    id<MTLFunction> reg_function = [library newFunctionWithName:@"q2_0_mat_mul_reg"];
+    id<MTLComputePipelineState> reg_pipeline = [device newComputePipelineStateWithFunction:reg_function error:&error];
+    if (reg_pipeline == nil) {
+        std::fprintf(stderr, "reg pipeline failed: %s\n", [[error description] UTF8String]);
+        return 1;
+    }
     id<MTLFunction> static_function = [library newFunctionWithName:@"q2_0_mat_mat_f16_static"];
     id<MTLComputePipelineState> static_pipeline =
         [device newComputePipelineStateWithFunction:static_function error:&error];
@@ -293,7 +475,8 @@ int main() {
         {17408u, 5120u, 1u, "gate/up 17408x5120, 1 token"},
     };
     std::printf("isolated q2_0_mat_mat_f16 (one dispatch repeated)\n");
-    std::printf("%-34s %12s %12s %12s %12s\n", "shape", "1 submiss", "6 disp/sub", "1 disp/sub", "static tiles");
+    std::printf("%-34s %12s %12s %12s %12s %12s %12s\n", "shape", "1 submiss", "6 disp/sub", "1 disp/sub",
+                "static tiles", "reg fma", "64-row hot");
     for (const auto& shape : shapes) {
         const std::uint32_t row_bytes = shape.columns / 64u * 18u;
         const std::uint64_t weight_bytes = static_cast<std::uint64_t>(shape.rows) * row_bytes;
@@ -313,8 +496,10 @@ int main() {
         const double tflops_chain = elapsed_ms(queue, pipeline, wbuf, xbuf, obuf, shape, 6u, 1u);
         const double tflops_per_dispatch = elapsed_ms(queue, pipeline, wbuf, xbuf, obuf, shape, 1u, 6u);
         const double tflops_static = elapsed_ms(queue, static_pipeline, wbuf, xbuf, obuf, shape, 1u, 1u);
-        std::printf("%-34s %12.2f %12.2f %12.2f %12.2f\n", shape.name, tflops_isolated, tflops_chain,
-                    tflops_per_dispatch, tflops_static);
+        const double tflops_reg = elapsed_ms(queue, reg_pipeline, wbuf, xbuf, obuf, shape, 1u, 1u);
+        const double tflops_hot = elapsed_ms(queue, hot_pipeline, wbuf, xbuf, obuf, shape, 1u, 1u);
+        std::printf("%-34s %12.2f %12.2f %12.2f %12.2f %12.2f %12.2f\n", shape.name, tflops_isolated, tflops_chain,
+                    tflops_per_dispatch, tflops_static, tflops_reg, tflops_hot);
     }
     return 0;
 }
