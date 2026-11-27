@@ -385,6 +385,39 @@ kernel void q2_0_matvec_f32_multi(device const uchar* w        [[buffer(0)]],
     }
 }
 
+// Q8_0 quantisation of the batch's activations on the device: the same
+// nearest-int trick and the same half-rounded block scale as the host's
+// make_q8_0_blocks, so the codes are identical.
+inline int q8_nearest_int(float value) {
+    const float val = value + 12582912.0f;
+    return int(as_type<uint>(val) & 0x007FFFFFu) - 0x00400000;
+}
+
+kernel void q8_0_quantize_tokens(device const float* x       [[buffer(0)]],
+                                 device char* qs             [[buffer(1)]],
+                                 device float* d             [[buffer(2)]],
+                                 constant uint& blocks       [[buffer(3)]],
+                                 constant uint& tokens       [[buffer(4)]],
+                                 uint gid                    [[thread_position_in_grid]]) {
+    const uint token = gid / blocks;
+    const uint block = gid % blocks;
+    const ulong slot = (ulong)token * blocks + block;
+    device const float* xb = x + slot * 32u;
+    float amax = 0.0f;
+#pragma clang loop unroll(full)
+    for (uint j = 0; j < 32u; ++j) {
+        amax = max(amax, fabs(xb[j]));
+    }
+    const float scale = amax / 127.0f;
+    const float id = amax != 0.0f ? 127.0f / amax : 0.0f;
+    d[slot] = float(half(scale));
+    device char* out = qs + slot * 32u;
+#pragma clang loop unroll(full)
+    for (uint j = 0; j < 32u; ++j) {
+        out[j] = char(clamp(q8_nearest_int(xb[j] * id), -127, 127));
+    }
+}
+
 // Dequantise the Q8_0 activation to fp32 once per dispatch: q8_0_dequantize
 // runs before every fast matvec and turns the per-weight activation byte load
 // plus per-block scale multiply into a plain fma.
@@ -1444,6 +1477,7 @@ struct MetalState {
     id<MTLComputePipelineState> mat_mat_pipeline = nil;
     id<MTLComputePipelineState> mat_mat_f16_pipeline = nil;
     id<MTLComputePipelineState> dequant_pipeline = nil;
+    id<MTLComputePipelineState> q8_quantize_pipeline = nil;
     id<MTLComputePipelineState> swiglu_pipeline = nil;
     id<MTLBuffer> act_buffer = nil;
     id<MTLBuffer> act_q8_buffer = nil;
@@ -1568,6 +1602,7 @@ void initialise(MetalState& state) {
         state.ssm_scan_tiled_pipeline = pipeline_for("ssm_scan_tiled");
         state.ssm_gate_norm_pipeline = pipeline_for("ssm_gate_norm");
         state.dequant_pipeline = pipeline_for("q8_0_dequantize");
+        state.q8_quantize_pipeline = pipeline_for("q8_0_quantize_tokens");
         state.hadamard_multi_pipeline = pipeline_for("hadamard_quantize_multi");
         state.gate_norm_multi_pipeline = pipeline_for("ssm_gate_norm_multi");
         state.head_gates_pipeline = pipeline_for("ssm_head_gates");
@@ -2604,13 +2639,24 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
         b.act_q8 == nil || b.act_scales == nil || b.out == nil) {
         return false;
     }
-    auto* q8_destination = static_cast<std::uint8_t*>(b.q8.contents);
-    auto* scale_destination = static_cast<float*>(b.scales.contents);
-    for (std::size_t t = 0; t < count; ++t) {
-        const auto q80 = mnet::gguf::make_q8_0_blocks(entries[t].input, columns);
-        std::memcpy(q8_destination + t * columns, q80.qs.data(), static_cast<std::size_t>(columns));
-        std::memcpy(scale_destination + t * (columns / 32U), q80.d.data(),
-                    static_cast<std::size_t>(columns / 32U) * sizeof(float));
+    // Quantise the batch's activations on the device: upload the fp32 inputs and
+    // let one dispatch produce the codes, instead of 0.144 ms of host work per
+    // layer (log 152/166).
+    const bool device_q8 = s.q8_quantize_pipeline != nil;
+    if (device_q8) {
+        auto* staging = static_cast<float*>(b.wide.contents);
+        for (std::size_t t = 0; t < count; ++t) {
+            std::memcpy(staging + t * columns, entries[t].input, static_cast<std::size_t>(columns) * sizeof(float));
+        }
+    } else {
+        auto* q8_destination = static_cast<std::uint8_t*>(b.q8.contents);
+        auto* scale_destination = static_cast<float*>(b.scales.contents);
+        for (std::size_t t = 0; t < count; ++t) {
+            const auto q80 = mnet::gguf::make_q8_0_blocks(entries[t].input, columns);
+            std::memcpy(q8_destination + t * columns, q80.qs.data(), static_cast<std::size_t>(columns));
+            std::memcpy(scale_destination + t * (columns / 32U), q80.d.data(),
+                        static_cast<std::size_t>(columns / 32U) * sizeof(float));
+        }
     }
 
     const std::uint32_t block32 = block_size;
@@ -2625,6 +2671,18 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
 
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    if (device_q8) {
+        const std::uint32_t q8_blocks = static_cast<std::uint32_t>(columns / 32U);
+        const std::uint32_t q8_tokens = static_cast<std::uint32_t>(count);
+        [encoder setComputePipelineState:s.q8_quantize_pipeline];
+        [encoder setBuffer:b.wide offset:0 atIndex:0];
+        [encoder setBuffer:b.q8 offset:0 atIndex:1];
+        [encoder setBuffer:b.scales offset:0 atIndex:2];
+        [encoder setBytes:&q8_blocks length:sizeof(q8_blocks) atIndex:3];
+        [encoder setBytes:&q8_tokens length:sizeof(q8_tokens) atIndex:4];
+        [encoder dispatchThreads:MTLSizeMake((columns / 32U) * count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    }
     // Widen every token's activation once: the slabs are contiguous, so this is
     // a single dispatch over all tokens.
     [encoder setComputePipelineState:s.dequant_pipeline];
