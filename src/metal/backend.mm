@@ -3006,14 +3006,14 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
         b.act_scales == nil || b.out == nil) {
         return false;
     }
-    auto* q8_destination = static_cast<std::uint8_t*>(b.q8.contents);
-    auto* scale_destination = static_cast<float*>(b.scales.contents);
     auto* activation_destination = static_cast<float*>(b.activation.contents);
+    // The prepped inputs go up as fp32 and are quantised on the device, the same
+    // way the FFN block does it (log 167): b.grouped is free until the norm
+    // writes it, and count * hidden floats covers count * columns.
+    auto* staging = static_cast<float*>(b.grouped.contents);
     for (std::size_t t = 0; t < count; ++t) {
-        const auto q80 = mnet::gguf::make_q8_0_blocks(entries[t].input, job.columns);
-        std::memcpy(q8_destination + t * job.columns, q80.qs.data(), static_cast<std::size_t>(job.columns));
-        std::memcpy(scale_destination + t * (job.columns / 32U), q80.d.data(),
-                    static_cast<std::size_t>(job.columns / 32U) * sizeof(float));
+        std::memcpy(staging + t * job.columns, entries[t].input,
+                    static_cast<std::size_t>(job.columns) * sizeof(float));
         std::memcpy(activation_destination + t * job.columns, entries[t].raw_input,
                     static_cast<std::size_t>(job.columns) * sizeof(float));
     }
@@ -3044,6 +3044,18 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
 
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    if (s.q8_quantize_pipeline != nil) {
+        const std::uint32_t q8_blocks = static_cast<std::uint32_t>(job.columns / 32U);
+        const std::uint32_t q8_tokens = static_cast<std::uint32_t>(count);
+        [encoder setComputePipelineState:s.q8_quantize_pipeline];
+        [encoder setBuffer:b.grouped offset:0 atIndex:0];
+        [encoder setBuffer:b.q8 offset:0 atIndex:1];
+        [encoder setBuffer:b.scales offset:0 atIndex:2];
+        [encoder setBytes:&q8_blocks length:sizeof(q8_blocks) atIndex:3];
+        [encoder setBytes:&q8_tokens length:sizeof(q8_tokens) atIndex:4];
+        [encoder dispatchThreads:MTLSizeMake((job.columns / 32U) * count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    }
     // Widen every token's activation once, then run all qkv and all gate
     // matvecs.
     [encoder setComputePipelineState:s.dequant_pipeline];
@@ -3421,13 +3433,12 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
         return false;
     }
     auto* tables = static_cast<float*>(b.tables.contents);
-    auto* q8_destination = static_cast<std::uint8_t*>(b.q8.contents);
-    auto* scale_destination = static_cast<float*>(b.scales.contents);
+    // Same device quantisation as the FFN and SSM blocks; b.wide is free until
+    // the dequantise step writes it.
+    auto* staging = static_cast<float*>(b.wide.contents);
     for (std::size_t t = 0; t < count; ++t) {
-        const auto q80 = mnet::gguf::make_q8_0_blocks(entries[t].input, job.columns);
-        std::memcpy(q8_destination + t * job.columns, q80.qs.data(), static_cast<std::size_t>(job.columns));
-        std::memcpy(scale_destination + t * (job.columns / 32U), q80.d.data(),
-                    static_cast<std::size_t>(job.columns / 32U) * sizeof(float));
+        std::memcpy(staging + t * job.columns, entries[t].input,
+                    static_cast<std::size_t>(job.columns) * sizeof(float));
         std::memcpy(tables + t * 2U * half_rope, entries[t].rope_cos, half_rope * sizeof(float));
         std::memcpy(tables + t * 2U * half_rope + half_rope, entries[t].rope_sin, half_rope * sizeof(float));
     }
@@ -3453,6 +3464,18 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
 
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    if (s.q8_quantize_pipeline != nil) {
+        const std::uint32_t q8_blocks = static_cast<std::uint32_t>(job.columns / 32U);
+        const std::uint32_t q8_tokens = static_cast<std::uint32_t>(count);
+        [encoder setComputePipelineState:s.q8_quantize_pipeline];
+        [encoder setBuffer:b.wide offset:0 atIndex:0];
+        [encoder setBuffer:b.q8 offset:0 atIndex:1];
+        [encoder setBuffer:b.scales offset:0 atIndex:2];
+        [encoder setBytes:&q8_blocks length:sizeof(q8_blocks) atIndex:3];
+        [encoder setBytes:&q8_tokens length:sizeof(q8_tokens) atIndex:4];
+        [encoder dispatchThreads:MTLSizeMake((job.columns / 32U) * count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    }
     // Widen every token's activation once, then all q, all k and all v matvecs.
     [encoder setComputePipelineState:s.dequant_pipeline];
     [encoder setBuffer:b.q8 offset:0 atIndex:0];
