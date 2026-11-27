@@ -142,6 +142,103 @@ kernel void q2_0_mat_mat_f32(device const uchar* w        [[buffer(0)]],
         }
     }
 }
+kernel void q2_0_mat_mat_f16(device const uchar* w        [[buffer(0)]],
+                             device const float* x        [[buffer(1)]],
+                             device float* out            [[buffer(3)]],
+                             constant uint& row_bytes     [[buffer(4)]],
+                             constant uint& columns       [[buffer(5)]],
+                             constant float& scale        [[buffer(6)]],
+                             constant uint& rows          [[buffer(8)]],
+                             constant uint& tokens        [[buffer(9)]],
+                             constant uint& x_stride      [[buffer(10)]],
+                             constant uint& out_stride    [[buffer(11)]],
+                             uint3 tgpig                  [[threadgroup_position_in_grid]],
+                             uint tiitg                   [[thread_index_in_threadgroup]],
+                             uint sgitg                   [[simdgroup_index_in_threadgroup]]) {
+    constexpr uint NR0 = 64u;  // rows per threadgroup
+    constexpr uint NR1 = 32u;  // tokens per threadgroup
+    constexpr uint NK = 64u;   // columns per step, one Q2_0 block
+    threadgroup half sa[NR0 * NK];  // [row][k]
+    threadgroup half sb[NR1 * NK];  // [token][k]
+
+    const uint row0 = tgpig.y * NR0;
+    const uint tok0 = tgpig.x * NR1;
+    const uint row_count = min(NR0, rows - row0);
+    const uint tok_count = min(NR1, tokens - tok0);
+
+    simdgroup_float8x8 mc[8];
+    for (uint i = 0; i < 8u; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint k0 = 0; k0 < columns; k0 += NK) {
+        // Weights: two threads per row, eight code bytes each (32 codes).
+        {
+            const uint row = tiitg / 2u;
+            const uint part = tiitg % 2u;
+            const float d = row < row_count
+                                ? float(as_type<half>(ushort(w[(ulong)(row0 + row) * row_bytes + (k0 / 64u) * 18u] |
+                                                             (ushort(w[(ulong)(row0 + row) * row_bytes + (k0 / 64u) * 18u + 1u]) << 8))))
+                                : 0.0f;
+            device const uchar* q = w + (ulong)(row0 + row) * row_bytes + (k0 / 64u) * 18u + 2u + part * 8u;
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < 8u; ++i) {
+                const uchar byte = row < row_count ? q[i] : 0u;
+                sa[row * NK + part * 32u + i * 4u + 0u] = half(float(int(byte & 3u) - 1) * d);
+                sa[row * NK + part * 32u + i * 4u + 1u] = half(float(int((byte >> 2u) & 3u) - 1) * d);
+                sa[row * NK + part * 32u + i * 4u + 2u] = half(float(int((byte >> 4u) & 3u) - 1) * d);
+                sa[row * NK + part * 32u + i * 4u + 3u] = half(float(int((byte >> 6u) & 3u) - 1) * d);
+            }
+        }
+        // Activations: one tile of the batch, transposed to [token][k].
+        for (uint idx = tiitg; idx < NR1 * NK; idx += 128u) {
+            const uint tok = idx / NK;
+            const uint k = idx % NK;
+            sb[idx] = (tok < tok_count && k0 + k < columns) ? half(x[(ulong)(tok0 + tok) * x_stride + k0 + k]) : half(0.0f);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half* sa_q = sa + 32u * (sgitg & 1u) * NK;    // this simdgroup's 32 rows
+        threadgroup const half* sb_q = sb + 16u * (sgitg >> 1u) * NK;  // this simdgroup's 16 tokens
+#pragma clang loop unroll(full)
+        for (uint kk = 0; kk < NK / 8u; ++kk) {
+            simdgroup_half8x8 mb[2];
+            simdgroup_half8x8 ma[4];
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < 4u; ++i) {
+                // [row][k] -> [k][row], which is what A*B needs on the right.
+                simdgroup_load(ma[i], sa_q + i * 8u * NK + kk * 8u, NK, 0, true);
+            }
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < 2u; ++i) {
+                simdgroup_load(mb[i], sb_q + i * 8u * NK + kk * 8u, NK, 0, false);
+            }
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < 8u; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4u], ma[i % 4u], mc[i]);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // mc[i] holds [token][row] for tokens 8*(i/4).., rows 8*(i%4).. of this
+    // simdgroup's quadrant. Stage the tile, then write it out with `scale`.
+    threadgroup float tile[NR0 * NR1];  // 8 KB on top of the 12 KB of half tiles
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+#pragma clang loop unroll(full)
+    for (uint i = 0; i < 8u; ++i) {
+        simdgroup_store(mc[i], tile + (16u * (sgitg >> 1u) + 8u * (i / 4u)) * NR0 + 32u * (sgitg & 1u) + 8u * (i % 4u),
+                        NR0, 0, false);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint idx = tiitg; idx < NR0 * NR1; idx += 128u) {
+        const uint tok = idx / NR0;
+        const uint row = idx % NR0;
+        if (tok < tok_count && row < row_count) {
+            out[(ulong)(tok0 + tok) * out_stride + row0 + row] = tile[idx] * scale;
+        }
+    }
+}
 
 kernel void q2_0_matvec(device const uchar* w        [[buffer(0)]],
                         device const char* q8       [[buffer(1)]],
@@ -1024,6 +1121,7 @@ struct MetalState {
     id<MTLComputePipelineState> fast_f32_pipeline = nil;
     id<MTLComputePipelineState> fast_f32_multi_pipeline = nil;
     id<MTLComputePipelineState> mat_mat_pipeline = nil;
+    id<MTLComputePipelineState> mat_mat_f16_pipeline = nil;
     id<MTLComputePipelineState> dequant_pipeline = nil;
     id<MTLComputePipelineState> swiglu_pipeline = nil;
     id<MTLBuffer> act_buffer = nil;
@@ -1140,6 +1238,7 @@ void initialise(MetalState& state) {
         state.head_gates_pipeline = pipeline_for("ssm_head_gates");
         state.rms_norm_pipeline = pipeline_for("rms_norm_f32");
         state.mat_mat_pipeline = pipeline_for("q2_0_mat_mat_f32");
+        state.mat_mat_f16_pipeline = pipeline_for("q2_0_mat_mat_f16");
         state.residual_add_pipeline = pipeline_for("residual_add");
         if (state.attn_flash_pipeline == nil && std::getenv("MNET_METAL_DEBUG") != nullptr) {
             std::fprintf(stderr, "mnet: metal attention pipeline failed: %s\n", [[error description] UTF8String]);
@@ -2186,6 +2285,14 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
     const int mat_mat_mode = mat_mat != nullptr ? std::atoi(mat_mat) : 1;
     const bool tiled = mat_mat_mode > 0 && s.mat_mat_pipeline != nil && count >= 8U;
     const bool tiled_down = mat_mat_mode == 1 && tiled;
+    // Half tiles double the matrix-unit throughput; the weight tile is exact in
+    // fp16 (a 2-bit code times a half scale is representable), the activation
+    // tile is not, which is the accuracy cost this switch trades.
+    static const bool f16_tiles = [] {
+        const char* value = std::getenv("MNET_MAT_MAT_F16");
+        return value == nullptr || std::atoi(value) != 0;
+    }() && s.mat_mat_f16_pipeline != nil;
+    id<MTLComputePipelineState> tiled_pipeline = f16_tiles ? s.mat_mat_f16_pipeline : s.mat_mat_pipeline;
     if (tiled) {
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(first.gate.row_bytes);
         const std::uint32_t columns32 = static_cast<std::uint32_t>(columns);
@@ -2195,7 +2302,7 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
         const std::uint32_t out_stride32 = static_cast<std::uint32_t>(hidden);
         for (std::size_t pass = 0; pass < 2U; ++pass) {
             const float scale = pass == 0U ? first.gate.scale : first.up.scale;
-            [encoder setComputePipelineState:s.mat_mat_pipeline];
+            [encoder setComputePipelineState:tiled_pipeline];
             [encoder setBuffer:(pass == 0U ? gate_weights.buffer : up_weights.buffer)
                          offset:static_cast<NSUInteger>(pass == 0U ? gate_weights.offset : up_weights.offset)
                         atIndex:0];
@@ -2272,7 +2379,7 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
         const std::uint32_t tokens32 = static_cast<std::uint32_t>(count);
         const std::uint32_t x_stride32 = static_cast<std::uint32_t>(hidden);
         const std::uint32_t out_stride32 = static_cast<std::uint32_t>(columns);
-        [encoder setComputePipelineState:s.mat_mat_pipeline];
+        [encoder setComputePipelineState:tiled_pipeline];
         [encoder setBuffer:down_weights.buffer offset:static_cast<NSUInteger>(down_weights.offset) atIndex:0];
         [encoder setBuffer:b.wide offset:0 atIndex:1];
         [encoder setBuffer:b.out offset:0 atIndex:3];
