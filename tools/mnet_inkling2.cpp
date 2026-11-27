@@ -18,7 +18,7 @@
 #include <vector>
 
 #include <mnet/bpe.hpp>
-#include <mnet/detail/ggml_vec_exact.hpp>
+#include <mnet/detail/ggml_kernels.hpp>
 #include <mnet/gguf.hpp>
 
 namespace {
@@ -101,42 +101,7 @@ void clip_rows(std::vector<float>& values, const std::vector<float>& scale, std:
     }
 }
 
-#if defined(__AVX2__) && defined(__FMA__)
-// Verbatim ggml_v_expf: llama.cpp's softmax uses this 8-lane polynomial exp,
-// which differs from libm expf by about one ulp.
-[[nodiscard]] inline __m256 ggml_v_expf(__m256 x) {
-    const __m256 r = _mm256_set1_ps(0x1.8p23f);
-    const __m256 z = _mm256_fmadd_ps(x, _mm256_set1_ps(0x1.715476p+0f), r);
-    const __m256 n = _mm256_sub_ps(z, r);
-    const __m256 b =
-        _mm256_fnmadd_ps(n, _mm256_set1_ps(0x1.7f7d1cp-20f), _mm256_fnmadd_ps(n, _mm256_set1_ps(0x1.62e4p-1f), x));
-    const __m256i e = _mm256_slli_epi32(_mm256_castps_si256(z), 23);
-    const __m256 k = _mm256_castsi256_ps(_mm256_add_epi32(e, _mm256_castps_si256(_mm256_set1_ps(1))));
-    const __m256i c =
-        _mm256_castps_si256(_mm256_cmp_ps(_mm256_andnot_ps(_mm256_set1_ps(-0.F), n), _mm256_set1_ps(126), _CMP_GT_OQ));
-    const __m256 u = _mm256_mul_ps(b, b);
-    const __m256 j = _mm256_fmadd_ps(
-        _mm256_fmadd_ps(_mm256_fmadd_ps(_mm256_set1_ps(0x1.0e4020p-7f), b, _mm256_set1_ps(0x1.573e2ep-5f)), u,
-                        _mm256_fmadd_ps(_mm256_set1_ps(0x1.555e66p-3f), b, _mm256_set1_ps(0x1.fffdb6p-2f))),
-        u, _mm256_mul_ps(_mm256_set1_ps(0x1.ffffecp-1f), b));
-    if (!_mm256_movemask_ps(_mm256_castsi256_ps(c))) {
-        return _mm256_fmadd_ps(j, k, k);
-    }
-    const __m256i g = _mm256_and_si256(_mm256_castps_si256(_mm256_cmp_ps(n, _mm256_setzero_ps(), _CMP_LE_OQ)),
-                                       _mm256_set1_epi32(static_cast<int>(0x82000000U)));
-    const __m256 s1 = _mm256_castsi256_ps(_mm256_add_epi32(g, _mm256_set1_epi32(static_cast<int>(0x7f000000U))));
-    const __m256 s2 = _mm256_castsi256_ps(_mm256_sub_epi32(e, g));
-    const __m256i d =
-        _mm256_castps_si256(_mm256_cmp_ps(_mm256_andnot_ps(_mm256_set1_ps(-0.F), n), _mm256_set1_ps(192), _CMP_GT_OQ));
-    return _mm256_or_ps(
-        _mm256_and_ps(_mm256_castsi256_ps(d), _mm256_mul_ps(s1, s1)),
-        _mm256_andnot_ps(
-            _mm256_castsi256_ps(d),
-            _mm256_or_ps(_mm256_and_ps(_mm256_castsi256_ps(c), _mm256_mul_ps(_mm256_fmadd_ps(s2, j, s2), s1)),
-                         _mm256_andnot_ps(_mm256_castsi256_ps(c), _mm256_fmadd_ps(k, j, k)))));
-}
-#endif
-
+// ggml_v_expf and friends live in <mnet/detail/ggml_kernels.hpp>.
 // ggml_vec_dot_f32: 4 x 8-lane FMA accumulators, tree reduce, scalar tail.
 // ggml_ssm_conv rounds every product before adding it (no FMA contraction), unlike
 // a hand-written `sum += a*b`. Keep the product materialised so we round the same way.
@@ -145,66 +110,10 @@ void clip_rows(std::vector<float>& values, const std::vector<float>& scale, std:
     return product;
 }
 
-[[nodiscard]] float dot_f32(const float* x, const float* y, std::size_t size) {
-#if defined(__AVX2__) && defined(__FMA__)
-    const std::size_t aligned = size & ~static_cast<std::size_t>(31);
-    __m256 sums[4] = {_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps()};
-    for (std::size_t i = 0; i < aligned; i += 32) {
-        for (std::size_t j = 0; j < 4; ++j) {
-            sums[j] = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + j * 8), _mm256_loadu_ps(y + i + j * 8), sums[j]);
-        }
-    }
-    sums[0] = _mm256_add_ps(sums[0], sums[2]);
-    sums[1] = _mm256_add_ps(sums[1], sums[3]);
-    sums[0] = _mm256_add_ps(sums[0], sums[1]);
-    const __m128 t0 = _mm_add_ps(_mm256_castps256_ps128(sums[0]), _mm256_extractf128_ps(sums[0], 1));
-    const __m128 t1 = _mm_hadd_ps(t0, t0);
-    float total = _mm_cvtss_f32(_mm_hadd_ps(t1, t1));
-    std::size_t i = aligned;
-    const std::size_t tail = size - aligned;
-    const std::size_t rounded = tail - tail % 4;
-    for (std::size_t k = 0; k < rounded; ++k, ++i) {
-        total += rounded_product(x[i], y[i]);
-    }
-    for (; i < size; ++i) {
-        total = std::fma(x[i], y[i], total);
-    }
-    return total;
-#else
-    return mnet::detail::ggml_dot_f32(x, y, size);
-#endif
-}
+using mnet::detail::ggml::dot_f32;
 
 // ggml_vec_soft_max_f32: exp(x - max) with the vector exp, double sum.
-[[nodiscard]] double softmax_exp(const float* input, float* output, std::size_t size, float max) {
-    std::size_t i = 0;
-    double sum = 0.0;
-#if defined(__AVX2__) && defined(__FMA__)
-    for (; i + 7 < size; i += 8) {
-        const __m256 value = ggml_v_expf(_mm256_sub_ps(_mm256_loadu_ps(input + i), _mm256_set1_ps(max)));
-        _mm256_storeu_ps(output + i, value);
-        __m128 reduced = _mm_add_ps(_mm256_extractf128_ps(value, 1), _mm256_castps256_ps128(value));
-        reduced = _mm_add_ps(reduced, _mm_movehl_ps(reduced, reduced));
-        reduced = _mm_add_ss(reduced, _mm_movehdup_ps(reduced));
-        sum += static_cast<double>(_mm_cvtss_f32(reduced));
-    }
-#else
-    for (; i + 7 < size; i += 8) {
-        float lanes[8];
-        for (std::size_t j = 0; j < 8; ++j) {
-            lanes[j] = mnet::detail::ggml_expf(input[i + j] - max);
-            output[i + j] = lanes[j];
-        }
-        sum += static_cast<double>(mnet::detail::ggml_hsum8(lanes));
-    }
-#endif
-    for (; i < size; ++i) {
-        const float value = std::exp(input[i] - max);
-        output[i] = value;
-        sum += static_cast<double>(value);
-    }
-    return sum;
-}
+using mnet::detail::ggml::softmax_exp;
 
 // A mix with several queries is one batched matmul in the reference graph, which
 // takes the tinyBLAS path whenever the state count is a multiple of four: eight
@@ -391,39 +300,7 @@ struct SlotState {
 // (acc0+acc1)+(acc2+acc3) and reduces with the hsum order. The remaining <8
 // elements accumulate in double, which is also all that runs for a 1-2 token
 // value matmul.
-[[nodiscard]] float dot_f16_f32(const float* x, const float* y, std::size_t size) {
-#if defined(__AVX2__) && defined(__FMA__)
-    std::size_t i = 0;
-    __m256 acc0 = _mm256_setzero_ps();
-    __m256 acc1 = _mm256_setzero_ps();
-    __m256 acc2 = _mm256_setzero_ps();
-    __m256 acc3 = _mm256_setzero_ps();
-    for (; i + 32 <= size; i += 32) {
-        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i), _mm256_loadu_ps(y + i), acc0);
-        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + 8), _mm256_loadu_ps(y + i + 8), acc1);
-        acc2 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + 16), _mm256_loadu_ps(y + i + 16), acc2);
-        acc3 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + 24), _mm256_loadu_ps(y + i + 24), acc3);
-    }
-    for (; i + 8 <= size; i += 8) {
-        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i), _mm256_loadu_ps(y + i), acc0);
-    }
-    const __m256 acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
-    __m128 r = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
-    r = _mm_add_ps(r, _mm_movehl_ps(r, r));
-    r = _mm_add_ss(r, _mm_movehdup_ps(r));
-    double sumf = static_cast<double>(_mm_cvtss_f32(r));
-    for (; i < size; ++i) {
-        sumf += static_cast<double>(x[i] * y[i]);
-    }
-    return static_cast<float>(sumf);
-#else
-    double sumf = 0.0;
-    for (std::size_t i = 0; i < size; ++i) {
-        sumf += static_cast<double>(x[i] * y[i]);
-    }
-    return static_cast<float>(sumf);
-#endif
-}
+using mnet::detail::ggml::dot_f16_f32;
 
 [[nodiscard]] std::vector<float> conv_step(const std::vector<float>& raw, const std::vector<float>& weight,
                                            std::vector<float>& history, std::size_t channels, std::size_t n_conv,

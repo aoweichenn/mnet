@@ -141,6 +141,9 @@ inline void swiglu(float* out, const float* gate, const float* up, std::size_t s
 inline void rotate_block(const float* matrix, const float* input, float* output, std::uint32_t block_size) {
     const std::uint32_t aligned = block_size & ~31U;
     const std::uint32_t rounded = aligned;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
     for (std::int64_t row = 0; row < static_cast<std::int64_t>(block_size); ++row) {
         const float* weights = matrix + static_cast<std::size_t>(row) * block_size;
         float lanes[8];

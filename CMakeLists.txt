@@ -227,6 +227,17 @@ if(PROJECT_IS_TOP_LEVEL)
     target_link_libraries(mnet_inkling2_attn PRIVATE mnet::mnet)
     target_compile_options(mnet_inkling2_attn PRIVATE ${MNET_WARNINGS})
 
+    # The two exactness runners must produce the same bytes on every target.
+    # GCC/Clang default to -ffp-contract=fast, so on x86 the model code fuses
+    # a*b+c into FMA while arm64 and the scalar fallbacks do not; the 1 ulp
+    # difference then amplifies through MoE routing. The quantised kernels spell
+    # out their own fma where llama.cpp fuses, so keeping the model arithmetic
+    # unfused is enough to make AVX2, scalar and arm64 agree.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(mnet_bonsai PRIVATE -ffp-contract=off)
+        target_compile_options(mnet_inkling2 PRIVATE -ffp-contract=off)
+    endif()
+
     add_executable(mnet_tokenize tools/mnet_tokenize.cpp)
     target_link_libraries(mnet_tokenize PRIVATE mnet::mnet)
     target_compile_options(mnet_tokenize PRIVATE ${MNET_WARNINGS})

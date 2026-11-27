@@ -23,7 +23,7 @@
 #include <vector>
 
 #include <mnet/bpe.hpp>
-#include <mnet/detail/ggml_vec_exact.hpp>
+#include <mnet/detail/ggml_kernels.hpp>
 #include <mnet/gguf.hpp>
 
 namespace {
@@ -80,95 +80,11 @@ const std::vector<float>& rotation_matrix(std::uint32_t block_size) {
     return cache.emplace(block_size, std::move(matrix)).first->second;
 }
 
-// Exact replica of ggml_vec_dot_f32 for one activation block.
-void rotate_block(const float* matrix, const float* input, float* output, std::uint32_t block_size) {
-    const std::uint32_t aligned = block_size & ~31U;
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
-#endif
-    for (std::int64_t row = 0; row < static_cast<std::int64_t>(block_size); ++row) {
-        const float* weights = matrix + static_cast<std::size_t>(row) * block_size;
-#if defined(__AVX2__) && defined(__FMA__)
-        __m256 sums[4] = {_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps()};
-        for (std::uint32_t i = 0; i < aligned; i += 32) {
-            for (std::uint32_t j = 0; j < 4; ++j) {
-                sums[j] =
-                    _mm256_fmadd_ps(_mm256_loadu_ps(weights + i + j * 8), _mm256_loadu_ps(input + i + j * 8), sums[j]);
-            }
-        }
-        sums[0] = _mm256_add_ps(sums[0], sums[2]);
-        sums[1] = _mm256_add_ps(sums[1], sums[3]);
-        sums[0] = _mm256_add_ps(sums[0], sums[1]);
-        const __m128 t0 = _mm_add_ps(_mm256_castps256_ps128(sums[0]), _mm256_extractf128_ps(sums[0], 1));
-        const __m128 t1 = _mm_hadd_ps(t0, t0);
-        float total = _mm_cvtss_f32(_mm_hadd_ps(t1, t1));
-#else
-        float total = mnet::detail::ggml_dot_f32_row(weights, input, block_size);
-#endif
-        for (std::uint32_t i = aligned; i < block_size; ++i) {
-            total += weights[i] * input[i];
-        }
-        output[row] = total;
-    }
-}
-
-// ggml_vec_dot_f32: four 8-lane FMA accumulators, tree reduce, scalar tail.
-[[nodiscard]] float dot_f32(const float* x, const float* y, std::size_t size) {
-#if defined(__AVX2__) && defined(__FMA__)
-    const std::size_t aligned = size & ~static_cast<std::size_t>(31);
-    __m256 sums[4] = {_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps()};
-    for (std::size_t i = 0; i < aligned; i += 32) {
-        for (std::size_t j = 0; j < 4; ++j) {
-            sums[j] = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + j * 8), _mm256_loadu_ps(y + i + j * 8), sums[j]);
-        }
-    }
-    sums[0] = _mm256_add_ps(sums[0], sums[2]);
-    sums[1] = _mm256_add_ps(sums[1], sums[3]);
-    sums[0] = _mm256_add_ps(sums[0], sums[1]);
-    const __m128 t0 = _mm_add_ps(_mm256_castps256_ps128(sums[0]), _mm256_extractf128_ps(sums[0], 1));
-    const __m128 t1 = _mm_hadd_ps(t0, t0);
-    float total = _mm_cvtss_f32(_mm_hadd_ps(t1, t1));
-    for (std::size_t i = aligned; i < size; ++i) {
-        total += x[i] * y[i];
-    }
-    return total;
-#else
-    return mnet::detail::ggml_dot_f32(x, y, size);
-#endif
-}
-
-// ggml_vec_dot_f16_f32: f16 widened to f32 (exact), four 8-lane FMA accumulators
-// paired as (a0+a1)+(a2+a3), hsum-style reduce, double tail. llama's attention
-// dots the f16 KV cache against the f32 query with this kernel.
-[[nodiscard]] float dot_f16_f32(const float* x, const float* y, std::size_t size) {
-#if defined(__AVX2__) && defined(__FMA__)
-    std::size_t i = 0;
-    __m256 acc0 = _mm256_setzero_ps();
-    __m256 acc1 = _mm256_setzero_ps();
-    __m256 acc2 = _mm256_setzero_ps();
-    __m256 acc3 = _mm256_setzero_ps();
-    for (; i + 32 <= size; i += 32) {
-        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i), _mm256_loadu_ps(y + i), acc0);
-        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + 8), _mm256_loadu_ps(y + i + 8), acc1);
-        acc2 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + 16), _mm256_loadu_ps(y + i + 16), acc2);
-        acc3 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + 24), _mm256_loadu_ps(y + i + 24), acc3);
-    }
-    for (; i + 8 <= size; i += 8) {
-        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i), _mm256_loadu_ps(y + i), acc0);
-    }
-    const __m256 acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
-    __m128 r = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
-    r = _mm_add_ps(r, _mm_movehl_ps(r, r));
-    r = _mm_add_ss(r, _mm_movehdup_ps(r));
-    double total = static_cast<double>(_mm_cvtss_f32(r));
-    for (; i < size; ++i) {
-        total += static_cast<double>(x[i] * y[i]);
-    }
-    return static_cast<float>(total);
-#else
-    return mnet::detail::ggml_dot_f16_f32(x, y, size);
-#endif
-}
+// All float kernels live in <mnet/detail/ggml_kernels.hpp>; the model code
+// below has no target branches of its own.
+using mnet::detail::ggml::dot_f16_f32;
+using mnet::detail::ggml::dot_f32;
+using mnet::detail::ggml::rotate_block;
 
 // ggml_ssm_conv rounds every product before adding it (no FMA contraction),
 // so keep the product materialised. Only matters once the conv window holds
@@ -264,9 +180,6 @@ void linear_f32(const std::vector<float>& w, std::size_t out_dim, std::size_t in
     }
 }
 
-[[nodiscard]] float silu(float value) {
-    return value / (1.0F + std::exp(-value));
-}
 [[nodiscard]] float sigmoid(float value) {
     return 1.0F / (1.0F + std::exp(-value));
 }
@@ -274,86 +187,8 @@ void linear_f32(const std::vector<float>& w, std::size_t out_dim, std::size_t in
     return value > 20.0F ? value : std::log1p(std::exp(value));
 }
 
-#if defined(__AVX2__) && defined(__FMA__)
-// llama.cpp evaluates SiLU/SwiGLU over 8-lane vectors with its polynomial exp
-// (ggml_v_expf, ~1 ulp) instead of libm expf, so the vector path rounds
-// differently from the scalar reference. Copy it verbatim to stay bit-exact.
-[[nodiscard]] inline __m256 ggml_v_expf(__m256 x) {
-    const __m256 r = _mm256_set1_ps(0x1.8p23f);
-    const __m256 z = _mm256_fmadd_ps(x, _mm256_set1_ps(0x1.715476p+0f), r);
-    const __m256 n = _mm256_sub_ps(z, r);
-    const __m256 b =
-        _mm256_fnmadd_ps(n, _mm256_set1_ps(0x1.7f7d1cp-20f), _mm256_fnmadd_ps(n, _mm256_set1_ps(0x1.62e4p-1f), x));
-    const __m256i e = _mm256_slli_epi32(_mm256_castps_si256(z), 23);
-    const __m256 k = _mm256_castsi256_ps(_mm256_add_epi32(e, _mm256_castps_si256(_mm256_set1_ps(1))));
-    const __m256i c =
-        _mm256_castps_si256(_mm256_cmp_ps(_mm256_andnot_ps(_mm256_set1_ps(-0.F), n), _mm256_set1_ps(126), _CMP_GT_OQ));
-    const __m256 u = _mm256_mul_ps(b, b);
-    const __m256 j = _mm256_fmadd_ps(
-        _mm256_fmadd_ps(_mm256_fmadd_ps(_mm256_set1_ps(0x1.0e4020p-7f), b, _mm256_set1_ps(0x1.573e2ep-5f)), u,
-                        _mm256_fmadd_ps(_mm256_set1_ps(0x1.555e66p-3f), b, _mm256_set1_ps(0x1.fffdb6p-2f))),
-        u, _mm256_mul_ps(_mm256_set1_ps(0x1.ffffecp-1f), b));
-    if (!_mm256_movemask_ps(_mm256_castsi256_ps(c))) {
-        return _mm256_fmadd_ps(j, k, k);
-    }
-    const __m256i g = _mm256_and_si256(_mm256_castps_si256(_mm256_cmp_ps(n, _mm256_setzero_ps(), _CMP_LE_OQ)),
-                                       _mm256_set1_epi32(static_cast<int>(0x82000000U)));
-    const __m256 s1 = _mm256_castsi256_ps(_mm256_add_epi32(g, _mm256_set1_epi32(static_cast<int>(0x7f000000U))));
-    const __m256 s2 = _mm256_castsi256_ps(_mm256_sub_epi32(e, g));
-    const __m256i d =
-        _mm256_castps_si256(_mm256_cmp_ps(_mm256_andnot_ps(_mm256_set1_ps(-0.F), n), _mm256_set1_ps(192), _CMP_GT_OQ));
-    return _mm256_or_ps(
-        _mm256_and_ps(_mm256_castsi256_ps(d), _mm256_mul_ps(s1, s1)),
-        _mm256_andnot_ps(
-            _mm256_castsi256_ps(d),
-            _mm256_or_ps(_mm256_and_ps(_mm256_castsi256_ps(c), _mm256_mul_ps(_mm256_fmadd_ps(s2, j, s2), s1)),
-                         _mm256_andnot_ps(_mm256_castsi256_ps(c), _mm256_fmadd_ps(k, j, k)))));
-}
-
-[[nodiscard]] inline __m256 ggml_v_silu(__m256 x) {
-    const __m256 one = _mm256_set1_ps(1.0F);
-    const __m256 neg_x = _mm256_sub_ps(_mm256_setzero_ps(), x);
-    return _mm256_div_ps(x, _mm256_add_ps(one, ggml_v_expf(neg_x)));
-}
-#endif
-
-// ggml_vec_silu_f32: 8-wide vector body, scalar libm tail.
-void silu_inplace(float* data, std::size_t size) {
-    std::size_t i = 0;
-#if defined(__AVX2__) && defined(__FMA__)
-    for (; i + 7 < size; i += 8) {
-        _mm256_storeu_ps(data + i, ggml_v_silu(_mm256_loadu_ps(data + i)));
-    }
-#else
-    for (; i + 7 < size; i += 8) {
-        for (std::size_t j = 0; j < 8; ++j) {
-            data[i + j] = mnet::detail::ggml_silu(data[i + j]);
-        }
-    }
-#endif
-    for (; i < size; ++i) {
-        data[i] = silu(data[i]);
-    }
-}
-
-// ggml_vec_swiglu_f32: silu(x) * g.
-void swiglu(float* out, const float* gate, const float* up, std::size_t size) {
-    std::size_t i = 0;
-#if defined(__AVX2__) && defined(__FMA__)
-    for (; i + 7 < size; i += 8) {
-        _mm256_storeu_ps(out + i, _mm256_mul_ps(ggml_v_silu(_mm256_loadu_ps(gate + i)), _mm256_loadu_ps(up + i)));
-    }
-#else
-    for (; i + 7 < size; i += 8) {
-        for (std::size_t j = 0; j < 8; ++j) {
-            out[i + j] = mnet::detail::ggml_silu(gate[i + j]) * up[i + j];
-        }
-    }
-#endif
-    for (; i < size; ++i) {
-        out[i] = silu(gate[i]) * up[i];
-    }
-}
+using mnet::detail::ggml::silu_inplace;
+using mnet::detail::ggml::swiglu;
 
 void rope_neox(float* head, std::size_t head_dim, std::size_t position, float base) {
     const float theta_scale = std::pow(base, -2.0F / static_cast<float>(kRopeDims));
