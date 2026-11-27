@@ -141,6 +141,37 @@ void hadamard_forward(std::vector<float>& values, const std::vector<std::int32_t
     hadamard_raw(values, block_size);
 }
 
+// Same arithmetic as rms_norm, writing into a caller-owned buffer: the batch
+// paths call this tens of thousands of times per forward, and a fresh 20 KB
+// vector per call is host work the GPU waits through (log 177).
+void rms_norm_into(const float* input, std::size_t size, const std::vector<float>& weight, float eps, float* output) {
+    // The reference path accumulates the sum of squares in double, which is what
+    // makes it bit-identical to the CPU logits. The fast path does not need that:
+    // a float accumulator halves the host time of the per-layer prep, which the
+    // GPU sits idle through (log 177).
+    float mean = 0.0F;
+    if (mnet::detail::compute::fast_path_enabled()) {
+        for (std::size_t i = 0; i < size; ++i) {
+            mean += input[i] * input[i];
+        }
+        mean = mean / static_cast<float>(size) + eps;
+        const float fast_scale = 1.0F / std::sqrt(mean);
+        for (std::size_t i = 0; i < size; ++i) {
+            output[i] = input[i] * fast_scale * weight[i];
+        }
+        return;
+    }
+    double squares = 0.0;
+    for (std::size_t i = 0; i < size; ++i) {
+        squares += static_cast<double>(input[i] * input[i]);
+    }
+    const auto mean_f64 = static_cast<float>(squares / static_cast<double>(size));
+    const float scale = 1.0F / std::sqrt(mean_f64 + eps);
+    for (std::size_t i = 0; i < size; ++i) {
+        output[i] = input[i] * scale * weight[i];
+    }
+}
+
 [[nodiscard]] std::vector<float> rms_norm(const float* input, std::size_t size, const std::vector<float>& weight,
                                           float eps) {
     // llama.cpp: ggml_float (double) accumulator of float squares, then float mean/scale.
@@ -298,6 +329,16 @@ void add_time(const char* name, double seconds) {
 class Model {
 public:
     Model(std::string path) : reader_(std::move(path)) { this->load_config(); }
+
+    // Layer-sized buffers, reused for every layer: a fresh zero-initialised
+    // 655 KB vector per layer per buffer was ~5 buffers x 64 layers of host work
+    // per forward, which the GPU sat idle through between submissions.
+    [[nodiscard]] std::vector<float>& buffer_for(std::vector<float>& buffer, std::size_t size) {
+        if (buffer.size() != size) {
+            buffer.resize(size);
+        }
+        return buffer;
+    }
 
     [[nodiscard]] const Config& config() const { return this->config_; }
 
@@ -554,11 +595,12 @@ private:
     void recurrent_layer_batch(std::vector<float>& hidden, std::size_t tokens, std::size_t layer,
                                const LayerWeights& w, LayerState& state, const std::string* dump_dir) {
         const std::size_t n_embd = this->config_.n_embd;
-        std::vector<float> xn(tokens * n_embd);
-        std::vector<float> xh(tokens * n_embd);
-        std::vector<float> projected(tokens * n_embd);
+        std::vector<float>& xn = this->buffer_for(this->scratch_.xn, tokens * n_embd);
+        std::vector<float>& xh = this->buffer_for(this->scratch_.xh, tokens * n_embd);
+        std::vector<float>& projected = this->buffer_for(this->scratch_.projected, tokens * n_embd);
+        std::vector<float>& normed = this->buffer_for(this->scratch_.normed, n_embd);
         for (std::size_t t = 0; t < tokens; ++t) {
-            auto normed = rms_norm(hidden.data() + t * n_embd, n_embd, w.attn_norm, this->config_.eps);
+            rms_norm_into(hidden.data() + t * n_embd, n_embd, w.attn_norm, this->config_.eps, normed.data());
             if (dump_dir != nullptr) {
                 this->dump_tensor(*dump_dir, "attn_norm", layer, normed, t);
             }
@@ -617,10 +659,11 @@ private:
                                const LayerWeights& w, LayerState& state, const std::vector<std::int32_t>& positions,
                                const std::string* dump_dir) {
         const std::size_t n_embd = this->config_.n_embd;
-        std::vector<float> xh(tokens * n_embd);
-        std::vector<float> projected(tokens * n_embd);
+        std::vector<float>& xh = this->buffer_for(this->scratch_.xh, tokens * n_embd);
+        std::vector<float>& projected = this->buffer_for(this->scratch_.projected, tokens * n_embd);
+        std::vector<float>& normed = this->buffer_for(this->scratch_.normed, n_embd);
         for (std::size_t t = 0; t < tokens; ++t) {
-            auto normed = rms_norm(hidden.data() + t * n_embd, n_embd, w.attn_norm, this->config_.eps);
+            rms_norm_into(hidden.data() + t * n_embd, n_embd, w.attn_norm, this->config_.eps, normed.data());
             if (dump_dir != nullptr) {
                 this->dump_tensor(*dump_dir, "attn_norm", layer, normed, t);
             }
@@ -628,8 +671,8 @@ private:
             std::copy(normed.begin(), normed.end(), xh.begin() + static_cast<std::ptrdiff_t>(t * n_embd));
         }
         // Per-token rotation tables.
-        std::vector<float> cosines(tokens * (kRopeDims / 2));
-        std::vector<float> sines(tokens * (kRopeDims / 2));
+        std::vector<float>& cosines = this->buffer_for(this->scratch_.cosines, tokens * (kRopeDims / 2));
+        std::vector<float>& sines = this->buffer_for(this->scratch_.sines, tokens * (kRopeDims / 2));
         for (std::size_t t = 0; t < tokens; ++t) {
             std::vector<float> cos_t;
             std::vector<float> sin_t;
@@ -694,29 +737,29 @@ private:
         const auto t_tail = std::chrono::steady_clock::now();
         const auto t_cpu = std::chrono::steady_clock::now();
         const std::size_t n_embd = this->config_.n_embd;
-        std::vector<float> ph(tokens * n_embd);
+        std::vector<float>& ph = this->buffer_for(this->scratch_.ph, tokens * n_embd);
+        std::vector<float>& pn = this->buffer_for(this->scratch_.normed, n_embd);
         static const bool gpu_norm = std::getenv("MNET_GPU_NORM") != nullptr;
-        for (std::size_t t = 0; t < tokens; ++t) {
+        // MNET_TAIL_SKIP=1 drops the host prep and residual adds for timing
+        // (results are garbage): it separates host compute from submission
+        // latency inside the inter-block idle.
+        static const bool tail_skip = std::getenv("MNET_TAIL_SKIP") != nullptr;
+        for (std::size_t t = 0; !tail_skip && t < tokens; ++t) {
             const float* residual = hidden.data() + t * n_embd;
-            auto pn = rms_norm(residual, n_embd, w.post_norm, this->config_.eps);
+            rms_norm_into(residual, n_embd, w.post_norm, this->config_.eps, pn.data());
             if (gpu_norm) {
-                std::vector<float> device_normed(n_embd);
-                if (mnet::detail::compute::rms_norm_f32(residual, w.post_norm.data(), n_embd, this->config_.eps,
-                                                        device_normed.data())) {
-                    pn = std::move(device_normed);
-                }
+                (void)mnet::detail::compute::rms_norm_f32(residual, w.post_norm.data(), n_embd, this->config_.eps,
+                                                          pn.data());
             }
             if (dump_dir != nullptr) {
                 this->dump_tensor(*dump_dir, "attn_post_norm", layer, pn, t);
             }
+            hadamard_forward(pn, this->signs_embd_, this->config_.hadamard_block);
             std::copy(pn.begin(), pn.end(), ph.begin() + static_cast<std::ptrdiff_t>(t * n_embd));
-            auto view = pn;
-            hadamard_forward(view, this->signs_embd_, this->config_.hadamard_block);
-            std::copy(view.begin(), view.end(), ph.begin() + static_cast<std::ptrdiff_t>(t * n_embd));
         }
         add_time("tail_cpu", since(t_cpu));
 
-        std::vector<float> down(tokens * n_embd);
+        std::vector<float>& down = this->buffer_for(this->scratch_.down, tokens * n_embd);
         bool fused = false;
         static const bool batched = std::getenv("MNET_NO_BATCHED_FFN") == nullptr;
         if (batched && mnet::detail::compute::fast_path_enabled() && mnet::detail::compute::fused_ffn_enabled()) {
@@ -754,7 +797,7 @@ private:
                 Reader::matvec(w.ffn_down, act.data(), output);
             }
         }
-        for (std::size_t t = 0; t < tokens; ++t) {
+        for (std::size_t t = 0; !tail_skip && t < tokens; ++t) {
             float* x = hidden.data() + t * n_embd;
             const float* branch = down.data() + t * n_embd;
             for (std::size_t i = 0; i < n_embd; ++i) {
@@ -1139,6 +1182,18 @@ private:
     std::vector<std::int32_t> signs_hidden_;
     std::vector<std::int32_t> signs_attn_;
     std::vector<std::int32_t> signs_ssm_;
+    // Reused across layers by the batch paths (see buffer_for).
+    struct LayerScratch {
+        std::vector<float> xn;
+        std::vector<float> xh;
+        std::vector<float> projected;
+        std::vector<float> ph;
+        std::vector<float> down;
+        std::vector<float> normed;
+        std::vector<float> cosines;
+        std::vector<float> sines;
+    };
+    LayerScratch scratch_;
     std::vector<LayerState> state_;
     std::vector<float> output_norm_;
     Reader::Quantized output_;

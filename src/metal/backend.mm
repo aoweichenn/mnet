@@ -1811,12 +1811,30 @@ struct FfnBatchBuffers {
     std::size_t out_capacity = 0;
 };
 
+// MNET_READBACK_SKIP drops the device->host copies of each block's output for
+// timing (results are garbage): it prices the transfer part of the inter-block
+// idle, which the device-resident residual stream would remove.
+bool readback_skip_enabled() {
+    static const bool skip = std::getenv("MNET_READBACK_SKIP") != nullptr;
+    return skip;
+}
+
 // True GPU time per fused block, straight from the command buffer's own
 // timestamps. The wall-clock counters below charge a block for waiting on the
 // block before it, which is why their totals exceed the forward; these do not.
 struct GpuBlockProfile {
     std::uint64_t ns[3] = {0, 0, 0};
     std::uint64_t calls[3] = {0, 0, 0};
+    // First GPU start and last GPU end over the run: the span these blocks
+    // occupy. Span minus busy is the time the GPU spent idle between them, which
+    // is what a layer-resident submission removes.
+    double first_start = 0.0;
+    double last_end = 0.0;
+    // Gaps between consecutive submissions inside a forward. Anything above a
+    // couple of milliseconds is a boundary between forwards (cold page-in, the
+    // session reset), not inter-block idle, so it is excluded.
+    std::uint64_t idle_ns = 0;
+    std::uint64_t idle_gaps = 0;
     ~GpuBlockProfile() {
         if (std::getenv("MNET_PROFILE") == nullptr || (this->calls[0] + this->calls[1] + this->calls[2]) == 0U) {
             return;
@@ -1831,6 +1849,14 @@ struct GpuBlockProfile {
                          static_cast<double>(this->ns[i]) * 1.0e-6 / static_cast<double>(this->calls[i]),
                          static_cast<unsigned long long>(this->calls[i]));
         }
+        const double busy_ms = static_cast<double>(this->ns[0] + this->ns[1] + this->ns[2]) * 1.0e-6;
+        const double idle_ms = static_cast<double>(this->idle_ns) * 1.0e-6;
+        std::fprintf(stderr,
+                     "mnet: gpu inter-block idle %.2f ms total over %llu gaps (%.3f ms per gap, %.1f per forward)\n",
+                     idle_ms, static_cast<unsigned long long>(this->idle_gaps),
+                     idle_ms / static_cast<double>(this->idle_gaps),
+                     idle_ms / static_cast<double>(this->idle_gaps / 3U));
+        (void)busy_ms;
     }
 };
 
@@ -1846,6 +1872,19 @@ void record_gpu_block(int block, id<MTLCommandBuffer> command) {
     GpuBlockProfile& profile = gpu_block_profile();
     profile.ns[block] += static_cast<std::uint64_t>((command.GPUEndTime - command.GPUStartTime) * 1.0e9);
     profile.calls[block] += 1U;
+    if (profile.last_end > 0.0) {
+        const double gap = command.GPUStartTime - profile.last_end;
+        if (gap > 0.0 && gap < 2.0e-3) {
+            profile.idle_ns += static_cast<std::uint64_t>(gap * 1.0e9);
+            profile.idle_gaps += 1U;
+        }
+    }
+    if (profile.first_start <= 0.0 || command.GPUStartTime < profile.first_start) {
+        profile.first_start = command.GPUStartTime;
+    }
+    if (command.GPUEndTime > profile.last_end) {
+        profile.last_end = command.GPUEndTime;
+    }
 }
 
 // Split of the batched gated-delta call: host preparation (q8 conversion of the
@@ -3452,9 +3491,12 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
     if (command.status != MTLCommandBufferStatusCompleted) {
         return false;
     }
-    const auto* results = static_cast<const float*>(b.out.contents);
-    for (std::size_t t = 0; t < count; ++t) {
-        std::memcpy(entries[t].output, results + t * columns, static_cast<std::size_t>(columns) * sizeof(float));
+    if (!readback_skip_enabled()) {
+        const auto* results = static_cast<const float*>(b.out.contents);
+        for (std::size_t t = 0; t < count; ++t) {
+            std::memcpy(entries[t].output, results + t * columns,
+                        static_cast<std::size_t>(columns) * sizeof(float));
+        }
     }
     if (const char* dir = std::getenv("MNET_BATCH_DUMP"); dir != nullptr) {
         static int calls = 0;
@@ -3952,9 +3994,12 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     if (command.status != MTLCommandBufferStatusCompleted) {
         return false;
     }
-    const auto* results = static_cast<const float*>(b.out.contents);
-    for (std::size_t t = 0; t < count; ++t) {
-        std::memcpy(entries[t].output, results + t * job.columns, static_cast<std::size_t>(job.columns) * sizeof(float));
+    if (!readback_skip_enabled()) {
+        const auto* results = static_cast<const float*>(b.out.contents);
+        for (std::size_t t = 0; t < count; ++t) {
+            std::memcpy(entries[t].output, results + t * job.columns,
+                        static_cast<std::size_t>(job.columns) * sizeof(float));
+        }
     }
     {
         SsmBatchProfile& profile = ssm_batch_profile();
@@ -4340,10 +4385,12 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
     if (command.status != MTLCommandBufferStatusCompleted) {
         return false;
     }
-    const auto* results = static_cast<const float*>(b.out.contents);
-    for (std::size_t t = 0; t < count; ++t) {
-        std::memcpy(entries[t].output, results + t * job.columns,
-                    static_cast<std::size_t>(job.columns) * sizeof(float));
+    if (!readback_skip_enabled()) {
+        const auto* results = static_cast<const float*>(b.out.contents);
+        for (std::size_t t = 0; t < count; ++t) {
+            std::memcpy(entries[t].output, results + t * job.columns,
+                        static_cast<std::size_t>(job.columns) * sizeof(float));
+        }
     }
     const std::uint64_t new_bytes = static_cast<std::uint64_t>(count) * kv_head_elems * sizeof(float);
     std::memcpy(job.k_cache + static_cast<std::ptrdiff_t>(job.cache_tokens) * kv_head_elems, kv_bytes + cached_bytes,
