@@ -465,8 +465,7 @@ private:
         hadamard_forward(ph, signs_embd, this->config_.hadamard_block);
         std::vector<float> gate(w.ffn_gate.rows);
         std::vector<float> up(w.ffn_up.rows);
-        Reader::matvec(w.ffn_gate, ph.data(), gate.data());
-        Reader::matvec(w.ffn_up, ph.data(), up.data());
+        Reader::matvec_batch({{&w.ffn_gate, gate.data()}, {&w.ffn_up, up.data()}}, ph.data());
         std::vector<float> act(w.ffn_gate.rows);
         swiglu(act.data(), gate.data(), up.data(), act.size());
         if (dump_dir != nullptr) {
@@ -633,9 +632,9 @@ private:
         hadamard_forward(xh, signs_embd, this->config_.hadamard_block);
 
         std::vector<float> qfull(w.q.rows);
-        Reader::matvec(w.q, xh.data(), qfull.data());
         std::vector<float> k(w.k.rows);
         std::vector<float> v(w.v.rows);
+        Reader::matvec(w.q, xh.data(), qfull.data());
         Reader::matvec(w.k, xh.data(), k.data());
         Reader::matvec(w.v, xh.data(), v.data());
         if (dump_dir != nullptr) {

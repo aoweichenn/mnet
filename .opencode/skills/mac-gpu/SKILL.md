@@ -60,6 +60,25 @@ Q2_0 GEMV: 5.8 GB/s effective on the CPU today).
 Quirk: this llama-bench build prints `ngl 10` in every row even with
 `-ngl 0`; distinguish CPU from GPU by the timings and the `-dev` column.
 
+## mnet Metal backend (first pilot)
+
+- `mnet_enable_metal=OFF` by default; on Apple hosts configure with
+  `-Dmnet_enable_metal=ON` and `DEVELOPER_DIR=/Library/Developer/CommandLineTools`
+  (the Xcode shim otherwise trips the unaccepted-license error; CLT clang++
+  works directly).
+- Layering: `include/mnet/detail/compute.hpp` (contract) +
+  `src/compute/backend.cpp` (CPU loop + registry) +
+  `src/metal/backend.mm` (provider). Model code calls
+  `compute::matvec_q8_0(...)` and never mentions Metal.
+- The Q2_0 kernel mirrors the CPU accumulation order, so results are
+  bit-identical; Bonsai dumps matched 2371/2371.
+- `MNET_METAL_DEBUG=1` prints whether the backend initialised.
+- Measured Bonsai 27B Q2_0 (7.6 GB): CPU 5.24 s/token, Metal 0.25 s/token
+  (4.0 t/s) = 21x. Weight upload is one-time; each matvec is one dispatch +
+  wait.
+- Build dirs: `build-metal` (Metal ON), `build-cpu` (CPU reference) in
+  `~/mnet_p4/mnet`. Dumps: `~/mnet_p4/{bonsai_cpu,bonsai_gpu}`.
+
 ## Metal without Xcode
 
 `xcrun -f metal` is missing (CLT only). Compile MSL at runtime with

@@ -1,12 +1,17 @@
 // Copyright 2026 mcnn authors
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <mnet/detail/compute.hpp>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <vector>
 
+#include <mnet/detail/compute.hpp>
+#include <mnet/detail/txn_log.hpp>
 #include <mnet/gguf/format.hpp>
 #include <mnet/gguf/kernels.hpp>
 
@@ -18,23 +23,53 @@ std::atomic<MatvecQ8_0Fn>& backend_slot() {
     return slot;
 }
 
+std::atomic<MatvecQ8_0BatchFn>& batch_slot() {
+    static std::atomic<MatvecQ8_0BatchFn> slot{nullptr};
+    return slot;
+}
+
+struct Stats {
+    std::atomic<std::uint64_t> backend_ns{0};
+    std::atomic<std::uint64_t> cpu_ns{0};
+    std::atomic<std::uint64_t> backend_calls{0};
+    std::atomic<std::uint64_t> cpu_calls{0};
+
+    ~Stats() {
+        if (std::getenv("MNET_COMPUTE_STATS") == nullptr) {
+            return;
+        }
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "mnet: compute backend %" PRIu64 " calls %.3f s, cpu %" PRIu64 " calls %.3f s\n",
+                      this->backend_calls.load(), static_cast<double>(this->backend_ns.load()) * 1.0e-9,
+                      this->cpu_calls.load(), static_cast<double>(this->cpu_ns.load()) * 1.0e-9);
+        mnet::detail::write_diagnostic(std::string(line));
+    }
+};
+
+Stats& stats() {
+    static Stats instance;
+    return instance;
+}
+
 }  // namespace
 
 #if !defined(MNET_METAL)
 void register_platform_backends() {}
 #endif
 
-void set_matvec_q8_0_backend(MatvecQ8_0Fn backend) { backend_slot().store(backend); }
+void set_matvec_q8_0_backend(MatvecQ8_0Fn backend) {
+    backend_slot().store(backend);
+}
 
-void matvec_q8_0(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
-                 std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales, float* out) {
-    static std::once_flag once;
-    std::call_once(once, [] { register_platform_backends(); });
-    const MatvecQ8_0Fn backend = backend_slot().load();
-    if (backend != nullptr && backend(type, data, rows, columns, row_bytes, scale, q8, q8_scales, out)) {
-        return;
-    }
+void set_matvec_q8_0_batch_backend(MatvecQ8_0BatchFn backend) {
+    batch_slot().store(backend);
+}
 
+namespace {
+
+void cpu_matvec(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
+                std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales, float* out) {
     mnet::gguf::Q8_0Blocks activations;
     activations.qs.assign(q8, q8 + static_cast<std::ptrdiff_t>(columns));
     activations.d.assign(q8_scales, q8_scales + static_cast<std::ptrdiff_t>(columns / 32U));
@@ -58,6 +93,56 @@ void matvec_q8_0(std::uint32_t type, const std::uint8_t* data, std::uint64_t row
         }
         out[row] = scale * value;
     }
+}
+
+}  // namespace
+
+void matvec_q8_0(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
+                 std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales, float* out,
+                 std::uint64_t identity) {
+    static std::once_flag once;
+    std::call_once(once, [] { register_platform_backends(); });
+    const MatvecQ8_0Fn backend = backend_slot().load();
+    if (backend != nullptr) {
+        const auto begin = std::chrono::steady_clock::now();
+        const bool handled = backend(type, data, rows, columns, row_bytes, scale, q8, q8_scales, out, identity);
+        if (handled) {
+            const auto elapsed = std::chrono::steady_clock::now() - begin;
+            stats().backend_ns +=
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+            ++stats().backend_calls;
+            return;
+        }
+    }
+    const auto cpu_begin = std::chrono::steady_clock::now();
+    cpu_matvec(type, data, rows, columns, row_bytes, scale, q8, q8_scales, out);
+    const auto cpu_elapsed = std::chrono::steady_clock::now() - cpu_begin;
+    stats().cpu_ns +=
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(cpu_elapsed).count());
+    ++stats().cpu_calls;
+}
+
+void matvec_q8_0_batch(const MatvecQ8_0Job* jobs, std::size_t count, std::uint64_t columns, const std::int8_t* q8,
+                       const float* q8_scales) {
+    static std::once_flag once;
+    std::call_once(once, [] { register_platform_backends(); });
+    const MatvecQ8_0BatchFn backend = batch_slot().load();
+    if (backend != nullptr) {
+        const auto begin = std::chrono::steady_clock::now();
+        const bool handled = backend(jobs, count, columns, q8, q8_scales);
+        if (handled) {
+            const auto elapsed = std::chrono::steady_clock::now() - begin;
+            stats().backend_ns +=
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+            stats().backend_calls += count;
+            return;
+        }
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        cpu_matvec(jobs[i].type, jobs[i].data, jobs[i].rows, columns, jobs[i].row_bytes, jobs[i].scale, q8, q8_scales,
+                   jobs[i].out);
+    }
+    stats().cpu_calls += count;
 }
 
 }  // namespace mnet::detail::compute

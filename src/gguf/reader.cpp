@@ -4,8 +4,10 @@
 #include <mnet/gguf/reader.hpp>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
+#include <atomic>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -15,9 +17,9 @@
 #include <vector>
 
 #include <gguf/internal.hpp>
+#include <mnet/detail/compute.hpp>
 #include <mnet/detail/iq1s_grid.hpp>
 #include <mnet/detail/iq_grids.hpp>
-#include <mnet/detail/compute.hpp>
 #include <mnet/gguf/format.hpp>
 #include <mnet/gguf/kernels.hpp>
 
@@ -374,6 +376,12 @@ Reader::Reader(std::string path) : path_(std::move(path)) {
                                  info.name);
     }
     Quantized result;
+    // Identity is derived from (reader, tensor offset, expert) instead of a
+    // running counter: reloading the same tensor must hit the device cache
+    // again, and two tensors must never share it.
+    const auto salt = reinterpret_cast<std::uintptr_t>(this);
+    result.identity = (info.offset + 0x9E3779B97F4A7C15ULL) * 0x100000001B3ULL ^
+                      (static_cast<std::uint64_t>(expert + 1) * 0xC2B2AE3D27D4EB4FULL) ^ salt;
     result.type = info.type;
     result.rows = info.dims.size() >= 2 ? info.dims[1] : 1;
     result.columns = info.dims[0];
@@ -445,7 +453,7 @@ void Reader::matvec(const Quantized& matrix, const float* input, float* output) 
         // Device-neutral: the compute layer uses a GPU when one is registered,
         // otherwise it runs the same CPU loop the reader used before.
         mnet::detail::compute::matvec_q8_0(matrix.type, matrix.blocks.data(), matrix.rows, matrix.columns, row_bytes,
-                                     matrix.scale, q80.qs.data(), q80.d.data(), output);
+                                           matrix.scale, q80.qs.data(), q80.d.data(), output, matrix.identity);
         return;
     }
     // Rows are independent and keep a fixed accumulation order, so the
@@ -492,6 +500,44 @@ void Reader::matvec(const Quantized& matrix, const float* input, float* output) 
         }
         output[row] = matrix.scale * value;
     }
+}
+
+void Reader::matvec_batch(std::initializer_list<std::pair<const Quantized*, float*>> jobs, const float* input) {
+    if (jobs.size() == 0) {
+        return;
+    }
+    if (std::getenv("MNET_NO_BATCH") != nullptr) {
+        for (const auto& job : jobs) {
+            matvec(*job.first, input, job.second);
+        }
+        return;
+    }
+    const Quantized* first = jobs.begin()->first;
+    const auto info = type_info(first->type);
+    const bool q8_0_family = uses_q8_0(first->type) && has_int_q80_dot(first->type);
+    bool compatible = q8_0_family;
+    for (const auto& job : jobs) {
+        compatible = compatible && job.first->type == first->type && job.first->columns == first->columns &&
+                     uses_q8_0(job.first->type) && has_int_q80_dot(job.first->type) &&
+                     job.first->columns % info.block_elements == 0;
+    }
+    if (!compatible) {
+        for (const auto& job : jobs) {
+            matvec(*job.first, input, job.second);
+        }
+        return;
+    }
+
+    const std::uint64_t row_bytes = first->columns / info.block_elements * info.block_bytes;
+    const auto q80 = make_q8_0_blocks(input, first->columns);
+    std::vector<mnet::detail::compute::MatvecQ8_0Job> requests;
+    requests.reserve(jobs.size());
+    for (const auto& job : jobs) {
+        requests.push_back({job.first->type, job.first->blocks.data(), job.first->rows, row_bytes, job.first->scale,
+                            job.second, job.first->identity});
+    }
+    mnet::detail::compute::matvec_q8_0_batch(requests.data(), requests.size(), first->columns, q80.qs.data(),
+                                             q80.d.data());
 }
 
 void Reader::matmul(const Quantized& matrix, const float* input, float* output, std::size_t tokens,

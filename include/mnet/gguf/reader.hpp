@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <mnet/gguf/format.hpp>
@@ -62,9 +63,10 @@ public:
     // never materialized (a 16x saving for Q2_0 versus fp32).
     struct Quantized {
         std::uint32_t type = kGgmlF32;
-        std::uint64_t rows = 0;     // output features
-        std::uint64_t columns = 0;  // input features
-        float scale = 1.0F;         // per-expert MoE scale, folded at the output
+        std::uint64_t rows = 0;      // output features
+        std::uint64_t columns = 0;   // input features
+        float scale = 1.0F;          // per-expert MoE scale, folded at the output
+        std::uint64_t identity = 0;  // unique per loaded tensor; device memory caches key on it
         std::vector<std::uint8_t> blocks;
 
         [[nodiscard]] bool empty() const { return this->blocks.empty(); }
@@ -75,6 +77,11 @@ public:
     // y = W x with W kept quantized. Deterministic: each output element is
     // accumulated left to right in double, independent of thread count.
     static void matvec(const Quantized& matrix, const float* input, float* output);
+
+    // Several independent matrices applied to the same activation. The compute
+    // layer may submit them as one batch (one GPU wait instead of N); the
+    // result is identical to calling matvec for each pair.
+    static void matvec_batch(std::initializer_list<std::pair<const Quantized*, float*>> jobs, const float* input);
 
     static void matmul(const Quantized& matrix, const float* input, float* output, std::size_t tokens,
                        std::size_t input_stride, std::size_t output_stride);
