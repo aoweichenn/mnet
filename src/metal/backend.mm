@@ -427,6 +427,41 @@ kernel void hadamard_quantize_multi(device const float* in     [[buffer(0)]],
     }
 }
 
+// The beta/alpha head projections and the sigmoid/softplus gate in one
+// dispatch: one threadgroup per (token, head), 32 lanes. Both dots keep the
+// row-strided simd_sum accumulation of ssm_rows_dot, so results match.
+kernel void ssm_head_gates(device const float* x        [[buffer(0)]],
+                           device const float* weights  [[buffer(1)]],
+                           device const float* dt       [[buffer(2)]],
+                           device const float* ssm_a    [[buffer(3)]],
+                           device float* beta           [[buffer(4)]],
+                           device float* gate           [[buffer(5)]],
+                           constant uint& columns       [[buffer(6)]],
+                           constant uint& heads         [[buffer(7)]],
+                           uint tgid                    [[threadgroup_position_in_grid]],
+                           uint lane                    [[thread_position_in_threadgroup]]) {
+    const uint head = tgid % heads;
+    const uint token = tgid / heads;
+    device const float* xt = x + (ulong)token * columns;
+    device const float* wb = weights + (ulong)head * columns;
+    device const float* wa = weights + (ulong)(heads + head) * columns;
+    float sum_beta = 0.0f;
+    float sum_alpha = 0.0f;
+    for (uint j = lane; j < columns; j += 32u) {
+        sum_beta = fma(wb[j], xt[j], sum_beta);
+        sum_alpha = fma(wa[j], xt[j], sum_alpha);
+    }
+    sum_beta = simd_sum(sum_beta);
+    sum_alpha = simd_sum(sum_alpha);
+    if (lane == 0u) {
+        const uint index = token * heads + head;
+        beta[index] = 1.0f / (1.0f + exp(-sum_beta));
+        const float z = sum_alpha + dt[head];
+        const float sp = z > 20.0f ? z : log(1.0f + exp(z));
+        gate[index] = sp * ssm_a[head];
+    }
+}
+
 // Same as ssm_gate_norm, with `heads` (value heads per token) telling it how to
 // split the threadgroup index into (token, head).
 kernel void ssm_gate_norm_multi(device const float* delta    [[buffer(0)]],
@@ -812,6 +847,7 @@ struct MetalState {
     id<MTLComputePipelineState> hadamard_quantize_pipeline = nil;
     id<MTLComputePipelineState> hadamard_multi_pipeline = nil;
     id<MTLComputePipelineState> gate_norm_multi_pipeline = nil;
+    id<MTLComputePipelineState> head_gates_pipeline = nil;
     id<MTLComputePipelineState> attn_prep_pipeline = nil;
     id<MTLComputePipelineState> attn_gate_pipeline = nil;
     id<MTLComputePipelineState> attn_flash_pipeline = nil;
@@ -911,6 +947,7 @@ void initialise(MetalState& state) {
         state.dequant_pipeline = pipeline_for("q8_0_dequantize");
         state.hadamard_multi_pipeline = pipeline_for("hadamard_quantize_multi");
         state.gate_norm_multi_pipeline = pipeline_for("ssm_gate_norm_multi");
+        state.head_gates_pipeline = pipeline_for("ssm_head_gates");
         if (state.attn_flash_pipeline == nil && std::getenv("MNET_METAL_DEBUG") != nullptr) {
             std::fprintf(stderr, "mnet: metal attention pipeline failed: %s\n", [[error description] UTF8String]);
         }
@@ -2225,24 +2262,20 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
             continue;
         }
         if (!skip_gate) {
-        [encoder setComputePipelineState:s.ssm_rows_pipeline];
-        [encoder setBuffer:layer.side offset:0 atIndex:0];
-        [encoder setBuffer:b.activation offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:1];
-        [encoder setBuffer:b.raw offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float)) atIndex:2];
-        [encoder setBytes:&columns32 length:sizeof(columns32) atIndex:3];
-        [encoder dispatchThreadgroups:MTLSizeMake(2U * value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-
-        [encoder setComputePipelineState:s.ssm_act_pipeline];
-        [encoder setBuffer:b.raw offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float)) atIndex:0];
-        [encoder setBuffer:layer.side offset:dt_offset * sizeof(float) atIndex:1];
-        [encoder setBuffer:layer.side offset:a_offset * sizeof(float) atIndex:2];
-        [encoder setBuffer:b.gates offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float)) atIndex:3];
+        [encoder setComputePipelineState:s.head_gates_pipeline];
+        [encoder setBuffer:b.activation offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:0];
+        [encoder setBuffer:layer.side offset:0 atIndex:1];
+        [encoder setBuffer:layer.side offset:dt_offset * sizeof(float) atIndex:2];
+        [encoder setBuffer:layer.side offset:a_offset * sizeof(float) atIndex:3];
+        [encoder setBuffer:b.gates offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float)) atIndex:4];
         [encoder setBuffer:b.gates
                      offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float) +
                                                     value_heads * sizeof(float))
-                    atIndex:4];
-        [encoder setBytes:&value_heads32 length:sizeof(value_heads32) atIndex:5];
-        [encoder dispatchThreads:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                    atIndex:5];
+        [encoder setBytes:&columns32 length:sizeof(columns32) atIndex:6];
+        [encoder setBytes:&value_heads32 length:sizeof(value_heads32) atIndex:7];
+        [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         }
         if (skip_conv) {
             continue;
