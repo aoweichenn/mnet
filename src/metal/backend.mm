@@ -184,10 +184,10 @@ kernel void q2_0_mat_mat_f16(device const uchar* w        [[buffer(0)]],
 #pragma clang loop unroll(full)
             for (uint i = 0; i < 8u; ++i) {
                 const uchar byte = row < row_count ? q[i] : 0u;
-                sa[row * NK + part * 32u + i * 4u + 0u] = half(float(int(byte & 3u) - 1) * d);
-                sa[row * NK + part * 32u + i * 4u + 1u] = half(float(int((byte >> 2u) & 3u) - 1) * d);
-                sa[row * NK + part * 32u + i * 4u + 2u] = half(float(int((byte >> 4u) & 3u) - 1) * d);
-                sa[row * NK + part * 32u + i * 4u + 3u] = half(float(int((byte >> 6u) & 3u) - 1) * d);
+                sa[(part * 32u + i * 4u + 0u) * NR0 + row] = half(float(int(byte & 3u) - 1) * d);
+                sa[(part * 32u + i * 4u + 1u) * NR0 + row] = half(float(int((byte >> 2u) & 3u) - 1) * d);
+                sa[(part * 32u + i * 4u + 2u) * NR0 + row] = half(float(int((byte >> 4u) & 3u) - 1) * d);
+                sa[(part * 32u + i * 4u + 3u) * NR0 + row] = half(float(int((byte >> 6u) & 3u) - 1) * d);
             }
         }
         // Activations: one tile of the batch, transposed to [token][k].
@@ -198,7 +198,7 @@ kernel void q2_0_mat_mat_f16(device const uchar* w        [[buffer(0)]],
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        threadgroup const half* sa_q = sa + 32u * (sgitg & 1u) * NK;    // this simdgroup's 32 rows
+        threadgroup const half* sa_q = sa + 32u * (sgitg & 1u);    // this simdgroup's 32 rows, tile is [k][row]
         threadgroup const half* sb_q = sb + 16u * (sgitg >> 1u) * NK;  // this simdgroup's 16 tokens
 #pragma clang loop unroll(full)
         for (uint kk = 0; kk < NK / 8u; ++kk) {
@@ -207,7 +207,7 @@ kernel void q2_0_mat_mat_f16(device const uchar* w        [[buffer(0)]],
 #pragma clang loop unroll(full)
             for (uint i = 0; i < 4u; ++i) {
                 // [row][k] -> [k][row], which is what A*B needs on the right.
-                simdgroup_load(ma[i], sa_q + i * 8u * NK + kk * 8u, NK, 0, true);
+                simdgroup_load(ma[i], sa_q + kk * 8u * NR0 + i * 8u, NR0, 0, false);
             }
 #pragma clang loop unroll(full)
             for (uint i = 0; i < 2u; ++i) {
@@ -223,7 +223,10 @@ kernel void q2_0_mat_mat_f16(device const uchar* w        [[buffer(0)]],
 
     // mc[i] holds [token][row] for tokens 8*(i/4).., rows 8*(i%4).. of this
     // simdgroup's quadrant. Stage the tile, then write it out with `scale`.
-    threadgroup float tile[NR0 * NR1];  // 8 KB on top of the 12 KB of half tiles
+    // The 8 KB weight tile is dead once the k loop ends, so the float staging
+    // tile reuses it: 12 KB of threadgroup memory per threadgroup instead of 20,
+    // which lets two of them share a core.
+    threadgroup float* tile = reinterpret_cast<threadgroup float*>(sa);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 #pragma clang loop unroll(full)
     for (uint i = 0; i < 8u; ++i) {
@@ -689,6 +692,7 @@ kernel void ssm_head_gates(device const float* x        [[buffer(0)]],
                            device float* gate           [[buffer(5)]],
                            constant uint& columns       [[buffer(6)]],
                            constant uint& heads         [[buffer(7)]],
+                           constant uint& stride        [[buffer(8)]],
                            uint tgid                    [[threadgroup_position_in_grid]],
                            uint lane                    [[thread_position_in_threadgroup]]) {
     const uint head = tgid % heads;
@@ -705,7 +709,7 @@ kernel void ssm_head_gates(device const float* x        [[buffer(0)]],
     sum_beta = simd_sum(sum_beta);
     sum_alpha = simd_sum(sum_alpha);
     if (lane == 0u) {
-        const uint index = token * heads + head;
+        const uint index = token * stride + head;
         beta[index] = 1.0f / (1.0f + exp(-sum_beta));
         const float z = sum_alpha + dt[head];
         const float sp = z > 20.0f ? z : log(1.0f + exp(z));
@@ -1266,6 +1270,23 @@ id<MTLBuffer> ensure_buffer(id<MTLDevice> device, id<MTLBuffer>& buffer, std::si
 // Lanes per row for the fast matvec. The batch path is bandwidth bound and
 // prefers one warp per row; a single-token grid is 32x smaller, so the override
 // exists to test whether more lanes per row helps there.
+// The tiled mat-mat pipeline to use: half tiles by default (matrix unit at
+// twice the fp32 rate, exact for the weight tile), MNET_MAT_MAT_F16=0 for fp32.
+id<MTLComputePipelineState> tiled_mat_mat_pipeline(MetalState& s) {
+    static const bool f16 = [] {
+        const char* value = std::getenv("MNET_MAT_MAT_F16");
+        return value == nullptr || std::atoi(value) != 0;
+    }();
+    return f16 && s.mat_mat_f16_pipeline != nil ? s.mat_mat_f16_pipeline : s.mat_mat_pipeline;
+}
+
+// Whether the caller wants the tiled mat-mat at all (MNET_MAT_MAT=0 disables).
+bool tiled_mat_mat_enabled(MetalState& s, std::size_t count) {
+    const char* value = std::getenv("MNET_MAT_MAT");
+    const int mode = value != nullptr ? std::atoi(value) : 1;
+    return mode > 0 && s.mat_mat_pipeline != nil && count >= 8U;
+}
+
 std::uint32_t matvec_lanes() {
     static const std::uint32_t lanes = [] {
         const char* value = std::getenv("MNET_MATVEC_LANES");
@@ -2281,18 +2302,10 @@ bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint
     // 5th and 6th logits are 5.6e-4 apart (normalised) and this path swaps
     // them. MNET_MAT_MAT=0 restores the bit-identical scalar path, =2 tiles
     // gate/up only.
+    const bool tiled = tiled_mat_mat_enabled(s, count);
     const char* mat_mat = std::getenv("MNET_MAT_MAT");
-    const int mat_mat_mode = mat_mat != nullptr ? std::atoi(mat_mat) : 1;
-    const bool tiled = mat_mat_mode > 0 && s.mat_mat_pipeline != nil && count >= 8U;
-    const bool tiled_down = mat_mat_mode == 1 && tiled;
-    // Half tiles double the matrix-unit throughput; the weight tile is exact in
-    // fp16 (a 2-bit code times a half scale is representable), the activation
-    // tile is not, which is the accuracy cost this switch trades.
-    static const bool f16_tiles = [] {
-        const char* value = std::getenv("MNET_MAT_MAT_F16");
-        return value == nullptr || std::atoi(value) != 0;
-    }() && s.mat_mat_f16_pipeline != nil;
-    id<MTLComputePipelineState> tiled_pipeline = f16_tiles ? s.mat_mat_f16_pipeline : s.mat_mat_pipeline;
+    const bool tiled_down = tiled && (mat_mat == nullptr || std::atoi(mat_mat) != 2);
+    id<MTLComputePipelineState> tiled_pipeline = tiled_mat_mat_pipeline(s);
     if (tiled) {
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(first.gate.row_bytes);
         const std::uint32_t columns32 = static_cast<std::uint32_t>(columns);
@@ -2636,7 +2649,39 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     [encoder dispatchThreads:MTLSizeMake(job.columns * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     // One dispatch per matvec for all tokens: the per-token activation slab is
     // contiguous, so every threadgroup only needs its (token, row) pair.
-    if (!skip_matvec) {
+    if (!skip_matvec && tiled_mat_mat_enabled(s, count)) {
+        const std::uint32_t columns32 = static_cast<std::uint32_t>(job.columns);
+        const std::uint32_t tokens32 = static_cast<std::uint32_t>(count);
+        const std::uint32_t x_stride32 = static_cast<std::uint32_t>(job.columns);
+        const id<MTLComputePipelineState> pipeline = tiled_mat_mat_pipeline(s);
+        for (std::size_t pass = 0; pass < 2U; ++pass) {
+            const std::uint64_t rows = pass == 0U ? conv_dim : hidden;
+            const std::uint32_t row_bytes32 =
+                static_cast<std::uint32_t>(pass == 0U ? job.qkv.row_bytes : job.gate.row_bytes);
+            const float scale = pass == 0U ? job.qkv.scale : job.gate.scale;
+            const std::uint32_t rows32 = static_cast<std::uint32_t>(rows);
+            const std::uint32_t out_stride32 = static_cast<std::uint32_t>(rows);
+            [encoder setComputePipelineState:pipeline];
+            [encoder setBuffer:(pass == 0U ? qkv_weights.buffer : gate_weights.buffer)
+                         offset:static_cast<NSUInteger>(pass == 0U ? qkv_weights.offset : gate_weights.offset)
+                        atIndex:0];
+            [encoder setBuffer:b.wide offset:0 atIndex:1];
+            [encoder setBuffer:(pass == 0U ? layer.window : b.z)
+                         offset:static_cast<NSUInteger>(pass == 0U ? (job.conv_kernel - 1U) * conv_dim * sizeof(float)
+                                                                   : 0U)
+                        atIndex:3];
+            [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
+            [encoder setBytes:&columns32 length:sizeof(columns32) atIndex:5];
+            [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+            [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
+            [encoder setBytes:&tokens32 length:sizeof(tokens32) atIndex:9];
+            [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:10];
+            [encoder setBytes:&out_stride32 length:sizeof(out_stride32) atIndex:11];
+            [encoder dispatchThreadgroups:MTLSizeMake((count + 31U) / 32U, (rows + 63U) / 64U, 1)
+                    threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+    }
+    if (!skip_matvec && tiled_mat_mat_enabled(s, count) == false) {
         for (std::size_t pass = 0; pass < 2U; ++pass) {
             const std::uint64_t rows = pass == 0U ? conv_dim : hidden;
             const std::uint32_t blocks32 = static_cast<std::uint32_t>(job.columns / 64U);
@@ -2665,26 +2710,29 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
                     threadsPerThreadgroup:MTLSizeMake(lanes, 1, 1)];
         }
     }
-    // Head gates and the convolution for every token.
-    for (std::size_t t = 0; t < count; ++t) {
-        if (skip_gate && skip_conv) {
-            continue;
-        }
-        if (!skip_gate) {
+    // Head gates for every token in one dispatch: the kernel already splits
+    // tgid into (token, head), so the per-token loop only ever kept 48
+    // threadgroups busy. The gate/alpha slab is interleaved per token, hence the
+    // stride parameter.
+    if (!skip_gate) {
+        const std::uint32_t stride32 = static_cast<std::uint32_t>(2U * value_heads);
         [encoder setComputePipelineState:s.head_gates_pipeline];
-        [encoder setBuffer:b.activation offset:static_cast<NSUInteger>(t * job.columns * sizeof(float)) atIndex:0];
+        [encoder setBuffer:b.activation offset:0 atIndex:0];
         [encoder setBuffer:layer.side offset:0 atIndex:1];
         [encoder setBuffer:layer.side offset:dt_offset * sizeof(float) atIndex:2];
         [encoder setBuffer:layer.side offset:a_offset * sizeof(float) atIndex:3];
-        [encoder setBuffer:b.gates offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float)) atIndex:4];
-        [encoder setBuffer:b.gates
-                     offset:static_cast<NSUInteger>(t * 2U * value_heads * sizeof(float) +
-                                                    value_heads * sizeof(float))
-                    atIndex:5];
+        [encoder setBuffer:b.gates offset:0 atIndex:4];
+        [encoder setBuffer:b.gates offset:static_cast<NSUInteger>(value_heads * sizeof(float)) atIndex:5];
         [encoder setBytes:&columns32 length:sizeof(columns32) atIndex:6];
         [encoder setBytes:&value_heads32 length:sizeof(value_heads32) atIndex:7];
-        [encoder dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1)
+        [encoder setBytes:&stride32 length:sizeof(stride32) atIndex:8];
+        [encoder dispatchThreadgroups:MTLSizeMake(value_heads * count, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    }
+    // Head gates and the convolution for every token.
+    for (std::size_t t = 0; !skip_conv && t < count; ++t) {
+        if (skip_conv) {
+            continue;
         }
         if (skip_conv) {
             continue;
@@ -2766,25 +2814,66 @@ bool ssm_batch_block(const SsmQ2_0Job& job, const SsmBatchEntry* entries, std::s
     [encoder setBuffer:b.act_scales offset:0 atIndex:1];
     [encoder setBuffer:b.wide offset:0 atIndex:2];
     [encoder dispatchThreads:MTLSizeMake(hidden * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-    if (!skip_norm) {
+    if (!skip_norm && tiled_mat_mat_enabled(s, count)) {
         const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(job.out.row_bytes);
-        const std::uint32_t blocks32 = static_cast<std::uint32_t>(hidden / 64U);
+        const std::uint32_t columns32 = static_cast<std::uint32_t>(hidden);
         const float scale = job.out.scale;
-        const std::uint32_t lanes = matvec_lanes();
         const std::uint32_t rows32 = static_cast<std::uint32_t>(job.out.rows);
+        const std::uint32_t tokens32 = static_cast<std::uint32_t>(count);
         const std::uint32_t x_stride32 = static_cast<std::uint32_t>(hidden);
-        [encoder setComputePipelineState:s.fast_f32_multi_pipeline];
+        const std::uint32_t out_stride32 = static_cast<std::uint32_t>(job.out.rows);
+        [encoder setComputePipelineState:tiled_mat_mat_pipeline(s)];
         [encoder setBuffer:out_weights.buffer offset:static_cast<NSUInteger>(out_weights.offset) atIndex:0];
         [encoder setBuffer:b.wide offset:0 atIndex:1];
         [encoder setBuffer:b.out offset:0 atIndex:3];
         [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
-        [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
+        [encoder setBytes:&columns32 length:sizeof(columns32) atIndex:5];
         [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
-        [encoder setBytes:&lanes length:sizeof(lanes) atIndex:7];
         [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
-        [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:9];
-        [encoder dispatchThreadgroups:MTLSizeMake(job.out.rows * count, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(lanes, 1, 1)];
+        [encoder setBytes:&tokens32 length:sizeof(tokens32) atIndex:9];
+        [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:10];
+        [encoder setBytes:&out_stride32 length:sizeof(out_stride32) atIndex:11];
+        [encoder dispatchThreadgroups:MTLSizeMake((count + 31U) / 32U, (job.out.rows + 63U) / 64U, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    }
+    if (!skip_norm && tiled_mat_mat_enabled(s, count) == false) {
+        const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(job.out.row_bytes);
+        const std::uint32_t columns32 = static_cast<std::uint32_t>(hidden);
+        const float scale = job.out.scale;
+        const std::uint32_t rows32 = static_cast<std::uint32_t>(job.out.rows);
+        const std::uint32_t tokens32 = static_cast<std::uint32_t>(count);
+        const std::uint32_t x_stride32 = static_cast<std::uint32_t>(hidden);
+        const std::uint32_t out_stride32 = static_cast<std::uint32_t>(job.out.rows);
+        if (tiled_mat_mat_enabled(s, count)) {
+            [encoder setComputePipelineState:tiled_mat_mat_pipeline(s)];
+            [encoder setBuffer:out_weights.buffer offset:static_cast<NSUInteger>(out_weights.offset) atIndex:0];
+            [encoder setBuffer:b.wide offset:0 atIndex:1];
+            [encoder setBuffer:b.out offset:0 atIndex:3];
+            [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
+            [encoder setBytes:&columns32 length:sizeof(columns32) atIndex:5];
+            [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+            [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
+            [encoder setBytes:&tokens32 length:sizeof(tokens32) atIndex:9];
+            [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:10];
+            [encoder setBytes:&out_stride32 length:sizeof(out_stride32) atIndex:11];
+            [encoder dispatchThreadgroups:MTLSizeMake((count + 31U) / 32U, (job.out.rows + 63U) / 64U, 1)
+                    threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        } else {
+            const std::uint32_t blocks32 = static_cast<std::uint32_t>(hidden / 64U);
+            const std::uint32_t lanes = matvec_lanes();
+            [encoder setComputePipelineState:s.fast_f32_multi_pipeline];
+            [encoder setBuffer:out_weights.buffer offset:static_cast<NSUInteger>(out_weights.offset) atIndex:0];
+            [encoder setBuffer:b.wide offset:0 atIndex:1];
+            [encoder setBuffer:b.out offset:0 atIndex:3];
+            [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
+            [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
+            [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+            [encoder setBytes:&lanes length:sizeof(lanes) atIndex:7];
+            [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
+            [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:9];
+            [encoder dispatchThreadgroups:MTLSizeMake(job.out.rows * count, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(lanes, 1, 1)];
+        }
     }
     [encoder endEncoding];
     const std::uint64_t profile_commit = now_ns();
@@ -2947,7 +3036,37 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
     [encoder setBuffer:b.scales offset:0 atIndex:1];
     [encoder setBuffer:b.wide offset:0 atIndex:2];
     [encoder dispatchThreads:MTLSizeMake(job.columns * count, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-    for (std::size_t pass = 0; pass < 3U; ++pass) {
+    if (tiled_mat_mat_enabled(s, count)) {
+        const std::uint32_t columns32 = static_cast<std::uint32_t>(job.columns);
+        const std::uint32_t tokens32 = static_cast<std::uint32_t>(count);
+        const std::uint32_t x_stride32 = static_cast<std::uint32_t>(job.columns);
+        const id<MTLComputePipelineState> pipeline = tiled_mat_mat_pipeline(s);
+        for (std::size_t pass = 0; pass < 3U; ++pass) {
+            const WeightBinding& weights = pass == 0U ? q_weights : (pass == 1U ? k_weights : v_weights);
+            id<MTLBuffer> target = pass == 0U ? b.qfull : (pass == 1U ? b.k_new : b.v_new);
+            const std::uint64_t rows = pass == 0U ? 2U * hidden : kv_head_elems;
+            const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(pass == 0U ? job.q.row_bytes
+                                                                                    : (pass == 1U ? job.k.row_bytes
+                                                                                                  : job.v.row_bytes));
+            const float scale = pass == 0U ? job.q.scale : (pass == 1U ? job.k.scale : job.v.scale);
+            const std::uint32_t rows32 = static_cast<std::uint32_t>(rows);
+            const std::uint32_t out_stride32 = static_cast<std::uint32_t>(rows);
+            [encoder setComputePipelineState:pipeline];
+            [encoder setBuffer:weights.buffer offset:static_cast<NSUInteger>(weights.offset) atIndex:0];
+            [encoder setBuffer:b.wide offset:0 atIndex:1];
+            [encoder setBuffer:target offset:0 atIndex:3];
+            [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
+            [encoder setBytes:&columns32 length:sizeof(columns32) atIndex:5];
+            [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+            [encoder setBytes:&rows32 length:sizeof(rows32) atIndex:8];
+            [encoder setBytes:&tokens32 length:sizeof(tokens32) atIndex:9];
+            [encoder setBytes:&x_stride32 length:sizeof(x_stride32) atIndex:10];
+            [encoder setBytes:&out_stride32 length:sizeof(out_stride32) atIndex:11];
+            [encoder dispatchThreadgroups:MTLSizeMake((count + 31U) / 32U, (rows + 63U) / 64U, 1)
+                    threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+    }
+    for (std::size_t pass = 0; tiled_mat_mat_enabled(s, count) == false && pass < 3U; ++pass) {
         const WeightBinding& weights = pass == 0U ? q_weights : (pass == 1U ? k_weights : v_weights);
         id<MTLBuffer> target = pass == 0U ? b.qfull : (pass == 1U ? b.k_new : b.v_new);
         const std::uint64_t rows = pass == 0U ? 2U * hidden : kv_head_elems;
