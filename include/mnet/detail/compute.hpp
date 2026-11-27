@@ -52,6 +52,25 @@ using FfnSwigluFn = bool (*)(const MatvecQ8_0Job& gate, const MatvecQ8_0Job& up,
                              std::uint32_t block_size);
 void set_ffn_swiglu_backend(FfnSwigluFn backend);
 
+// One token of a batched FFN: the same three matrices, its own input and
+// output. Encoding several of these into one submission lets the independent
+// matvecs of different tokens pipeline, which the per-token block cannot do
+// because swiglu -> Hadamard -> requantisation -> down is serial.
+struct FfnSwigluEntry {
+    MatvecQ8_0Job gate;
+    MatvecQ8_0Job up;
+    MatvecQ8_0Job down;
+    const float* input = nullptr;  // n_embd, already Hadamard'ed
+    float* output = nullptr;       // n_embd
+};
+
+using FfnSwigluBatchFn = bool (*)(const FfnSwigluEntry* entries, std::size_t count, std::uint64_t columns,
+                                  std::uint64_t hidden, const std::int32_t* signs, std::uint32_t block_size);
+void set_ffn_swiglu_batch_backend(FfnSwigluBatchFn backend);
+
+[[nodiscard]] bool ffn_swiglu_batch(const FfnSwigluEntry* entries, std::size_t count, std::uint64_t columns,
+                                    std::uint64_t hidden, const std::int32_t* signs, std::uint32_t block_size);
+
 // Implemented by a device translation unit when one is compiled in, otherwise
 // the portable no-op in src/compute/backend.cpp.
 void register_platform_backends();

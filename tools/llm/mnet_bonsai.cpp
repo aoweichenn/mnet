@@ -419,9 +419,10 @@ public:
             LayerState& state = this->state_[layer];
             for (std::size_t t = 0; t < tokens; ++t) {
                 float* x = hidden.data() + t * this->config_.n_embd;
-                this->layer_forward(layer, weights, state, x, static_cast<std::size_t>(positions[t]),
-                                    dump ? &dump_dir : nullptr, t);
+                this->layer_branch(layer, weights, state, x, static_cast<std::size_t>(positions[t]),
+                                   dump ? &dump_dir : nullptr, t);
             }
+            this->layer_tail(hidden, tokens, layer, weights, dump ? &dump_dir : nullptr);
         }
         return hidden;
     }
@@ -504,9 +505,10 @@ private:
         }
     }
 
-    void layer_forward(std::size_t layer, const LayerWeights& w, LayerState& state, float* x, std::size_t position,
-                       const std::string* dump_dir, std::size_t token) {
-        const auto& signs_embd = this->signs_embd_;
+    // Per-token first half of a layer: pre-norm, attention or gated-delta
+    // branch, and the residual add.
+    void layer_branch(std::size_t layer, const LayerWeights& w, LayerState& state, float* x, std::size_t position,
+                      const std::string* dump_dir, std::size_t token) {
         const auto t_norm = std::chrono::steady_clock::now();
         auto xn = rms_norm(x, this->config_.n_embd, w.attn_norm, this->config_.eps);
         add_time("rms_norm_in", since(t_norm));
@@ -523,7 +525,6 @@ private:
         }
         add_time("branch", since(t_branch));
         const auto t_tail = std::chrono::steady_clock::now();
-        const auto t_cpu = std::chrono::steady_clock::now();
         for (std::size_t i = 0; i < this->config_.n_embd; ++i) {
             x[i] += branch[i];
         }
@@ -532,42 +533,84 @@ private:
             this->dump_tensor(*dump_dir, "attn_residual", layer, residual, token);
         }
 
-        auto pn = rms_norm(residual.data(), this->config_.n_embd, w.post_norm, this->config_.eps);
-        if (dump_dir != nullptr) {
-            this->dump_tensor(*dump_dir, "attn_post_norm", layer, pn, token);
+        add_time("layer_tail", since(t_tail));
+    }
+
+    // First half of a layer for every token: the FFN input of each token is
+    // independent of the others, so all of them are encoded into one
+    // submission and the independent matvecs pipeline across tokens.
+    void layer_tail(std::vector<float>& hidden, std::size_t tokens, std::size_t layer, const LayerWeights& w,
+                    const std::string* dump_dir) {
+        const auto t_tail = std::chrono::steady_clock::now();
+        const auto t_cpu = std::chrono::steady_clock::now();
+        const std::size_t n_embd = this->config_.n_embd;
+        std::vector<float> ph(tokens * n_embd);
+        for (std::size_t t = 0; t < tokens; ++t) {
+            const float* residual = hidden.data() + t * n_embd;
+            auto pn = rms_norm(residual, n_embd, w.post_norm, this->config_.eps);
+            if (dump_dir != nullptr) {
+                this->dump_tensor(*dump_dir, "attn_post_norm", layer, pn, t);
+            }
+            std::copy(pn.begin(), pn.end(), ph.begin() + static_cast<std::ptrdiff_t>(t * n_embd));
+            auto view = pn;
+            hadamard_forward(view, this->signs_embd_, this->config_.hadamard_block);
+            std::copy(view.begin(), view.end(), ph.begin() + static_cast<std::ptrdiff_t>(t * n_embd));
         }
-        auto ph = pn;
-        hadamard_forward(ph, signs_embd, this->config_.hadamard_block);
         add_time("tail_cpu", since(t_cpu));
-        const auto& signs_hidden = this->signs_hidden_;
-        std::vector<float> down(this->config_.n_embd);
+
+        std::vector<float> down(tokens * n_embd);
         bool fused = false;
-        if (mnet::detail::compute::fast_path_enabled() && mnet::detail::compute::fused_ffn_enabled()) {
-            fused = Reader::ffn_swiglu(w.ffn_gate, w.ffn_up, w.ffn_down, ph.data(), signs_hidden.data(),
-                                       this->config_.hadamard_block, down.data());
+        static const bool batched = std::getenv("MNET_NO_BATCHED_FFN") == nullptr;
+        if (batched && mnet::detail::compute::fast_path_enabled() && mnet::detail::compute::fused_ffn_enabled()) {
+            std::vector<Reader::FfnEntry> entries(tokens);
+            for (std::size_t t = 0; t < tokens; ++t) {
+                entries[t].input = ph.data() + t * n_embd;
+                entries[t].output = down.data() + t * n_embd;
+            }
+            fused = Reader::ffn_swiglu_batch(w.ffn_gate, w.ffn_up, w.ffn_down, entries.data(), tokens,
+                                             this->signs_hidden_.data(), this->config_.hadamard_block);
         }
         if (!fused) {
-            std::vector<float> gate(w.ffn_gate.rows);
-            std::vector<float> up(w.ffn_up.rows);
-            Reader::matvec_batch({{&w.ffn_gate, gate.data()}, {&w.ffn_up, up.data()}}, ph.data());
-            std::vector<float> act(w.ffn_gate.rows);
-            swiglu(act.data(), gate.data(), up.data(), act.size());
-            if (dump_dir != nullptr) {
-                this->dump_tensor(*dump_dir, "ffn_gate", layer, gate, token);
-                this->dump_tensor(*dump_dir, "ffn_up", layer, up, token);
-                this->dump_tensor(*dump_dir, "ffn_swiglu", layer, act, token);
+            for (std::size_t t = 0; t < tokens; ++t) {
+                const float* input = ph.data() + t * n_embd;
+                float* output = down.data() + t * n_embd;
+                bool single = false;
+                if (mnet::detail::compute::fast_path_enabled() && mnet::detail::compute::fused_ffn_enabled()) {
+                    single = Reader::ffn_swiglu(w.ffn_gate, w.ffn_up, w.ffn_down, input, this->signs_hidden_.data(),
+                                                this->config_.hadamard_block, output);
+                }
+                if (single) {
+                    continue;
+                }
+                std::vector<float> gate(w.ffn_gate.rows);
+                std::vector<float> up(w.ffn_up.rows);
+                Reader::matvec_batch({{&w.ffn_gate, gate.data()}, {&w.ffn_up, up.data()}}, input);
+                std::vector<float> act(w.ffn_gate.rows);
+                swiglu(act.data(), gate.data(), up.data(), act.size());
+                if (dump_dir != nullptr) {
+                    this->dump_tensor(*dump_dir, "ffn_gate", layer, gate, t);
+                    this->dump_tensor(*dump_dir, "ffn_up", layer, up, t);
+                    this->dump_tensor(*dump_dir, "ffn_swiglu", layer, act, t);
+                }
+                hadamard_forward(act, this->signs_hidden_, this->config_.hadamard_block);
+                Reader::matvec(w.ffn_down, act.data(), output);
             }
-            hadamard_forward(act, signs_hidden, this->config_.hadamard_block);
-            Reader::matvec(w.ffn_down, act.data(), down.data());
         }
-        for (std::size_t i = 0; i < this->config_.n_embd; ++i) {
-            x[i] += down[i];
+        for (std::size_t t = 0; t < tokens; ++t) {
+            float* x = hidden.data() + t * n_embd;
+            const float* branch = down.data() + t * n_embd;
+            for (std::size_t i = 0; i < n_embd; ++i) {
+                x[i] += branch[i];
+            }
+            if (dump_dir != nullptr) {
+                this->dump_tensor(*dump_dir, "ffn_out", layer,
+                                  std::vector<float>(down.begin() + static_cast<std::ptrdiff_t>(t * n_embd),
+                                                     down.begin() + static_cast<std::ptrdiff_t>((t + 1) * n_embd)),
+                                  t);
+                this->dump_tensor(*dump_dir, "l_out", layer, std::vector<float>(x, x + n_embd), t);
+            }
         }
         add_time("layer_tail", since(t_tail));
-        if (dump_dir != nullptr) {
-            this->dump_tensor(*dump_dir, "ffn_out", layer, down, token);
-            this->dump_tensor(*dump_dir, "l_out", layer, std::vector<float>(x, x + this->config_.n_embd), token);
-        }
     }
 
     [[nodiscard]] std::vector<float> recurrent_branch(const LayerWeights& w, LayerState& state,

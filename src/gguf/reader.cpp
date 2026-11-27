@@ -606,6 +606,38 @@ bool Reader::ffn_swiglu(const Quantized& gate, const Quantized& up, const Quanti
         gate.columns, gate.rows, input, signs, block_size);
 }
 
+bool Reader::ffn_swiglu_batch(const Quantized& gate, const Quantized& up, const Quantized& down,
+                              const FfnEntry* entries, std::size_t count, const std::int32_t* signs,
+                              std::uint32_t block_size) {
+    if (gate.type != kGgmlQ2_0 || up.type != kGgmlQ2_0 || down.type != kGgmlQ2_0 || block_size < 64U ||
+        block_size > 1024U || (block_size & (block_size - 1U)) != 0U || entries == nullptr || count == 0U) {
+        return false;
+    }
+    const auto info = type_info(gate.type);
+    if (gate.columns != up.columns || down.columns != gate.rows || gate.rows != up.rows ||
+        gate.columns % info.block_elements != 0 || down.columns % info.block_elements != 0 ||
+        gate.rows % block_size != 0) {
+        return false;
+    }
+    const std::uint64_t gate_bytes = gate.columns / info.block_elements * info.block_bytes;
+    const std::uint64_t down_bytes = down.columns / info.block_elements * info.block_bytes;
+    std::vector<mnet::detail::compute::FfnSwigluEntry> batch(count);
+    for (std::size_t t = 0; t < count; ++t) {
+        if (entries[t].input == nullptr || entries[t].output == nullptr) {
+            return false;
+        }
+        batch[t].gate = {gate.type,         gate.data(),   gate.rows,   gate_bytes,       gate.scale,
+                         entries[t].output, gate.identity, gate.region, gate.region_bytes};
+        batch[t].up = {up.type, up.data(),   up.rows,   gate_bytes,     up.scale,
+                       nullptr, up.identity, up.region, up.region_bytes};
+        batch[t].down = {down.type,         down.data(),   down.rows,   down_bytes,       down.scale,
+                         entries[t].output, down.identity, down.region, down.region_bytes};
+        batch[t].input = entries[t].input;
+        batch[t].output = entries[t].output;
+    }
+    return mnet::detail::compute::ffn_swiglu_batch(batch.data(), count, gate.columns, gate.rows, signs, block_size);
+}
+
 bool Reader::attention(const Quantized& q, const Quantized& k, const Quantized& v, const Quantized& out,
                        const AttentionParams& params, float* k_cache, float* v_cache, float* result) {
     if (q.type != kGgmlQ2_0 || k.type != kGgmlQ2_0 || v.type != kGgmlQ2_0 || out.type != kGgmlQ2_0) {

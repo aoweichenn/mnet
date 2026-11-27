@@ -108,6 +108,18 @@ public:
                                          const float* input, const std::int32_t* signs, std::uint32_t block_size,
                                          float* output);
 
+    // One entry of a batched FFN: same three matrices for every token.
+    struct FfnEntry {
+        const float* input = nullptr;  // n_embd, already Hadamard'ed
+        float* output = nullptr;       // n_embd
+    };
+
+    // Fused FFN for several tokens at once (one submission), so the matvecs of
+    // different tokens overlap. Same per-token arithmetic as ffn_swiglu.
+    [[nodiscard]] static bool ffn_swiglu_batch(const Quantized& gate, const Quantized& up, const Quantized& down,
+                                               const FfnEntry* entries, std::size_t count, const std::int32_t* signs,
+                                               std::uint32_t block_size);
+
     // Geometry and side inputs of the fused attention block; the weights come
     // as q/k/v/out matrices. rope_cos/rope_sin hold rope_dims/2 rotations for
     // the current position. k_cache/v_cache are the f16-valued f32 caches and

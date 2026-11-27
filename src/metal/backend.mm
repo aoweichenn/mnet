@@ -534,6 +534,28 @@ struct AttentionBuffers {
     std::size_t signs_capacity = 0;
 };
 
+// Per-token scratch for a batched FFN: one slab of each kind, indexed by token.
+struct FfnBatchBuffers {
+    id<MTLBuffer> q8 = nil;
+    id<MTLBuffer> scales = nil;
+    id<MTLBuffer> wide = nil;
+    id<MTLBuffer> gate = nil;
+    id<MTLBuffer> up = nil;
+    id<MTLBuffer> act = nil;
+    id<MTLBuffer> act_q8 = nil;
+    id<MTLBuffer> act_scales = nil;
+    id<MTLBuffer> out = nil;
+    std::size_t q8_capacity = 0;
+    std::size_t scales_capacity = 0;
+    std::size_t wide_capacity = 0;
+    std::size_t gate_capacity = 0;
+    std::size_t up_capacity = 0;
+    std::size_t act_capacity = 0;
+    std::size_t act_q8_capacity = 0;
+    std::size_t act_scales_capacity = 0;
+    std::size_t out_capacity = 0;
+};
+
 // Per-call scratch for the gated-delta block (kept across layers).
 struct SsmBuffers {
     id<MTLBuffer> activation = nil;  // raw_input, fp32 (the beta/alpha projection input)
@@ -592,6 +614,7 @@ struct MetalState {
     id<MTLComputePipelineState> ssm_conv_norm_pipeline = nil;
     id<MTLComputePipelineState> ssm_scan_pipeline = nil;
     id<MTLComputePipelineState> ssm_gate_norm_pipeline = nil;
+    FfnBatchBuffers ffn_batch;
     AttentionBuffers attn;
     SsmBuffers ssm;
     std::unordered_map<std::uint64_t, SsmLayer> ssm_layers;
@@ -1597,6 +1620,173 @@ bool ssm_block(const SsmQ2_0Job& job) {
     return true;
 }
 
+// Several tokens' FFN in one submission: every gate matvec, then every up
+// matvec, then each token's swiglu and Hadamard/requantisation, then every down
+// matvec. The per-token arithmetic is identical to ffn_swiglu; running the
+// tokens together lets the independent matvecs of different tokens overlap,
+// which the per-token block cannot because its chain is serial.
+bool ffn_batch_block(const FfnSwigluEntry* entries, std::size_t count, std::uint64_t columns, std::uint64_t hidden,
+                      const std::int32_t* signs, std::uint32_t block_size) {
+    MetalState& s = state();
+    if (!s.ready || s.swiglu_pipeline == nil || s.hadamard_quantize_pipeline == nil || s.fast_f32_pipeline == nil ||
+        s.dequant_pipeline == nil || count == 0U) {
+        return false;
+    }
+    if (block_size < 64U || block_size > 1024U || (block_size & (block_size - 1U)) != 0U ||
+        (columns % 64U) != 0U || (hidden % block_size) != 0U) {
+        return false;
+    }
+    const auto& first = entries[0];
+    if (first.up.rows != hidden || first.gate.rows != hidden || first.down.rows != columns ||
+        first.gate.type != 42U || first.up.type != 42U || first.down.type != 42U) {
+        return false;
+    }
+    const WeightBinding gate_weights = weight_buffer_for(s, first.gate, first.gate.rows, first.gate.row_bytes, true);
+    const WeightBinding up_weights = weight_buffer_for(s, first.up, first.up.rows, first.up.row_bytes, true);
+    const WeightBinding down_weights = weight_buffer_for(s, first.down, first.down.rows, first.down.row_bytes, true);
+    if (gate_weights.buffer == nil || up_weights.buffer == nil || down_weights.buffer == nil) {
+        return false;
+    }
+    id<MTLBuffer> signs_buffer =
+        ensure_buffer(s.device, s.signs_buffer, s.signs_capacity, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
+    if (signs_buffer == nil) {
+        return false;
+    }
+    std::memcpy(signs_buffer.contents, signs, static_cast<std::size_t>(hidden) * sizeof(std::int32_t));
+
+    FfnBatchBuffers& b = s.ffn_batch;
+    const std::size_t n = count;
+    b.q8 = ensure_buffer(s.device, b.q8, b.q8_capacity, n * static_cast<std::size_t>(columns));
+    b.scales = ensure_buffer(s.device, b.scales, b.scales_capacity,
+                             n * static_cast<std::size_t>(columns / 32U) * sizeof(float));
+    // The widened activation is reused for the down matvec, whose input is
+    // hidden wide, so the slab has to cover the larger of the two.
+    const std::uint64_t widest = columns > hidden ? columns : hidden;
+    b.wide = ensure_buffer(s.device, b.wide, b.wide_capacity, n * static_cast<std::size_t>(widest) * sizeof(float));
+    b.gate = ensure_buffer(s.device, b.gate, b.gate_capacity, n * static_cast<std::size_t>(hidden) * sizeof(float));
+    b.up = ensure_buffer(s.device, b.up, b.up_capacity, n * static_cast<std::size_t>(hidden) * sizeof(float));
+    b.act = ensure_buffer(s.device, b.act, b.act_capacity, n * static_cast<std::size_t>(hidden) * sizeof(float));
+    b.act_q8 = ensure_buffer(s.device, b.act_q8, b.act_q8_capacity, n * static_cast<std::size_t>(hidden));
+    b.act_scales = ensure_buffer(s.device, b.act_scales, b.act_scales_capacity,
+                                 n * static_cast<std::size_t>(hidden / 32U) * sizeof(float));
+    b.out = ensure_buffer(s.device, b.out, b.out_capacity, n * static_cast<std::size_t>(columns) * sizeof(float));
+    if (b.q8 == nil || b.scales == nil || b.wide == nil || b.gate == nil || b.up == nil || b.act == nil ||
+        b.act_q8 == nil || b.act_scales == nil || b.out == nil) {
+        return false;
+    }
+    auto* q8_destination = static_cast<std::uint8_t*>(b.q8.contents);
+    auto* scale_destination = static_cast<float*>(b.scales.contents);
+    for (std::size_t t = 0; t < count; ++t) {
+        const auto q80 = mnet::gguf::make_q8_0_blocks(entries[t].input, columns);
+        std::memcpy(q8_destination + t * columns, q80.qs.data(), static_cast<std::size_t>(columns));
+        std::memcpy(scale_destination + t * (columns / 32U), q80.d.data(),
+                    static_cast<std::size_t>(columns / 32U) * sizeof(float));
+    }
+
+    const std::uint32_t block32 = block_size;
+    id<MTLCommandBuffer> command = [s.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    // Widen every token's activation once.
+    for (std::size_t t = 0; t < count; ++t) {
+        [encoder setComputePipelineState:s.dequant_pipeline];
+        [encoder setBuffer:b.q8 offset:static_cast<NSUInteger>(t * columns) atIndex:0];
+        [encoder setBuffer:b.scales offset:static_cast<NSUInteger>(t * (columns / 32U) * sizeof(float)) atIndex:1];
+        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * columns * sizeof(float)) atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(columns, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    }
+    // Every gate, then every up matvec.
+    for (std::size_t pass = 0; pass < 2U; ++pass) {
+        for (std::size_t t = 0; t < count; ++t) {
+            [encoder setComputePipelineState:s.fast_f32_pipeline];
+            // Aliased weights live at an offset inside the mapping buffer.
+            [encoder setBuffer:(pass == 0U ? gate_weights.buffer : up_weights.buffer)
+                         offset:static_cast<NSUInteger>(pass == 0U ? gate_weights.offset : up_weights.offset)
+                        atIndex:0];
+            [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * columns * sizeof(float)) atIndex:1];
+            [encoder setBuffer:(pass == 0U ? b.gate : b.up)
+                         offset:static_cast<NSUInteger>(t * hidden * sizeof(float))
+                        atIndex:3];
+            const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(first.gate.row_bytes);
+            const std::uint32_t blocks32 = static_cast<std::uint32_t>(columns / 64U);
+            const float scale = pass == 0U ? first.gate.scale : first.up.scale;
+            const std::uint32_t lanes = 32U;
+            [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
+            [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
+            [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+            [encoder setBytes:&lanes length:sizeof(lanes) atIndex:7];
+            [encoder dispatchThreadgroups:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        }
+    }
+    // Each token: swiglu, then the signed Hadamard and requantisation.
+    for (std::size_t t = 0; t < count; ++t) {
+        [encoder setComputePipelineState:s.swiglu_pipeline];
+        [encoder setBuffer:b.gate offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
+        [encoder setBuffer:b.up offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
+        [encoder setBuffer:b.act offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:2];
+        const std::uint32_t hidden32 = static_cast<std::uint32_t>(hidden);
+        [encoder setBytes:&hidden32 length:sizeof(hidden32) atIndex:3];
+        [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+
+        [encoder setComputePipelineState:s.hadamard_quantize_pipeline];
+        [encoder setBuffer:b.act offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
+        [encoder setBuffer:signs_buffer offset:0 atIndex:1];
+        [encoder setBuffer:b.act_q8 offset:static_cast<NSUInteger>(t * hidden) atIndex:2];
+        [encoder setBuffer:b.act_scales offset:static_cast<NSUInteger>(t * (hidden / 32U) * sizeof(float)) atIndex:3];
+        [encoder setBytes:&block32 length:sizeof(block32) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(hidden / block_size, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
+    }
+    // Every down matvec.
+    for (std::size_t t = 0; t < count; ++t) {
+        [encoder setComputePipelineState:s.dequant_pipeline];
+        [encoder setBuffer:b.act_q8 offset:static_cast<NSUInteger>(t * hidden) atIndex:0];
+        [encoder setBuffer:b.act_scales offset:static_cast<NSUInteger>(t * (hidden / 32U) * sizeof(float)) atIndex:1];
+        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+
+        [encoder setComputePipelineState:s.fast_f32_pipeline];
+        [encoder setBuffer:down_weights.buffer offset:static_cast<NSUInteger>(down_weights.offset) atIndex:0];
+        [encoder setBuffer:b.wide offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:1];
+        [encoder setBuffer:b.out offset:static_cast<NSUInteger>(t * columns * sizeof(float)) atIndex:3];
+        const std::uint32_t row_bytes32 = static_cast<std::uint32_t>(first.down.row_bytes);
+        const std::uint32_t blocks32 = static_cast<std::uint32_t>(hidden / 64U);
+        const float scale = first.down.scale;
+        const std::uint32_t lanes = 32U;
+        [encoder setBytes:&row_bytes32 length:sizeof(row_bytes32) atIndex:4];
+        [encoder setBytes:&blocks32 length:sizeof(blocks32) atIndex:5];
+        [encoder setBytes:&scale length:sizeof(scale) atIndex:6];
+        [encoder setBytes:&lanes length:sizeof(lanes) atIndex:7];
+        [encoder dispatchThreadgroups:MTLSizeMake(columns, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    }
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted) {
+        return false;
+    }
+    const auto* results = static_cast<const float*>(b.out.contents);
+    for (std::size_t t = 0; t < count; ++t) {
+        std::memcpy(entries[t].output, results + t * columns, static_cast<std::size_t>(columns) * sizeof(float));
+    }
+    if (const char* dir = std::getenv("MNET_FFN_DEBUG_DIR"); dir != nullptr) {
+        const std::string prefix(dir);
+        const auto write = [&](const char* name, const void* data, std::size_t bytes) {
+            if (std::FILE* file = std::fopen((prefix + "/" + name).c_str(), "wb")) {
+                std::fwrite(data, 1, bytes, file);
+                std::fclose(file);
+            }
+        };
+        write("gpu-gate.f32", b.gate.contents, static_cast<std::size_t>(hidden) * sizeof(float));
+        write("gpu-up.f32", b.up.contents, static_cast<std::size_t>(hidden) * sizeof(float));
+        write("gpu-act.f32", b.act.contents, static_cast<std::size_t>(hidden) * sizeof(float));
+        write("gpu-actq8.bin", b.act_q8.contents, static_cast<std::size_t>(hidden));
+        write("gpu-actscale.f32", b.act_scales.contents, static_cast<std::size_t>(hidden / 32U) * sizeof(float));
+        write("gpu-out.f32", b.out.contents, static_cast<std::size_t>(columns) * sizeof(float));
+        write("gpu-wide.f32", b.wide.contents, static_cast<std::size_t>(columns) * sizeof(float));
+    }
+    return true;
+}
+
 bool matvec_q8_0_backend(std::uint32_t type, const std::uint8_t* data, std::uint64_t rows, std::uint64_t columns,
                          std::uint64_t row_bytes, float scale, const std::int8_t* q8, const float* q8_scales,
                          float* out, std::uint64_t identity, const std::uint8_t* region,
@@ -1629,6 +1819,7 @@ void register_platform_backends() {
     set_matvec_q8_0_backend(&matvec_q8_0_backend);
     set_matvec_q8_0_batch_backend(&matvec_batch);
     set_ffn_swiglu_backend(&ffn_swiglu);
+    set_ffn_swiglu_batch_backend(&ffn_batch_block);
     set_attention_backend(&attention);
     set_ssm_backend(&ssm_block);
 }

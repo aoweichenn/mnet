@@ -33,6 +33,11 @@ std::atomic<FfnSwigluFn>& ffn_slot() {
     return slot;
 }
 
+std::atomic<FfnSwigluBatchFn>& ffn_batch_slot() {
+    static std::atomic<FfnSwigluBatchFn> slot{nullptr};
+    return slot;
+}
+
 std::atomic<AttentionQ2_0Fn>& attention_slot() {
     static std::atomic<AttentionQ2_0Fn> slot{nullptr};
     return slot;
@@ -101,6 +106,10 @@ void set_attention_backend(AttentionQ2_0Fn backend) {
 
 void set_ssm_backend(SsmQ2_0Fn backend) {
     ssm_slot().store(backend);
+}
+
+void set_ffn_swiglu_batch_backend(FfnSwigluBatchFn backend) {
+    ffn_batch_slot().store(backend);
 }
 
 namespace {
@@ -217,6 +226,25 @@ bool attention_q2_0(const AttentionQ2_0Job& job) {
         stats().attn_ns +=
             static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
         ++stats().attn_calls;
+    }
+    return handled;
+}
+
+bool ffn_swiglu_batch(const FfnSwigluEntry* entries, std::size_t count, std::uint64_t columns, std::uint64_t hidden,
+                      const std::int32_t* signs, std::uint32_t block_size) {
+    static std::once_flag once;
+    std::call_once(once, [] { register_platform_backends(); });
+    const FfnSwigluBatchFn backend = ffn_batch_slot().load();
+    if (backend == nullptr) {
+        return false;
+    }
+    const auto begin = std::chrono::steady_clock::now();
+    const bool handled = backend(entries, count, columns, hidden, signs, block_size);
+    if (handled) {
+        const auto elapsed = std::chrono::steady_clock::now() - begin;
+        stats().ffn_ns +=
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+        stats().ffn_calls += count;
     }
     return handled;
 }
