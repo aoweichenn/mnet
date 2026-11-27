@@ -650,6 +650,58 @@ kernel void attn_flash(device const float* q         [[buffer(0)]],
         out[tgid * head_dim + first + j] = (acc[j] * inv) * gate[tgid * head_dim + first + j];
     }
 }
+kernel void attn_flash_batch(device const float* q         [[buffer(0)]],
+                       device const float* k_cache   [[buffer(1)]],
+                       device const float* v_cache   [[buffer(2)]],
+                       device const float* gate      [[buffer(3)]],
+                       device float* out             [[buffer(4)]],
+                       constant uint& head_dim       [[buffer(5)]],
+                       constant uint& heads          [[buffer(6)]],
+                       constant uint& heads_kv       [[buffer(7)]],
+                       constant uint& group          [[buffer(8)]],
+                       constant float& attn_scale    [[buffer(9)]],
+                       constant uint& cache_tokens   [[buffer(10)]],
+                       constant uint& hidden         [[buffer(11)]],
+                       uint tgid                     [[threadgroup_position_in_grid]],
+                       uint lane                     [[thread_position_in_threadgroup]]) {
+    const uint elems = head_dim / 32u;
+    // One dispatch for every token: tgid covers (token, head).
+    const uint token = tgid / heads;
+    const uint head = tgid % heads;
+    const uint kv_head = head / group;
+    const uint visible = cache_tokens + token + 1u;
+    device const float* qh = q + (ulong)token * hidden + head * head_dim;
+    device float* outh = out + (ulong)token * hidden + head * head_dim;
+    device const float* gh = gate + (ulong)token * hidden + head * head_dim;
+    float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    const uint first = lane * elems;
+    float max_score = -INFINITY;
+    float sum = 0.0f;
+    for (uint p = 0; p < visible; ++p) {
+        const uint base = (p * heads_kv + kv_head) * head_dim;
+        float dot = 0.0f;
+        for (uint j = 0; j < elems; ++j) {
+            dot = fma(k_cache[base + first + j], qh[first + j], dot);
+        }
+        const float score = simd_sum(dot) * attn_scale;
+        float ms = 1.0f;
+        float vs = 1.0f;
+        if (score > max_score) {
+            ms = exp(max_score - score);
+            max_score = score;
+        } else {
+            vs = exp(score - max_score);
+        }
+        for (uint j = 0; j < elems; ++j) {
+            acc[j] = fma(v_cache[base + first + j], vs, acc[j] * ms);
+        }
+        sum = fma(sum, ms, vs);
+    }
+    const float inv = sum == 0.0f ? 0.0f : 1.0f / sum;
+    for (uint j = 0; j < elems; ++j) {
+        outh[first + j] = (acc[j] * inv) * gh[first + j];
+    }
+}
 // Same as hadamard_quantize, but `sign_blocks` tells it how many Hadamard
 // blocks one token has, so a dispatch can cover several tokens whose slabs are
 // contiguous.
@@ -1333,6 +1385,7 @@ struct MetalState {
     id<MTLComputePipelineState> attn_prep_pipeline = nil;
     id<MTLComputePipelineState> attn_gate_pipeline = nil;
     id<MTLComputePipelineState> attn_flash_pipeline = nil;
+    id<MTLComputePipelineState> attn_flash_batch_pipeline = nil;
     id<MTLComputePipelineState> attn_store_pipeline = nil;
     id<MTLComputePipelineState> ssm_rows_pipeline = nil;
     id<MTLComputePipelineState> ssm_act_pipeline = nil;
@@ -1423,6 +1476,7 @@ void initialise(MetalState& state) {
         state.attn_prep_pipeline = pipeline_for("attn_head_prep");
         state.attn_gate_pipeline = pipeline_for("attn_gate_sigmoid");
         state.attn_flash_pipeline = pipeline_for("attn_flash");
+        state.attn_flash_batch_pipeline = pipeline_for("attn_flash_batch");
         state.attn_store_pipeline = pipeline_for("attn_store_half");
         state.ssm_rows_pipeline = pipeline_for("ssm_rows_dot");
         state.ssm_act_pipeline = pipeline_for("ssm_activation");
@@ -3375,8 +3429,30 @@ bool attention_batch_block(const AttentionQ2_0Job& job, const AttentionBatchEntr
         [encoder dispatchThreads:MTLSizeMake(kv_head_elems, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     }
     // Each token's attention over the cache up to its own position.
-    for (std::size_t t = 0; t < count; ++t) {
-        const std::uint32_t visible = static_cast<std::uint32_t>(job.cache_tokens) + static_cast<std::uint32_t>(t) + 1U;
+    const bool flash_batched = s.attn_flash_batch_pipeline != nil;
+    if (flash_batched) {
+        const std::uint32_t heads32b = static_cast<std::uint32_t>(heads);
+        const std::uint32_t cache32 = static_cast<std::uint32_t>(job.cache_tokens);
+        const std::uint32_t hidden32b = static_cast<std::uint32_t>(hidden);
+        [encoder setComputePipelineState:s.attn_flash_batch_pipeline];
+        [encoder setBuffer:b.q offset:0 atIndex:0];
+        [encoder setBuffer:kv offset:0 atIndex:1];
+        [encoder setBuffer:kv offset:static_cast<NSUInteger>(kv_plane_bytes) atIndex:2];
+        [encoder setBuffer:b.gates offset:0 atIndex:3];
+        [encoder setBuffer:b.attn offset:0 atIndex:4];
+        [encoder setBytes:&head_dim32 length:sizeof(head_dim32) atIndex:5];
+        [encoder setBytes:&heads32b length:sizeof(heads32b) atIndex:6];
+        [encoder setBytes:&heads_kv32 length:sizeof(heads_kv32) atIndex:7];
+        [encoder setBytes:&group32 length:sizeof(group32) atIndex:8];
+        [encoder setBytes:&attn_scale length:sizeof(attn_scale) atIndex:9];
+        [encoder setBytes:&cache32 length:sizeof(cache32) atIndex:10];
+        [encoder setBytes:&hidden32b length:sizeof(hidden32b) atIndex:11];
+        [encoder dispatchThreadgroups:MTLSizeMake(heads * count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    }
+    for (std::size_t t = 0; !flash_batched && t < count; ++t) {
+        const std::uint32_t visible =
+            static_cast<std::uint32_t>(job.cache_tokens) + static_cast<std::uint32_t>(t) + 1U;
         [encoder setComputePipelineState:s.attn_flash_pipeline];
         [encoder setBuffer:b.q offset:static_cast<NSUInteger>(t * hidden * sizeof(float)) atIndex:0];
         [encoder setBuffer:kv offset:0 atIndex:1];
